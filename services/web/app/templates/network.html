@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_parts.html" import sev %}
+{% set title = an.app_label or an.filename_display %}
+{% block title %}Jaringan · {{ title }} · reverse-apk{% endblock %}
+
+{% block header %}{% include "_header.html" %}{% endblock %}
+
+{% set KIND_LABEL = {'url': 'URL', 'domain': 'Domain', 'ip': 'IP', 'path': 'Path API', 'base64': 'Base64', 'hex': 'Hex'} %}
+
+{% block content %}
+<div class="container page">
+  <a class="back-link" href="/">{{ icon('arrow-left', 16) }}<span>Semua APK</span></a>
+  {% include "_analysis_head.html" %}
+
+  {% if analysis_ready %}
+  {% set nc = (summary.get('network_config') or {}) %}
+  {% set net = (summary.get('network') or {}) %}
+  {% set counts_k = strings.counts %}
+  <div class="grid-2">
+    <section class="card" aria-labelledby="stack-title">
+      <h2 id="stack-title">Ringkasan jaringan</h2>
+      <dl class="dl">
+        <div><dt>Library HTTP</dt><dd>
+          {% if net.get('stack') %}{% for k, v in net.stack.items() %}<span class="chip chip-plain">{{ k }}</span> {% endfor %}
+          {% else %}<span class="muted">tidak terdeteksi di kode aplikasi</span>{% endif %}</dd></div>
+        <div><dt>URL / domain / IP</dt><dd class="mono">
+          {{ counts_k.get('url', {}).get('app', 0) }} / {{ counts_k.get('domain', {}).get('app', 0) }} / {{ counts_k.get('ip', {}).get('app', 0) }}
+          <span class="muted">(kode aplikasi)</span></dd></div>
+        <div><dt>Cleartext (HTTP)</dt><dd>
+          {% set n_http = net_findings|selectattr('rule_id', 'equalto', 'network.cleartext_url')|list|length %}
+          {% if n_http %}{{ sev('medium', 'HTTP') }} <span class="muted">{{ n_http }} host tanpa TLS</span>
+          {% else %}<span class="muted">tidak ada URL http:// di kode aplikasi</span>{% endif %}</dd></div>
+        <div><dt>Base URL Retrofit</dt><dd class="mono break">
+          {% if net.get('base_urls') %}{% for u in net.base_urls %}<div>{{ u }}</div>{% endfor %}{% else %}<span class="muted">–</span>{% endif %}</dd></div>
+        <div><dt>Endpoint Retrofit</dt><dd class="mono">{{ (net.get('retrofit') or [])|length }}</dd></div>
+      </dl>
+    </section>
+
+    <section class="card" aria-labelledby="nsc-title">
+      <h2 id="nsc-title">Konfigurasi keamanan jaringan</h2>
+      {% if nc.get('present') %}
+      <dl class="dl">
+        <div><dt>Berkas</dt><dd class="mono break">{% set l = code_url(an.id, nc.file) %}{% if l %}<a href="{{ l }}">{{ nc.file }}</a>{% else %}{{ nc.file }}{% endif %}</dd></div>
+        <div><dt>Cleartext</dt><dd>{% if nc.cleartext_permitted %}{{ sev('medium', 'DIIZINKAN') }}{% elif nc.get('cleartext_domains') %}{{ sev('low', 'SEBAGIAN') }} <span class="mono break">{{ nc.cleartext_domains|join(', ') }}</span>{% else %}<span class="muted">tidak diizinkan secara global</span>{% endif %}</dd></div>
+        <div><dt>CA pengguna</dt><dd>{% if nc.user_certs_trusted %}{{ sev('medium', 'DIPERCAYA') }}{% else %}<span class="muted">tidak dipercaya</span>{% endif %}</dd></div>
+        <div><dt>Pinning</dt><dd>{% if nc.pins %}{{ sev('info', 'ADA') }} <span class="muted">{{ nc.pins|length }} pin</span>{% else %}<span class="muted">tidak ada</span>{% endif %}</dd></div>
+      </dl>
+      {% else %}
+      <p class="muted">Aplikasi tidak memiliki <span class="mono">network_security_config</span>. Perilaku jaringan mengikuti
+        default platform (di targetSdk ≥ 28 cleartext diblokir).</p>
+      {% endif %}
+      {% if net.get('pins') %}
+      <h3 class="sub-title">Pin di kode</h3>
+      <ul class="plain-list">{% for p in net.pins[:10] %}<li class="mono break">{{ p }}</li>{% endfor %}</ul>
+      {% endif %}
+    </section>
+  </div>
+
+  {% if net_findings %}
+  <section class="card" aria-labelledby="nf-title">
+    <div class="card-head"><h2 id="nf-title">Temuan jaringan</h2>
+      <a class="link-quiet" href="/analyses/{{ an.id }}/findings?category=network">Lihat di tab Temuan</a></div>
+    <ul class="plain-list">
+      {% for f in net_findings[:12] %}
+      <li>{{ sev(f.severity, {'high': 'TINGGI', 'medium': 'SEDANG', 'low': 'RENDAH', 'info': 'INFO'}[f.severity]) }}
+        <span>{{ f.title }}</span></li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
+  <section class="card" aria-labelledby="str-title">
+    <div class="card-head">
+      <h2 id="str-title">String yang diekstrak</h2>
+      <p class="muted hint" role="status" aria-atomic="true">{{ strings.rows|length }} baris ditampilkan</p>
+    </div>
+
+    <nav class="subtabs" aria-label="Jenis string">
+      {% for k in kinds %}
+      <a href="?kind={{ k }}&scope={{ scope }}{% if q %}&q={{ q|urlencode }}{% endif %}"{% if k == kind %} aria-current="true"{% endif %}>
+        {{ KIND_LABEL[k] }} <span class="tab-count">{{ counts_k.get(k, {}).get('app' if scope == 'app' else 'all', 0) }}</span></a>
+      {% endfor %}
+    </nav>
+
+    <form method="get" class="filters" role="search" aria-label="Saring string">
+      <input type="hidden" name="kind" value="{{ kind }}">
+      <div class="field field-grow">
+        <label for="n-q">Cari di {{ KIND_LABEL[kind]|lower }}</label>
+        <input id="n-q" name="q" type="search" value="{{ q }}" maxlength="100" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="n-scope">Sumber</label>
+        <select id="n-scope" name="scope">
+          <option value="app"{% if scope == 'app' %} selected{% endif %}>Kode aplikasi</option>
+          <option value="all"{% if scope == 'all' %} selected{% endif %}>Termasuk pustaka</option>
+        </select>
+      </div>
+      <div class="field field-btn"><button type="submit" class="btn btn-ghost">{{ icon('search', 16) }}<span>Terapkan</span></button></div>
+    </form>
+
+    {% if strings.rows %}
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Daftar string">
+      <table class="table table-compact">
+        <thead><tr><th scope="col">Nilai</th><th scope="col" class="num">Muncul</th><th scope="col">Lokasi</th></tr></thead>
+        <tbody>
+          {% for r in strings.rows %}
+          <tr>
+            <th scope="row" class="mono break">
+              {% if r.kind == 'url' and r.scheme in ('http', 'ws') %}{{ sev('medium', r.scheme|upper) }} {% endif %}{{ r.value }}
+              {% if r.is_lib %}<span class="chip chip-plain">pustaka</span>{% endif %}
+            </th>
+            <td class="num mono">{{ r.count }}</td>
+            <td class="mono break">
+              {% set l = code_url(an.id, r.file, r.line) %}
+              {% if l %}<a href="{{ l }}">{{ r.file.rsplit('/', 1)[-1] }}{% if r.line %}:{{ r.line }}{% endif %}</a>{% else %}<span class="muted">–</span>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="muted">Tidak ada {{ KIND_LABEL[kind]|lower }} yang cocok{% if scope == 'app' %} di kode aplikasi (coba “Termasuk pustaka”){% endif %}.</p>
+    {% endif %}
+  </section>
+  {% endif %}
+</div>
+{% endblock %}

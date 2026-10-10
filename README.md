@@ -3,8 +3,9 @@
 Platform web **privat** (satu pengguna) untuk membongkar dan memahami APK Android dengan bantuan AI (DeepSeek).
 Berjalan di VPS sendiri lewat Docker Compose.
 
-> **Status:** M1 (upload & dekompilasi) selesai — upload APK, validasi anti zip-bomb, dedup, pipeline apktool + jadx
-> di runner terisolasi, status live (SSE), dan tampilan manifest. Analisis statis (M2) menyusul.
+> **Status:** M2 (analisis statis & penjelajah kode) selesai — selain upload & dekompilasi (M1), kini ada tab **Temuan**
+> (secret, kripto, jaringan, manifest, tanda tangan), **Jaringan** (URL/domain/IP, network security config), dan **Kode**
+> (pohon + penampil + pencarian ≤ 500 ms). Ringkasan AI (M3) menyusul.
 > Lihat [roadmap](docs/prd/08-roadmap.md).
 
 ## Mulai cepat
@@ -20,6 +21,7 @@ Panduan lengkap untuk VPS: [docs/deploy.md](docs/deploy.md).
 `make help` menampilkan semuanya: `init`, `password`, `up`, `down`, `restart`, `logs`, `ps`, `update`, `runner-selftest`, `doctor`.
 
 Set berkas uji (zip bomb sintetis, APK besar, APK sampah): `scripts/make-test-apks.py --help`.
+APK uji berisi kelemahan yang sengaja ditanam (untuk memverifikasi analisis statis): `python3 scripts/sample-apk/build.py`.
 
 ## Struktur
 ```
@@ -28,6 +30,7 @@ deploy/Caddyfile          HTTPS otomatis + reverse proxy (batas body upload hany
 services/web              FastAPI + Jinja (login, dashboard, upload, detail analisis, SSE)
 services/worker           Worker RQ: orkestrasi pipeline, ringkasan manifest, pemulihan setelah restart
 services/runner           jadx + apktool; TANPA jaringan, read-only, non-root; menerima job lewat spool berkas
+services/runner/analyzer  Analisis statis (indeks FTS5, deteksi secret/kripto/jaringan, sertifikat) — berjalan di runner
 services/rvcore           Kode bersama (skema SQLite, protokol spool, utilitas berkas); hanya stdlib
 design-system/            Token & aturan visual (UI/UX Pro Max)
 docs/prd/                 Dokumen kebutuhan produk per bagian

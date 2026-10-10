@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_parts.html" import sev, notice_box %}
+{% set title = an.app_label or an.filename_display %}
+{% block title %}Temuan · {{ title }} · reverse-apk{% endblock %}
+
+{% block header %}{% include "_header.html" %}{% endblock %}
+
+{% set SEV_LABEL = {'high': 'TINGGI', 'medium': 'SEDANG', 'low': 'RENDAH', 'info': 'INFO'} %}
+{% set CAT_LABEL = {'manifest': 'Manifest', 'signing': 'Tanda tangan', 'network': 'Jaringan', 'secret': 'Secret',
+                    'crypto': 'Kripto', 'webview': 'WebView', 'storage': 'Penyimpanan', 'native': 'Native',
+                    'obfuscation': 'Obfuscation', 'library': 'Library'} %}
+
+{% block content %}
+<div class="container page" data-findings data-analysis-id="{{ an.id }}" data-csrf="{{ csrf }}">
+  <a class="back-link" href="/">{{ icon('arrow-left', 16) }}<span>Semua APK</span></a>
+  {% include "_analysis_head.html" %}
+
+  <section class="card" aria-labelledby="f-title">
+    <div class="card-head">
+      <h2 id="f-title">Temuan analisis statis</h2>
+      <p class="muted hint" role="status" aria-atomic="true">
+        {{ findings|length }} ditampilkan dari {{ counts.total }} temuan
+        {%- if counts.by_severity.get('high') %} · <strong>{{ counts.by_severity.get('high') }} tinggi</strong>{% endif %}
+        {%- if counts.by_severity.get('medium') %} · {{ counts.by_severity.get('medium') }} sedang{% endif %}
+      </p>
+    </div>
+    <p class="muted hint">
+      Tingkat bersifat heuristik, <strong>bukan klaim kerentanan final</strong>: setiap temuan perlu diverifikasi
+      dengan membaca kodenya. Kode pustaka pihak ketiga ditandai dan diturunkan tingkatnya.
+    </p>
+
+    <form method="get" class="filters" role="search" aria-label="Saring temuan">
+      <div class="field">
+        <label for="f-severity">Tingkat</label>
+        <select id="f-severity" name="severity">
+          <option value="">Semua</option>
+          {% for s in severities %}<option value="{{ s }}"{% if s == f_severity %} selected{% endif %}>{{ SEV_LABEL[s] }}{% if counts.by_severity.get(s) %} ({{ counts.by_severity.get(s) }}){% endif %}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="f-category">Kategori</label>
+        <select id="f-category" name="category">
+          <option value="">Semua</option>
+          {% for c in categories %}<option value="{{ c }}"{% if c == f_category %} selected{% endif %}>{{ CAT_LABEL[c] }}{% if counts.by_category.get(c) %} ({{ counts.by_category.get(c) }}){% endif %}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field field-grow">
+        <label for="f-q">Cari judul / aturan</label>
+        <input id="f-q" name="q" type="search" value="{{ f_q }}" maxlength="80" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field field-btn">
+        <button type="submit" class="btn btn-ghost">{{ icon('search', 16) }}<span>Terapkan</span></button>
+        {% if f_severity or f_category or f_q %}<a class="link-quiet" href="/analyses/{{ an.id }}/findings">Reset</a>{% endif %}
+      </div>
+    </form>
+
+    {% if findings %}
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Tabel temuan (gulir horizontal bila perlu)">
+      <table class="table findings-table">
+        <thead>
+          <tr>
+            <th scope="col">Tingkat</th><th scope="col">Kategori</th><th scope="col">Temuan</th>
+            <th scope="col">Lokasi</th><th scope="col" class="num">Jumlah</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for f in findings %}
+          <tr id="f{{ f.id }}">
+            <td>{{ sev(f.severity, SEV_LABEL[f.severity]) }}</td>
+            <td>{{ CAT_LABEL.get(f.category, f.category) }}</td>
+            <td class="f-main">
+              <div class="f-title">{{ f.title }}</div>
+              <div class="muted f-rule mono">{{ f.rule_id }}</div>
+              {% if f.description %}
+              <details class="f-details">
+                <summary>Penjelasan{% if f.evidence|length > 1 %} &amp; {{ f.evidence|length }} bukti{% elif f.evidence %} &amp; bukti{% endif %}</summary>
+                <p>{{ f.description }}</p>
+                {% if f.evidence %}
+                <ul class="evidence">
+                  {% for ev in f.evidence %}
+                  <li>
+                    {% set link = code_url(an.id, ev.file, ev.line) %}
+                    {% if link %}<a class="mono break" href="{{ link }}">{{ ev.file }}{% if ev.line %}:{{ ev.line }}{% endif %}</a>
+                    {% else %}<span class="mono break">{{ ev.file }}{% if ev.line %}:{{ ev.line }}{% endif %}</span>{% endif %}
+                    {% if ev.snippet %}<code class="snippet">{{ ev.snippet }}</code>{% endif %}
+                  </li>
+                  {% endfor %}
+                </ul>
+                {% endif %}
+              </details>
+              {% endif %}
+              {% if f.has_secret %}
+              <div class="reveal-row">
+                <button type="button" class="btn btn-ghost btn-sm" data-reveal
+                        data-url="/analyses/{{ an.id }}/findings/{{ f.id }}/reveal" aria-pressed="false">
+                  {{ icon('search', 14) }}<span>Tampilkan nilai</span>
+                </button>
+                <code class="secret-value" data-secret hidden></code>
+                <span class="muted hint">Tindakan ini dicatat di audit log.</span>
+              </div>
+              {% endif %}
+            </td>
+            <td class="f-loc">
+              {% if f.evidence %}
+              {% set ev = f.evidence[0] %}
+              {% set link = code_url(an.id, ev.file, ev.line) %}
+              {% if link %}<a class="mono break" href="{{ link }}">{{ ev.file.rsplit('/', 1)[-1] }}{% if ev.line %}:{{ ev.line }}{% endif %}</a>
+              {% else %}<span class="mono break">{{ ev.file.rsplit('/', 1)[-1] }}</span>{% endif %}
+              {% else %}<span class="muted">–</span>{% endif %}
+            </td>
+            <td class="num mono">{{ f.occurrences }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% elif analysis_ready %}
+    <p class="muted">
+      {% if f_severity or f_category or f_q %}Tidak ada temuan yang cocok dengan saringan. <a href="/analyses/{{ an.id }}/findings">Reset saringan</a>.
+      {% else %}Tidak ada temuan. Itu <strong>tidak</strong> berarti aplikasi aman: analisis statis hanya mencari pola yang dikenal.{% endif %}
+    </p>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

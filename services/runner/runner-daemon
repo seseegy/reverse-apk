@@ -35,6 +35,7 @@ from rvcore.spool import (
     RESULT_OK,
     RESULT_TIMEOUT,
     RESULT_WARN,
+    STAGE_OUT_DIR,
     TOOL_STAGES,
     Spool,
 )
@@ -74,6 +75,11 @@ def say(msg: str) -> None:
 
 def build_command(stage: str, apk: Path, out: Path, deobf: bool) -> tuple[list[str], list[str]]:
     """(perintah_nyata, argumen_untuk_dicatat). Argumen berasal dari allowlist, bukan dari request."""
+    if stage == "analyze":
+        # Analisis statis berjalan sebagai proses Python terpisah agar bisa dihentikan (grup proses) saat timeout.
+        work = out.parent
+        return (["python3", "-m", "analyzer", "--apk", str(apk), "--work", str(work), "--out", str(out)],
+                ["python3", "-m", "analyzer", "--apk", "<apk>", "--work", "<work>", "--out", "<out>"])
     if stage == "apktool":
         args = ["d", "-f", "-j", "2"]
         return (["apktool", *args, "-o", str(out), str(apk)], ["apktool", *args, "-o", "<out>", "<apk>"])
@@ -82,7 +88,8 @@ def build_command(stage: str, apk: Path, out: Path, deobf: bool) -> tuple[list[s
 
 
 def tool_version(stage: str) -> str | None:
-    return os.environ.get("APKTOOL_VERSION" if stage == "apktool" else "JADX_VERSION")
+    key = {"apktool": "APKTOOL_VERSION", "jadx": "JADX_VERSION", "analyze": "ANALYZER_VERSION"}[stage]
+    return os.environ.get(key)
 
 
 _java_version: str | None = None
@@ -204,7 +211,7 @@ def run_job(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
     except OSError as exc:
         return {"status": RESULT_FAILED, "error_code": "tool_error", "message": f"I/O: {exc}"}
 
-    out = work / stage
+    out = work / STAGE_OUT_DIR[stage]
     logs_dir = work / "logs"
     logs_dir.mkdir(exist_ok=True)
     log_path = logs_dir / f"{stage}.log"
@@ -218,6 +225,8 @@ def run_job(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "HOME": str(home),
         "LANG": "C.UTF-8",
+        "PYTHONPATH": "/app",  # paket `analyzer` dan `rvcore`
+        "PYTHONDONTWRITEBYTECODE": "1",
         # JVM mengabaikan $HOME dan memakai direktori dari /etc/passwd (read-only di sini), sehingga jadx/apktool
         # gagal total. Paksa lewat properti user.home. (apktool: wrapper-nya membaca $HOME; jadx: JADX_OPTS.)
         "JADX_OPTS": f"{os.environ.get('JADX_HEAP', '-Xmx2g')} -Duser.home={home} -Djava.io.tmpdir=/tmp",
@@ -300,6 +309,15 @@ def run_job(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
         return {**result, "status": RESULT_FAILED, "error_code": "tool_error", "message": detail}
 
     reason = last_error_line(log_path)
+    if stage == "analyze":
+        # Kode 0 = sukses penuh; 2 = selesai tetapi ada sub-langkah yang gagal (hasil parsial tetap dipakai).
+        done = (out / "done.json").is_file()
+        if rc == 0 and done:
+            return {**result, "status": RESULT_OK, "message": ""}
+        if rc == 2 and done:
+            return {**result, "status": RESULT_WARN, "message": "sebagian langkah analisis statis gagal; lihat log"}
+        return {**result, "status": RESULT_FAILED, "error_code": "tool_error",
+                "message": reason or f"analisis statis keluar dengan kode {rc}"}
     if stage == "apktool":
         if rc == 0 and (out / "AndroidManifest.xml").is_file():
             return {**result, "status": RESULT_OK, "message": ""}

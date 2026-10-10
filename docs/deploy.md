@@ -72,6 +72,16 @@ Biasanya selesai dalam beberapa detik. Lalu buka **https://apk.revers3.my.id**.
 6. Uji alur utama: buka **Upload**, pilih sebuah APK (centang pernyataan otorisasi), dan pastikan halaman analisis
    menampilkan tahap *Validasi → apktool → jadx → Selesai* secara live.
 
+## Analisis statis (M2)
+Analisis berjalan otomatis setelah jadx (tahap **Analisis statis**, batas `TIMEOUT_ANALYZE`, bawaan 5 menit).
+Kegagalan tahap ini **tidak** membuang hasil apktool/jadx: analisis tetap selesai dengan peringatan.
+
+**Analisis yang dibuat sebelum M2** tidak punya temuan/indeks. Buka tab **Temuan**, **Jaringan**, atau **Kode** pada analisis itu
+lalu tekan **Jalankan analisis statis**: hasil dekompilasi yang ada dipakai ulang (hitungan detik), tidak perlu mendekompilasi lagi.
+
+Indeks pencarian memakan ruang tambahan (terukur: 69 MiB untuk NewPipe dengan 7.095 class / 50 MiB kode, 152 MiB untuk VLC dengan 15.256 class). Secret yang ditemukan di-*mask*
+secara bawaan; tombol **Tampilkan nilai** dicatat di audit log (`secret_reveal`).
+
 ## Upload besar dan Cloudflare
 Batas ukuran APK diatur `MAX_UPLOAD_MB` di `.env` (bawaan 200). Nilai yang sama dipakai aplikasi dan Caddy.
 Jika proxy Cloudflare (awan oranye) dinyalakan, paket gratis membatasi body request ~100 MB sehingga APK yang

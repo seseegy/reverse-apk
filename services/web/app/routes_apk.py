@@ -23,6 +23,7 @@ from rvcore import store
 from rvcore.db import tx
 from rvcore.fsutil import read_json_under, safe_rmtree
 
+from . import codeindex
 from . import status as system_status
 from .apkcheck import ApkRejected, Limits, validate_apk
 from .context import (
@@ -53,6 +54,8 @@ NOTICES: dict[str, tuple[str, str]] = {
     "deleted": ("ok", "APK dan seluruh hasil analisisnya telah dihapus."),
     "enqueue_failed": ("error", "Antrean tidak tersedia saat ini. Coba lagi beberapa saat."),
     "file_missing": ("error", "Berkas APK asli tidak ditemukan di penyimpanan."),
+    "static_started": ("ok", "Analisis statis dijalankan ulang dari hasil dekompilasi yang sudah ada."),
+    "no_outputs": ("error", "Hasil dekompilasi tidak lengkap; gunakan “Analisis ulang” penuh."),
     "not_found": ("error", "Data tidak ditemukan."),
 }
 
@@ -263,6 +266,7 @@ def _detail(analysis_id: int) -> dict[str, Any] | None:
             return None
         snap = store.analysis_snapshot(conn, analysis_id)
         artifacts = [dict(a) for a in store.get_artifacts(conn, analysis_id)]
+        counts = store.finding_counts(conn, analysis_id)
     def _loads(raw: str | None) -> dict[str, Any]:
         try:
             data = json.loads(raw) if raw else {}
@@ -270,7 +274,7 @@ def _detail(analysis_id: int) -> dict[str, Any] | None:
         except ValueError:
             return {}
 
-    return {"an": dict(an), "snap": snap, "artifacts": artifacts,
+    return {"an": dict(an), "snap": snap, "artifacts": artifacts, "counts": counts,
             "versions": _loads(an["tool_versions"]), "options": _loads(an["options"])}
 
 
@@ -294,35 +298,198 @@ def _manifest(analysis_id: int) -> dict[str, Any] | None:
 @router.get("/analyses/{analysis_id}", include_in_schema=False)
 async def analysis_detail(request: Request, analysis_id: AnalysisId,
                           notice: str | None = Query(None, max_length=32)) -> Response:
-    session = current_session(request)
-    if not session:
-        return RedirectResponse("/login", status_code=303)
-    data = await run_in_threadpool(_detail, analysis_id)
-    if data is None:
-        return RedirectResponse("/?notice=not_found", status_code=303)
-    return render(request, "analysis.html", {
-        "user": session.user, "csrf": session.csrf, "nav": "dashboard", "tab": "summary",
-        "notice": _notice(notice), **data,
-    })
+    early, ctx = await _tab_context(request, analysis_id, "summary")
+    if early is not None:
+        return early
+    ctx["notice"] = _notice(notice)
+    return render(request, "analysis.html", ctx)
 
 
 @router.get("/analyses/{analysis_id}/manifest", include_in_schema=False)
 async def analysis_manifest(request: Request, analysis_id: AnalysisId) -> Response:
+    early, ctx = await _tab_context(request, analysis_id, "manifest")
+    if early is not None:
+        return early
+    # Tampilkan manifest hanya bila apktool selesai pada percobaan ini (berkas lama dari percobaan
+    # sebelumnya mungkin masih ada di disk selama analisis menunggu dijalankan ulang).
+    apktool_done = any(x["name"] == "apktool" and x["status"] in (store.OK, store.WARN)
+                       for x in ctx["snap"]["stages"])
+    manifest = await run_in_threadpool(_manifest, analysis_id) if apktool_done else None
+    return render(request, "manifest.html", {**ctx, "manifest": manifest})
+
+
+# ================================================================== M2: temuan, jaringan, kode
+
+
+async def _tab_context(request: Request, analysis_id: int, tab: str):
+    session = current_session(request)
+    if not session:
+        return RedirectResponse("/login", status_code=303), None
+    data = await run_in_threadpool(_detail, analysis_id)
+    if data is None:
+        return RedirectResponse("/?notice=not_found", status_code=303), None
+    analyzing = next((x for x in data["snap"]["stages"] if x["name"] == "analyzing"), None)
+    base = {"user": session.user, "csrf": session.csrf, "nav": "dashboard", "tab": tab, "notice": None,
+            "analysis_ready": bool(analyzing and analyzing["status"] in (store.OK, store.WARN)), **data}
+    return None, base
+
+
+def _findings(analysis_id: int, category: str | None, severity: str | None, q: str | None):
+    with closing(db()) as conn:
+        rows = [dict(r) for r in store.list_findings(conn, analysis_id, category, severity, q)]
+    for r in rows:
+        try:
+            r["evidence"] = json.loads(r["evidence"])
+        except ValueError:
+            r["evidence"] = []
+        r["has_secret"] = bool(r.pop("secret", None))   # nilai mentah TIDAK dikirim ke template
+    return rows
+
+
+@router.get("/analyses/{analysis_id}/findings", include_in_schema=False)
+async def analysis_findings(request: Request, analysis_id: AnalysisId,
+                            category: str = Query("", max_length=20), severity: str = Query("", max_length=10),
+                            q: str = Query("", max_length=80)) -> Response:
+    early, ctx = await _tab_context(request, analysis_id, "findings")
+    if early is not None:
+        return early
+    cat = category if category in store.FINDING_CATEGORIES else None
+    sev = severity if severity in store.FINDING_SEVERITIES else None
+    rows = await run_in_threadpool(_findings, analysis_id, cat, sev, q.strip() or None)
+    return render(request, "findings.html", {
+        **ctx, "findings": rows, "f_category": cat or "", "f_severity": sev or "", "f_q": q.strip(),
+        "categories": store.FINDING_CATEGORIES, "severities": store.FINDING_SEVERITIES[::-1],
+    })
+
+
+def _reveal(analysis_id: int, finding_id: int, ip: str) -> str | None:
+    with closing(db()) as conn:
+        row = store.get_finding(conn, analysis_id, finding_id)
+        if row is None or not row["secret"]:
+            return None
+        with tx(conn):
+            store.audit(conn, "secret_reveal", {"analysis_id": analysis_id, "finding_id": finding_id,
+                                                "rule_id": row["rule_id"], "ip": ip})
+        return row["secret"]
+
+
+@router.post("/analyses/{analysis_id}/findings/{finding_id}/reveal", include_in_schema=False)
+async def finding_reveal(request: Request, analysis_id: AnalysisId, finding_id: ApkId) -> Response:
+    session = current_session(request)
+    if not session:
+        return _json(401, error="Sesi berakhir.")
+    if not tokens_equal(session.csrf, request.headers.get("x-csrf-token")):
+        return _json(403, error="Token keamanan tidak valid.")
+    value = await run_in_threadpool(_reveal, analysis_id, finding_id, client_ip(request))
+    if value is None:
+        return _json(404, error="Tidak ada nilai rahasia untuk temuan ini.")
+    return _json(200, value=value)
+
+
+def _network(analysis_id: int, kind: str | None, q: str | None, scope: str) -> dict[str, Any]:
+    strings = codeindex.list_strings(layout.work, analysis_id, kind, q, scope)
+    summary = codeindex.read_summary(layout.work, analysis_id) or {}
+    with closing(db()) as conn:
+        net_findings = [dict(r) for r in store.list_findings(conn, analysis_id, "network", None, None)]
+    for r in net_findings:
+        r["evidence"] = json.loads(r["evidence"]) if r["evidence"] else []
+        r.pop("secret", None)
+    return {"strings": strings, "summary": summary, "net_findings": net_findings}
+
+
+@router.get("/analyses/{analysis_id}/network", include_in_schema=False)
+async def analysis_network(request: Request, analysis_id: AnalysisId, kind: str = Query("url", max_length=10),
+                           q: str = Query("", max_length=100), scope: str = Query("app", max_length=4)) -> Response:
+    early, ctx = await _tab_context(request, analysis_id, "network")
+    if early is not None:
+        return early
+    kind = kind if kind in codeindex.STRING_KINDS else "url"
+    scope = "all" if scope == "all" else "app"
+    net = await run_in_threadpool(_network, analysis_id, kind, q.strip() or None, scope)
+    return render(request, "network.html", {**ctx, **net, "kinds": codeindex.STRING_KINDS, "kind": kind,
+                                            "q": q.strip(), "scope": scope})
+
+
+@router.get("/analyses/{analysis_id}/code", include_in_schema=False)
+async def analysis_code(request: Request, analysis_id: AnalysisId) -> Response:
+    early, ctx = await _tab_context(request, analysis_id, "code")
+    if early is not None:
+        return early
+    has_index = await run_in_threadpool(codeindex.index_exists, layout.work, analysis_id)
+    roots = [{"id": k, "label": v[0]} for k, v in codeindex.ROOTS.items()]
+    return render(request, "code.html", {**ctx, "has_index": has_index, "roots": roots})
+
+
+def _api_guard(request: Request):
+    if not current_session(request):
+        return _json(401, error="Sesi berakhir. Muat ulang halaman.")
+    return None
+
+
+@router.get("/analyses/{analysis_id}/code/tree", include_in_schema=False)
+async def code_tree(request: Request, analysis_id: AnalysisId, root: str = Query("java", max_length=10),
+                    path: str = Query("", max_length=600)) -> Response:
+    if (bad := _api_guard(request)) is not None:
+        return bad
+    data = await run_in_threadpool(codeindex.list_dir, layout.work, analysis_id, root, path)
+    return _json(404, error="Tidak ditemukan.") if data is None else _json(200, **data)
+
+
+@router.get("/analyses/{analysis_id}/code/file", include_in_schema=False)
+async def code_file(request: Request, analysis_id: AnalysisId, root: str = Query("java", max_length=10),
+                    path: str = Query("", max_length=600)) -> Response:
+    if (bad := _api_guard(request)) is not None:
+        return bad
+    data = await run_in_threadpool(codeindex.read_file, layout.work, analysis_id, root, path)
+    return _json(404, error="Berkas tidak ditemukan.") if data is None else _json(200, **data)
+
+
+@router.get("/analyses/{analysis_id}/code/search", include_in_schema=False)
+async def code_search(request: Request, analysis_id: AnalysisId, q: str = Query("", max_length=120),
+                      scope: str = Query("all", max_length=4)) -> Response:
+    if (bad := _api_guard(request)) is not None:
+        return bad
+    res = await run_in_threadpool(codeindex.search_code, layout.work, analysis_id, q.strip(),
+                                  "app" if scope == "app" else "all")
+    return _json(200, **res)
+
+
+def _restart_static(analysis_id: int, ip: str) -> str:
+    with closing(db()) as conn:
+        an = store.get_analysis(conn, analysis_id)
+        if an is None:
+            return "not_found"
+        stages = {x["name"]: x["status"] for x in store.get_stages(conn, analysis_id)}
+        if an["status"] in store.ACTIVE:
+            return "busy"
+        if stages.get("apktool") not in (store.OK, store.WARN) or stages.get("jadx") not in (store.OK, store.WARN):
+            return "no_outputs"
+        if not store.reset_for_retry(conn, analysis_id, only_stage="analyzing"):
+            return "busy"
+        with tx(conn):
+            store.audit(conn, "analysis_rerun_static", {"analysis_id": analysis_id, "ip": ip})
+    return "ok"
+
+
+@router.post("/analyses/{analysis_id}/static", include_in_schema=False)
+async def analysis_static(request: Request, analysis_id: AnalysisId,
+                          csrf: str = Form("", max_length=256)) -> Response:
     session = current_session(request)
     if not session:
         return RedirectResponse("/login", status_code=303)
-    data = await run_in_threadpool(_detail, analysis_id)
-    if data is None:
-        return RedirectResponse("/?notice=not_found", status_code=303)
-    # Tampilkan manifest hanya bila apktool selesai pada percobaan ini (berkas lama dari percobaan
-    # sebelumnya mungkin masih ada di disk selama analisis menunggu dijalankan ulang).
-    apktool_done = any(s["name"] == "apktool" and s["status"] in (store.OK, store.WARN)
-                       for s in data["snap"]["stages"])
-    manifest = await run_in_threadpool(_manifest, analysis_id) if apktool_done else None
-    return render(request, "manifest.html", {
-        "user": session.user, "csrf": session.csrf, "nav": "dashboard", "tab": "manifest",
-        "notice": None, "manifest": manifest, **data,
-    })
+    if not _csrf_ok(session, csrf):
+        return PlainTextResponse("CSRF token tidak valid", status_code=403)
+    result = await run_in_threadpool(_restart_static, analysis_id, client_ip(request))
+    if result != "ok":
+        target = "/" if result == "not_found" else f"/analyses/{analysis_id}"
+        return RedirectResponse(f"{target}?notice={result}", status_code=303)
+    try:
+        await run_in_threadpool(enqueue_analysis, redis_conn, analysis_id, settings.job_timeout, "analyzing")
+    except redis.RedisError:
+        log.exception("gagal mengantrekan analisis statis %s", analysis_id)
+        await run_in_threadpool(_mark_enqueue_failed, analysis_id)
+        return RedirectResponse(f"/analyses/{analysis_id}?notice=enqueue_failed", status_code=303)
+    return RedirectResponse(f"/analyses/{analysis_id}?notice=static_started", status_code=303)
 
 
 # ================================================================== status live

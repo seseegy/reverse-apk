@@ -86,6 +86,28 @@ _MIGRATIONS: list[str] = [
         detail TEXT NOT NULL DEFAULT '{}'
     );
     """,
+    # --- v2 (M2): temuan analisis statis + tahap pipeline "analyzing"
+    """
+    CREATE TABLE finding (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        analysis_id INTEGER NOT NULL REFERENCES analysis(id) ON DELETE CASCADE,
+        category    TEXT    NOT NULL,
+        severity    TEXT    NOT NULL,
+        rule_id     TEXT    NOT NULL,
+        title       TEXT    NOT NULL,
+        description TEXT    NOT NULL DEFAULT '',
+        evidence    TEXT    NOT NULL DEFAULT '[]',
+        secret      TEXT,
+        occurrences INTEGER NOT NULL DEFAULT 1,
+        source      TEXT    NOT NULL DEFAULT 'static',
+        created_at  REAL    NOT NULL
+    );
+    CREATE INDEX finding_analysis ON finding(analysis_id, severity);
+
+    INSERT INTO analysis_stage (analysis_id, name, position, status, detail)
+        SELECT id, 'analyzing', 3, 'skipped', 'dibuat sebelum M2 - jalankan analisis statis untuk mengisinya'
+        FROM analysis
+    """,
 ]
 
 SCHEMA_VERSION = len(_MIGRATIONS)

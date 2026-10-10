@@ -13,7 +13,7 @@ Urutan kerja disusun supaya tiap milestone bisa dicoba langsung di VPS dan membe
 - UI: dashboard, upload, status job, tampilan manifest dasar.
 - **Selesai bila:** upload APK → artefak `jadx/` dan `apktool/` tersimpan, status live tampil, job gagal tertangani.
 
-## M2 — Analisis statis & penjelajah kode
+## M2 — Analisis statis & penjelajah kode ✅ selesai
 - 03: manifest, sertifikat, string, endpoint, secret, crypto, obfuscation, indeks FTS.
 - UI: tab Temuan, Jaringan, Kode (pohon + penampil + pencarian).
 - **Selesai bila:** APK uji dengan secret/flag berisiko menghasilkan temuan yang benar dan bisa dicari ≤ 500 ms.

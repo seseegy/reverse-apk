@@ -25,18 +25,7 @@
 <div class="container page">
   <a class="back-link" href="/">{{ icon('arrow-left', 16) }}<span>Semua APK</span></a>
 
-  <section class="card head-card" aria-labelledby="an-title">
-    <div class="head-main">
-      <h1 id="an-title" class="break">{{ title }}</h1>
-      <p class="mono muted break">{{ an.package or '(paket belum diketahui)' }}</p>
-    </div>
-    <div class="head-side">{{ status_badge(snap.status) }}</div>
-  </section>
-
-  <nav class="tabs" aria-label="Bagian analisis">
-    <a href="/analyses/{{ an.id }}">Ringkasan</a>
-    <a href="/analyses/{{ an.id }}/manifest" aria-current="page">Manifest</a>
-  </nav>
+  {% include "_analysis_head.html" %}
 
   {% if not manifest %}
   <section class="card empty" aria-labelledby="nm-title">

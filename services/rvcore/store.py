@@ -27,7 +27,15 @@ PIPELINE_STAGES: list[tuple[str, str]] = [
     ("validating", "Validasi"),
     ("apktool", "apktool"),
     ("jadx", "jadx"),
+    ("analyzing", "Analisis statis"),
 ]
+
+# Kategori & tingkat temuan yang diterima dari runner (isi berkas tak tepercaya -> divalidasi saat impor).
+FINDING_CATEGORIES = (
+    "manifest", "signing", "network", "secret", "crypto", "webview", "storage", "native", "obfuscation", "library",
+)
+FINDING_SEVERITIES = ("info", "low", "medium", "high")
+SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2, "info": 3}
 STAGE_LABELS = dict(PIPELINE_STAGES)
 
 # Teks UI (satu sumber untuk server-render dan pembaruan live).
@@ -262,6 +270,62 @@ def replace_artifacts(conn: sqlite3.Connection, analysis_id: int,
         )
 
 
+# ------------------------------------------------------------------ temuan
+def replace_findings(conn: sqlite3.Connection, analysis_id: int, findings: list[dict[str, Any]],
+                     source: str = "static") -> int:
+    """Ganti seluruh temuan sumber `source`. Setiap temuan sudah divalidasi pemanggil. Mengembalikan jumlahnya."""
+    ts = now()
+    with tx(conn):
+        conn.execute("DELETE FROM finding WHERE analysis_id = ? AND source = ?", (analysis_id, source))
+        conn.executemany(
+            "INSERT INTO finding (analysis_id, category, severity, rule_id, title, description, evidence, "
+            "                     secret, occurrences, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (analysis_id, f["category"], f["severity"], f["rule_id"], f["title"], f.get("description", ""),
+                 json.dumps(f.get("evidence", []), ensure_ascii=False), f.get("secret"),
+                 int(f.get("occurrences", 1)), source, ts)
+                for f in findings
+            ],
+        )
+    return len(findings)
+
+
+def list_findings(conn: sqlite3.Connection, analysis_id: int, category: str | None = None,
+                  severity: str | None = None, q: str | None = None) -> list[sqlite3.Row]:
+    where, params = ["analysis_id = ?"], [analysis_id]
+    if category:
+        where.append("category = ?")
+        params.append(category)
+    if severity:
+        where.append("severity = ?")
+        params.append(severity)
+    if q:
+        where.append("(lower(title) LIKE ? ESCAPE '\\' OR lower(description) LIKE ? ESCAPE '\\' "
+                     "OR lower(rule_id) LIKE ? ESCAPE '\\')")
+        pat = f"%{_like_escape(q.strip().lower())}%"
+        params += [pat, pat, pat]
+    return conn.execute(
+        "SELECT * FROM finding WHERE " + " AND ".join(where) + " ORDER BY CASE severity "
+        "WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END, category, id",
+        params,
+    ).fetchall()
+
+
+def finding_counts(conn: sqlite3.Connection, analysis_id: int) -> dict[str, Any]:
+    """{'total': n, 'by_severity': {...}, 'by_category': {...}} untuk ringkasan & filter."""
+    by_sev = {r[0]: r[1] for r in conn.execute(
+        "SELECT severity, COUNT(*) FROM finding WHERE analysis_id = ? GROUP BY severity", (analysis_id,))}
+    by_cat = {r[0]: r[1] for r in conn.execute(
+        "SELECT category, COUNT(*) FROM finding WHERE analysis_id = ? GROUP BY category", (analysis_id,))}
+    return {"total": sum(by_sev.values()), "by_severity": by_sev, "by_category": by_cat}
+
+
+def get_finding(conn: sqlite3.Connection, analysis_id: int, finding_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM finding WHERE id = ? AND analysis_id = ?", (finding_id, analysis_id)
+    ).fetchone()
+
+
 # ------------------------------------------------------------------ aksi pengguna (web)
 def request_cancel(conn: sqlite3.Connection, analysis_id: int) -> str:
     """'cancelled' (antre, langsung batal) | 'requested' (sedang jalan) | 'noop'."""
@@ -286,9 +350,32 @@ def request_cancel(conn: sqlite3.Connection, analysis_id: int) -> str:
         return "requested" if cur.rowcount == 1 else "noop"
 
 
-def reset_for_retry(conn: sqlite3.Connection, analysis_id: int) -> bool:
-    """Siapkan analisis yang sudah berakhir untuk dijalankan ulang. False bila masih aktif."""
+def reset_for_retry(conn: sqlite3.Connection, analysis_id: int, only_stage: str | None = None) -> bool:
+    """Siapkan analisis yang sudah berakhir untuk dijalankan ulang. False bila masih aktif.
+
+    only_stage: ulangi HANYA tahap itu (hasil apktool/jadx dipertahankan; FR-2.9). Tahap lain tidak disentuh.
+    """
     ts = now()
+    if only_stage is not None:
+        if only_stage != "analyzing":
+            raise ValueError("hanya tahap 'analyzing' yang bisa diulang sendiri")
+        with tx(conn):
+            cur = conn.execute(
+                "UPDATE analysis SET status = ?, attempt = attempt + 1, cancel_requested = 0, "
+                "  error_code = NULL, error = NULL, started_at = NULL, finished_at = NULL, "
+                "  created_at = ?, updated_at = ? WHERE id = ? AND status IN (?, ?, ?)",
+                (QUEUED, ts, ts, analysis_id, DONE, FAILED, CANCELLED),
+            )
+            if cur.rowcount != 1:
+                return False
+            conn.execute(
+                "UPDATE analysis_stage SET status = ?, detail = NULL, started_at = NULL, finished_at = NULL "
+                "WHERE analysis_id = ? AND name = ?",
+                (PENDING, analysis_id, only_stage),
+            )
+            conn.execute("DELETE FROM finding WHERE analysis_id = ?", (analysis_id,))
+            conn.execute("DELETE FROM analysis_log WHERE analysis_id = ? AND stage = ?", (analysis_id, only_stage))
+            return True
     with tx(conn):
         cur = conn.execute(
             "UPDATE analysis SET status = ?, attempt = attempt + 1, cancel_requested = 0, "
@@ -306,6 +393,7 @@ def reset_for_retry(conn: sqlite3.Connection, analysis_id: int) -> bool:
         )
         conn.execute("DELETE FROM analysis_log WHERE analysis_id = ?", (analysis_id,))
         conn.execute("DELETE FROM artifact WHERE analysis_id = ?", (analysis_id,))
+        conn.execute("DELETE FROM finding WHERE analysis_id = ?", (analysis_id,))
         return True
 
 

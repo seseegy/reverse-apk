@@ -8,11 +8,14 @@ from datetime import datetime, timezone
 from rq import get_current_job
 
 
-def run_analysis(analysis_id: int) -> None:
-    """Jalankan pipeline untuk satu analisis (diantrekan oleh web dengan nama bertitik ini)."""
+def run_analysis(analysis_id: int, only_stage: str | None = None) -> None:
+    """Jalankan pipeline untuk satu analisis (diantrekan oleh web dengan nama bertitik ini).
+
+    only_stage="analyzing": ulangi hanya analisis statis memakai hasil dekompilasi yang ada.
+    """
     from pipeline import run_analysis as _run  # impor lambat: selftest tidak perlu memuat pipeline
 
-    _run(int(analysis_id))
+    _run(int(analysis_id), only_stage)
 
 
 def selftest() -> dict:

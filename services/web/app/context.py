@@ -130,6 +130,22 @@ def fmt_hms(ts: float | None) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%M:%S")
 
 
+def code_url(analysis_id: int, file: str | None, line: int | None = None) -> str | None:
+    """Tautan ke penampil kode untuk path relatif terhadap work/<id>/ (mis. 'jadx/sources/com/x/A.java')."""
+    from urllib.parse import quote
+
+    if not file:
+        return None
+    for prefix, root in (("jadx/sources/", "java"), ("jadx/resources/", "jres"), ("apktool/", "smali")):
+        if file.startswith(prefix):
+            q = f"?root={root}&path={quote(file[len(prefix):], safe='/')}"
+            if line:
+                q += f"&line={int(line)}"
+            return f"/analyses/{int(analysis_id)}/code{q}"
+    return None
+
+
+templates.env.globals["code_url"] = code_url
 templates.env.filters["bytes"] = fmt_bytes
 templates.env.filters["duration"] = fmt_duration
 templates.env.filters["isoutc"] = iso_utc
