@@ -23,7 +23,7 @@ from rvcore import store
 from rvcore.db import tx
 from rvcore.fsutil import read_json_under, safe_rmtree
 
-from . import codeindex
+from . import codeindex, decompile
 from . import status as system_status
 from .ai import budget as ai_budget
 from .ai import chat as ai_chat
@@ -306,7 +306,17 @@ async def analysis_detail(request: Request, analysis_id: AnalysisId,
     if early is not None:
         return early
     ctx["notice"] = _notice(notice)
+    ctx["decompile"] = await run_in_threadpool(decompile.build_view, layout.work, analysis_id)
     return render(request, "analysis.html", ctx)
+
+
+@router.get("/analyses/{analysis_id}/decompile/errors", include_in_schema=False)
+async def decompile_errors(request: Request, analysis_id: AnalysisId) -> Response:
+    """Daftar lengkap method yang gagal didekompilasi (JSON). Untuk tombol 'Tampilkan semua' dan unduhan."""
+    if (bad := _api_guard(request)) is not None:
+        return bad
+    errors = await run_in_threadpool(decompile.read_errors, layout.work, analysis_id)
+    return _json(200, errors=errors, total=len(errors), categories={k: v["label"] for k, v in decompile.CATEGORIES.items()})
 
 
 @router.get("/analyses/{analysis_id}/manifest", include_in_schema=False)

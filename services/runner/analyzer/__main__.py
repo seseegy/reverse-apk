@@ -16,7 +16,7 @@ from pathlib import Path
 
 from rvcore.fsutil import atomic_write_json
 
-from . import VERSION, callgraph
+from . import VERSION, callgraph, jadxlog
 from .common import Findings
 from .index import IndexWriter
 from .scan import Scanner
@@ -76,6 +76,26 @@ def main() -> int:
         log(f"E: call graph gagal: {type(exc).__name__}: {exc}")
         traceback.print_exc()
 
+    # --- 1c. laporan kualitas dekompilasi (rincian method yang gagal di jadx). Tidak fatal: tanpa ini hanya kartu laporan yang kosong.
+    try:
+        parsed = jadxlog.parse_log(work / "logs" / "jadx.log")
+        if parsed["available"] and stats is not None:
+            code_sum = {"jadx_error_count": parsed["jadx_error_count"], "jadx_units": parsed["jadx_total_classes"],
+                        "methods_listed": len(parsed["entries"]), "detail": parsed["detail"], "by_type": parsed["by_type"],
+                        "by_category": parsed["by_category"], "unattributed": parsed["unattributed"],
+                        "list_truncated": parsed["truncated"], "log_truncated": parsed["log_truncated"],
+                        "warn_markers": dict(sorted(stats.warn_markers.items(), key=lambda kv: -kv[1])[:30]),
+                        "warn_by_severity": {sev: stats.warn_files_by_sev.get(sev, 0)
+                                             for sev in ("hilang", "struktur", "tipe", "kosmetik", "lainnya")},
+                        "files_with_warn": stats.files_with_warn}
+            v, pct = jadxlog.verdict(parsed["jadx_error_count"] or 0, parsed["jadx_total_classes"], stats.smali_only_files, stats.app_classes)
+            code_sum["verdict"], code_sum["failed_pct"] = v, pct
+            summary["decompile"] = code_sum
+            jadxlog.write_report(out, parsed)
+            log(f"I: Laporan dekompilasi: {parsed['jadx_error_count'] or 0} error jadx, {len(parsed['entries'])} method terdaftar, penilaian {v}")
+    except Exception as exc:  # noqa: BLE001
+        log(f"W: laporan dekompilasi gagal dibuat: {type(exc).__name__}: {exc}")
+
     # --- 2. sertifikat penanda tangan
     try:
         log("I: Membaca tanda tangan & sertifikat…")
@@ -125,7 +145,8 @@ def main() -> int:
             findings.add(category="obfuscation", severity="info", rule_id="coverage.decompile_gaps",
                          title=f"{stats.methods_not_decompiled} method di {stats.decompile_failures} class gagal didekompilasi jadx",
                          key="gaps", description="Isi method tersebut tidak muncul di Java. String di dalamnya tetap "
-                                                 "dipindai dari smali, tetapi logikanya perlu dibaca di tab Kode (smali).")
+                                                 "dipindai dari smali, tetapi logikanya perlu dibaca di tab Kode (smali). "
+                                                 "Daftar method, penyebab, dan tingkat dampaknya ada di kartu Hasil dekompilasi (Ringkasan).")
     if findings.dropped:
         log(f"W: {findings.dropped} temuan tambahan dibuang (melebihi batas)")
     summary["findings_total"] = len(findings)

@@ -23,7 +23,7 @@ from rvcore import store
 
 from . import redact as redact_mod
 from .config import AIConfig
-from .. import callgraph, codeindex
+from .. import callgraph, codeindex, decompile
 
 
 class ToolError(Exception):
@@ -141,6 +141,7 @@ def get_overview(ctx: ToolContext, args: dict) -> dict:
         "library_native": list(((summary.get("native") or {}).get("libs") or {}).keys()),
         "jaringan": {"library_http": list(((summary.get("network") or {}).get("stack") or {}).keys()),
                      "base_url": (summary.get("network") or {}).get("base_urls")},
+        "dekompilasi": decompile.ai_summary(ctx.work, ctx.analysis_id),
         "call_graph": {"complete": "lengkap", "partial": "parsial (dipotong)", "failed": "gagal", None: "belum ada: jalankan ulang "
                        "analisis statis untuk mengaktifkan find_xrefs/find_callees/find_paths/class_info"
                        }.get(callgraph.graph_state(ctx.work, ctx.analysis_id)),

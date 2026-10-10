@@ -454,6 +454,43 @@
     });
   });
 
+  // Kartu "Hasil dekompilasi": saring daftar method di sisi klien, dan muat daftar lengkap bila dipotong. Semua teks lewat textContent.
+  (function initDecompile() {
+    var root = $("[data-decompile]");
+    if (!root) return;
+    var input = $("[data-dq-filter]", root), body = $("[data-dq-rows]", root), count = $("[data-dq-count]", root), allBtn = $("[data-dq-all]", root);
+    if (!input || !body) return;
+    var total = parseInt((count.textContent.split("dari")[1] || "").replace(/[^\d]/g, ""), 10) || body.children.length;
+    function apply() {
+      var q = input.value.trim().toLowerCase(), shown = 0;
+      $all("tr", body).forEach(function (tr) {
+        var hit = !q || tr.textContent.toLowerCase().indexOf(q) >= 0;
+        tr.hidden = !hit; if (hit) shown++;
+      });
+      count.textContent = shown + " dari " + total.toLocaleString("id-ID") + (q ? " (disaring)" : "");
+    }
+    input.addEventListener("input", apply);
+    if (allBtn) allBtn.addEventListener("click", function () {
+      allBtn.disabled = true; allBtn.textContent = "Memuat…";
+      fetch("/analyses/" + encodeURIComponent(root.getAttribute("data-analysis-id")) + "/decompile/errors", { credentials: "same-origin", cache: "no-store" })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          if (!res.ok) { allBtn.textContent = res.d.error || "Gagal memuat"; allBtn.disabled = false; return; }
+          while (body.firstChild) body.removeChild(body.firstChild);
+          res.d.errors.forEach(function (e) {
+            var tr = document.createElement("tr"); tr.setAttribute("data-cat", e.category);
+            var a1 = document.createElement("td"); a1.className = "mono break"; a1.textContent = e.method;
+            var a2 = document.createElement("td"); a2.textContent = e.type;
+            if (e["pass"]) { var ps = document.createElement("span"); ps.className = "muted hint"; ps.textContent = " · " + e["pass"]; a2.appendChild(ps); }
+            var a3 = document.createElement("td"); a3.className = "muted break"; a3.textContent = e.reason;
+            tr.appendChild(a1); tr.appendChild(a2); tr.appendChild(a3); body.appendChild(tr);
+          });
+          total = res.d.total; allBtn.parentNode.removeChild(allBtn); apply();
+        })
+        .catch(function () { allBtn.textContent = "Koneksi gagal. Coba lagi"; allBtn.disabled = false; });
+    });
+  })();
+
   // Tab bisa digulir di layar sempit: pusatkan tab aktif agar pengguna langsung tahu sedang di bagian mana.
   (function centerActiveTab() {
     var tabs = $(".tabs"), cur = tabs && $("a[aria-current='page']", tabs);

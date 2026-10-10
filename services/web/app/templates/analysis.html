@@ -61,6 +61,111 @@
     </ol>
   </section>
 
+  {% if decompile and decompile.has_anything %}
+  {% set d = decompile %}
+  {% set tone_icon = {'ok': 'check-circle', 'warn': 'alert-triangle', 'bad': 'x-circle'} %}
+  <section class="card dq" aria-labelledby="dq-title" data-decompile data-analysis-id="{{ an.id }}">
+    <div class="card-head">
+      <h2 id="dq-title">Hasil dekompilasi</h2>
+      <span class="dq-badge dq-{{ d.tone }}">{{ icon(tone_icon[d.tone], 16) }}<span>{{ d.label }}</span></span>
+    </div>
+
+    <p class="dq-lead">
+      {% if d.jadx_error_count %}
+      jadx melaporkan <strong>{{ '{:,}'.format(d.jadx_error_count) }} error</strong>{% if d.methods_listed %}
+      pada <strong>{{ '{:,}'.format(d.methods_listed) }} method</strong>{% endif %}{% if d.jadx_units %}
+      (<span class="mono">{{ '%.2f'|format(d.failed_pct) }}%</span> dari {{ '{:,}'.format(d.jadx_units) }} unit kerja jadx){% endif %}.
+      Class lainnya berhasil didekompilasi (sebagian dengan penanda peringatan, lihat "Mutu kode hasil" di bawah).
+      {% else %}jadx tidak melaporkan error.{% endif %}
+      {% if d.smali_only %}<strong>{{ '{:,}'.format(d.smali_only) }} class</strong> aplikasi tidak dihasilkan jadx sama sekali (hanya ada sebagai smali).{% endif %}
+      Bagian yang gagal tetap bisa dibaca sebagai <strong>smali</strong> di tab Kode, dan asisten AI otomatis memakai smali untuk bagian itu.
+    </p>
+    <p class="hint muted">{{ d.blurb }} Beberapa error seperti ini umum pada aplikasi Kotlin/Compose atau yang melalui R8; jumlah kecil bukan tanda APK rusak.</p>
+
+    {% if d.no_detail %}
+    <div class="alert alert-info" role="status">{{ icon('info') }}
+      <span>Log dekompilasi analisis ini dibuat <em>tanpa rincian</em> (hanya jumlah), jadi daftar method tidak tersedia. Klik <strong>Analisis ulang</strong>
+        (penuh) untuk menjalankan jadx lagi dengan pencatatan rinci.</span></div>
+    {% endif %}
+    {% if d.log_truncated %}
+    <div class="alert alert-warn" role="status">{{ icon('alert-triangle') }}<span>Log jadx terlalu besar dan dipotong; daftar di bawah mungkin tidak lengkap.</span></div>
+    {% endif %}
+
+    <dl class="dq-stats">
+      <div><dt>Error jadx</dt><dd class="mono">{{ '{:,}'.format(d.jadx_error_count or 0) }}</dd><dd class="dq-cap">baris error di log (1 method bisa lebih dari 1)</dd></div>
+      <div><dt>Method terdaftar</dt><dd class="mono">{{ '{:,}'.format(d.methods_listed) }}</dd><dd class="dq-cap">method unik yang gagal, ada di daftar di bawah</dd></div>
+      <div><dt>Method tanpa Java</dt><dd class="mono">{{ '{:,}'.format(d.methods_not_decompiled) }}</dd><dd class="dq-cap">isinya diganti "Method not decompiled"</dd></div>
+      <div><dt>Class hanya smali</dt><dd class="mono">{{ '{:,}'.format(d.smali_only) }}</dd><dd class="dq-cap">tidak ada berkas Java sama sekali</dd></div>
+      <div><dt>Berkas bertanda peringatan</dt><dd class="mono">{{ '{:,}'.format(d.files_with_warn) }}</dd><dd class="dq-cap">Java ada, tetapi memuat komentar JADX WARN</dd></div>
+    </dl>
+
+    {% if d.categories %}
+    <h3 class="dq-h">Kenapa gagal?</h3>
+    <ul class="plain-list dq-cats">
+      {% set total_cat = d.categories|sum(attribute='n') or 1 %}
+      {% for c in d.categories %}
+      <li class="dq-cat">
+        <div class="dq-cat-head"><strong>{{ c.label }}</strong><span class="mono muted">{{ c.n }} method</span></div>
+        <div class="dq-bar" aria-hidden="true"><span style="width: {{ (c.n / total_cat * 100)|round(1) }}%"></span></div>
+        <p class="dq-cat-body">{{ c.arti }}</p>
+        <p class="dq-cat-fix"><span class="dq-tag">Yang dilakukan</span> {{ c.solusi }}</p>
+        {% if c.examples %}<p class="dq-ex mono muted break">Contoh: {% for e in c.examples %}{{ e.short }}{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% if d.unattributed %}<p class="hint muted">Tanpa nama method: {% for k, n in d.unattributed.items() %}{{ k }} ({{ n }}){% if not loop.last %}, {% endif %}{% endfor %}.</p>{% endif %}
+    {% endif %}
+
+    {% if d.markers %}
+    <h3 class="dq-h">Mutu kode hasil (penanda di dalam Java)</h3>
+    <p class="hint muted">jadx menyisipkan komentar <span class="mono">/* JADX WARN */</span> di kode yang berhasil dibuat tetapi mutunya dipertanyakan.</p>
+    <ul class="plain-list dq-markers">
+      {% for m in d.markers %}
+      <li class="dq-marker dq-{{ m.tone }}"><span class="dq-tag">{{ m.label }}</span><span class="mono">{{ '{:,}'.format(m.n) }} berkas</span><span class="dq-marker-body">{{ m.arti }}</span></li>
+      {% endfor %}
+    </ul>
+    {% if d.warn_markers %}
+    <details class="dq-more"><summary>Rincian jenis penanda ({{ d.warn_markers|length }})</summary>
+      <ul class="plain-list">{% for k, n in d.warn_markers.items() %}<li><span class="mono">{{ '{:,}'.format(n) }}</span> {{ k }}</li>{% endfor %}</ul>
+    </details>
+    {% endif %}
+    {% endif %}
+
+    {% if d.errors %}
+    <h3 class="dq-h" id="dq-list-title">Method yang gagal didekompilasi</h3>
+    <div class="dq-tools">
+      <label for="dq-filter" class="sr-only">Saring daftar method</label>
+      <input id="dq-filter" type="search" placeholder="Saring: nama class, method, atau jenis error…" autocomplete="off" data-dq-filter>
+      <span class="hint muted" role="status" aria-live="polite" data-dq-count>{{ d.errors|length }} dari {{ '{:,}'.format(d.errors_total) }}</span>
+    </div>
+    <div class="dq-tablewrap" tabindex="0" role="region" aria-labelledby="dq-list-title">
+      <table class="dq-table">
+        <thead><tr><th scope="col">Method</th><th scope="col">Jenis error</th><th scope="col">Alasan</th></tr></thead>
+        <tbody data-dq-rows>
+          {% for e in d.errors %}
+          <tr data-cat="{{ e.category }}"><td class="mono break">{{ e.method }}</td><td>{{ e.type }}{% if e.pass %}<span class="muted hint"> · {{ e.pass }}</span>{% endif %}</td><td class="muted break">{{ e.reason }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if d.errors_hidden %}
+    <p><button type="button" class="btn btn-ghost btn-sm" data-dq-all>Tampilkan semua ({{ '{:,}'.format(d.errors_total) }})</button></p>
+    {% endif %}
+    {% if d.list_truncated %}<p class="hint muted">Daftar dibatasi 20.000 method; jumlah per jenis di atas tetap lengkap.</p>{% endif %}
+    {% endif %}
+
+    <details class="dq-more"><summary>Cara penilaian &amp; catatan teknis</summary>
+      <ul class="plain-list">
+        <li><strong>Baik</strong>: error ≤ 1% dari unit kerja jadx dan class tanpa Java ≤ 3% dari class aplikasi. <strong>Sebagian</strong>: sampai 5% / 15%.
+          Di atas itu: <strong>Perlu perhatian</strong>.</li>
+        <li>Satu method bisa menghasilkan beberapa baris error (mis. gagal menebak tipe lalu gagal memperbaikinya), jadi jumlah error bisa lebih besar dari jumlah method.</li>
+        <li>Unit kerja jadx = class tingkat atas (kelas dalam digabung), sehingga bukan jumlah berkas Java.</li>
+        <li>jadx dijalankan dengan <span class="mono">--log-level error</span>; stack trace Java dibuang dari log (pesan pokok disimpan).</li>
+      </ul>
+    </details>
+  </section>
+  {% endif %}
+
   <div class="grid-2">
     <section class="card" aria-labelledby="meta-title">
       <h2 id="meta-title">Berkas</h2>
