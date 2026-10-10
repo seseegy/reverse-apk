@@ -715,6 +715,20 @@
                    json: "json", xml: "xml", markdown: "md", md: "md", smali: "smali", sql: "sql", yaml: "yml", yml: "yml", html: "txt" };
   var enc = encodeURIComponent;
 
+  // Salin ke papan klip. navigator.clipboard hanya ada di konteks aman (HTTPS/localhost); bila tidak ada, pakai textarea + execCommand.
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
+    return new Promise(function (resolve, reject) {
+      var ta = document.createElement("textarea");
+      ta.value = text; ta.setAttribute("readonly", ""); ta.style.cssText = "position:fixed;top:-1000px;opacity:0";
+      document.body.appendChild(ta); ta.select();
+      var ok = false;
+      try { ok = !!(document.execCommand && document.execCommand("copy")); } catch (_) { ok = false; }
+      document.body.removeChild(ta);
+      if (ok) resolve(); else reject(new Error("copy"));
+    });
+  }
+
   function citeParts(path) {
     if (path.indexOf("jadx/sources/") === 0) return { root: "java", rel: path.slice(13) };
     if (path.indexOf("jadx/resources/") === 0) return { root: "jres", rel: path.slice(15) };
@@ -800,7 +814,7 @@
       var dl = document.createElement("button"); dl.type = "button"; dl.className = "btn btn-ghost btn-sm"; dl.textContent = "Unduh";
       copy.addEventListener("click", function () {
         function ok() { copy.textContent = "Tersalin"; setTimeout(function () { copy.textContent = "Salin"; }, 1500); }
-        if (navigator.clipboard) navigator.clipboard.writeText(code).then(ok, function () { copy.textContent = "Gagal"; }); else copy.textContent = "Tidak didukung";
+        copyText(code).then(ok, function () { copy.textContent = "Gagal"; });
       });
       dl.addEventListener("click", function () {
         var ext = FILE_EXT[(lang || "").toLowerCase()] || "txt";
@@ -1034,21 +1048,28 @@
     });
     if (jumpBtn) jumpBtn.addEventListener("click", function () { pinned = true; log.scrollTop = log.scrollHeight; updateJump(); log.focus(); });
 
-    function copyBtn(getText) {
+    function copyBtn(getText, label) {
       var b = document.createElement("button"); b.type = "button"; b.className = "btn btn-ghost btn-sm";
-      var ic = svgIcon("copy", 14), tx = document.createElement("span"); tx.textContent = "Salin";
+      var ic = svgIcon("copy", 14), tx = document.createElement("span"); tx.textContent = label;
       b.appendChild(ic); b.appendChild(tx); b.setAttribute("aria-label", "Salin jawaban sebagai Markdown");
       b.addEventListener("click", function () {
-        function flash(t) { tx.textContent = t; setTimeout(function () { tx.textContent = "Salin"; }, 1500); }
-        if (navigator.clipboard) navigator.clipboard.writeText(getText()).then(function () { flash("Tersalin"); }, function () { flash("Gagal"); });
-        else flash("Tidak didukung");
+        function flash(t) { tx.textContent = t; setTimeout(function () { tx.textContent = label; }, 1500); }
+        copyText(getText()).then(function () { flash("Tersalin"); }, function () { flash("Gagal"); });
       });
       return b;
     }
+    // Dua tombol Salin: di judul pesan (judul menempel di atas selama pesan digulir) dan di bawah jawaban, tempat pembaca berhenti.
+    // Mengembalikan baris `.msg-foot` agar pemanggil bisa menambahkan meta biaya ke dalamnya.
     function addActions(art, getText) {
-      var head = $(".msg-head", art);
-      if (!head || $(".msg-actions", head)) return;
-      var box = document.createElement("span"); box.className = "msg-actions"; box.appendChild(copyBtn(getText)); head.appendChild(box);
+      var head = $(".msg-head", art), foot = $(".msg-foot", art);
+      if (foot) return foot;
+      if (head && !$(".msg-actions", head)) {
+        var box = document.createElement("span"); box.className = "msg-actions"; box.appendChild(copyBtn(getText, "Salin")); head.appendChild(box);
+      }
+      foot = document.createElement("div"); foot.className = "msg-foot";
+      foot.appendChild(copyBtn(getText, "Salin jawaban"));
+      art.appendChild(foot);
+      return foot;
     }
     function stepsFromStored(art) {
       var items = $all(".msg-tools li[data-tool]", art);
@@ -1225,10 +1246,10 @@
               toolsBox.open = false; toolsBox.className = "msg-tools";
               toolsSummary.textContent = d.tools + " langkah tool · " + fmtDur(Date.now() - t0);
             }
-            addActions(asst, function () { return raw; });
+            var foot = addActions(asst, function () { return raw; });
             var meta = document.createElement("div"); meta.className = "msg-meta";
             meta.textContent = d.steps + " langkah · giliran ≈ Rp" + Number(d.turn_idr).toFixed(2) + " · sesi ≈ Rp" + Number(d.session_idr).toFixed(2);
-            asst.appendChild(meta);
+            foot.appendChild(meta);
             var notes = { max_steps: "Berhenti di batas langkah (AI_MAX_STEPS).", budget: "Anggaran habis.", cancelled: "Dihentikan.", error: "Terjadi galat.",
                           tool_budget: "Batas total data tool giliran ini tercapai; jawaban disusun dari yang sudah dibaca." };
             if (d.stopped !== "done" && notes[d.stopped]) {
@@ -1243,7 +1264,7 @@
                 rb.addEventListener("click", function () { rb.disabled = true; send(lastUserText); });
                 n.appendChild(rb);
               }
-              asst.appendChild(n);
+              asst.insertBefore(n, foot);
             }
             updateBudget(d.budget);
             statusEl.textContent = "Biaya giliran ≈ Rp" + Number(d.turn_idr).toFixed(2) + " · sesi ≈ Rp" + Number(d.session_idr).toFixed(2) + " · " + d.steps + " langkah";
