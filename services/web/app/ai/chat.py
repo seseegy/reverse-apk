@@ -17,6 +17,7 @@ from typing import Any
 from rvcore import store
 
 from . import agent
+from . import budget as ai_budget
 from . import tools as T
 from .config import AIConfig
 from .pricing import PriceTable
@@ -88,10 +89,12 @@ def run_in_thread(turn: Turn, *, cfg: AIConfig, prices: PriceTable, analysis_id:
                 store.add_chat_message(conn, session_id, "assistant", content, tool_calls=res.tool_calls,
                                        citations=res.citations, model=res.model)
                 spent = store.ai_spent(conn, session_id=session_id)
+                snap = ai_budget.snapshot(conn, cfg, session_id)
             emit("final", {"content": content, "stopped": res.stopped, "error": res.error, "steps": res.steps,
                            "citations": res.citations, "cost_credits": res.cost_credits, "session_credits": spent,
                            "session_idr": cfg.idr(spent), "turn_idr": cfg.idr(res.cost_credits),
-                           "tools": len(res.tool_calls)})
+                           "tools": len(res.tool_calls),
+                           "budget": {"today": snap["today"], "today_limit": snap["today_limit"], "today_idr": snap["today_idr"]}})
         except Exception as exc:  # noqa: BLE001 - giliran tidak boleh meninggalkan klien menunggu selamanya
             emit("final", {"content": "", "stopped": "error", "error": f"Galat internal ({type(exc).__name__}).",
                            "steps": 0, "citations": [], "cost_credits": 0, "session_credits": 0, "session_idr": 0,

@@ -454,6 +454,12 @@
     });
   });
 
+  // Tab bisa digulir di layar sempit: pusatkan tab aktif agar pengguna langsung tahu sedang di bagian mana.
+  (function centerActiveTab() {
+    var tabs = $(".tabs"), cur = tabs && $("a[aria-current='page']", tabs);
+    if (cur && tabs.scrollWidth > tabs.clientWidth) tabs.scrollLeft = Math.max(0, cur.offsetLeft - (tabs.clientWidth - cur.offsetWidth) / 2);
+  })();
+
   // ------------------------------------------------------------------ penjelajah kode
 
   var JAVA_KW = new Set(("abstract assert boolean break byte case catch char class const continue default do double else enum extends " +
@@ -707,20 +713,48 @@
   var CITE_RE = /((?:jadx\/sources|jadx\/resources|apktool)\/[\w$.\/\-]{1,300}?):(\d{1,7})/g;
   var FILE_EXT = { python: "py", py: "py", javascript: "js", js: "js", java: "java", kotlin: "kt", bash: "sh", sh: "sh", shell: "sh",
                    json: "json", xml: "xml", markdown: "md", md: "md", smali: "smali", sql: "sql", yaml: "yml", yml: "yml", html: "txt" };
+  var enc = encodeURIComponent;
 
+  function citeParts(path) {
+    if (path.indexOf("jadx/sources/") === 0) return { root: "java", rel: path.slice(13) };
+    if (path.indexOf("jadx/resources/") === 0) return { root: "jres", rel: path.slice(15) };
+    return { root: "smali", rel: path.slice(8) };
+  }
   function citeUrl(analysisId, path, line) {
-    var root, rel;
-    if (path.indexOf("jadx/sources/") === 0) { root = "java"; rel = path.slice(13); }
-    else if (path.indexOf("jadx/resources/") === 0) { root = "jres"; rel = path.slice(15); }
-    else { root = "smali"; rel = path.slice(8); }
-    return "/analyses/" + encodeURIComponent(analysisId) + "/code?root=" + root + "&path=" + encodeURIComponent(rel).replace(/%2F/g, "/") + "&line=" + line;
+    var p = citeParts(path);
+    return "/analyses/" + enc(analysisId) + "/code?root=" + p.root + "&path=" + enc(p.rel).replace(/%2F/g, "/") + "&line=" + line;
+  }
+
+  // Ikon kecil dibangun lewat DOM (bukan innerHTML). Gaya garis sama dengan _icons.html.
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var ICON_DEF = {
+    check: [["polyline", { points: "20 6 9 17 4 12" }]],
+    x: [["line", { x1: 18, y1: 6, x2: 6, y2: 18 }], ["line", { x1: 6, y1: 6, x2: 18, y2: 18 }]],
+    spinner: [["path", { d: "M21 12a9 9 0 1 1-6.22-8.56" }]],
+    dot: [["circle", { cx: 12, cy: 12, r: 3 }]],
+    copy: [["rect", { x: 9, y: 9, width: 13, height: 13, rx: 2, ry: 2 }], ["path", { d: "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" }]]
+  };
+  function svgIcon(name, size, spin) {
+    var s = document.createElementNS(SVG_NS, "svg");
+    s.setAttribute("width", size || 16); s.setAttribute("height", size || 16); s.setAttribute("viewBox", "0 0 24 24");
+    s.setAttribute("fill", "none"); s.setAttribute("stroke", "currentColor"); s.setAttribute("stroke-width", "2");
+    s.setAttribute("stroke-linecap", "round"); s.setAttribute("stroke-linejoin", "round"); s.setAttribute("aria-hidden", "true");
+    s.setAttribute("class", "icon" + (spin ? " spin" : ""));
+    (ICON_DEF[name] || []).forEach(function (d) {
+      var el = document.createElementNS(SVG_NS, d[0]);
+      Object.keys(d[1]).forEach(function (k) { el.setAttribute(k, d[1][k]); });
+      s.appendChild(el);
+    });
+    return s;
   }
 
   // Markdown -> DOM. HANYA membuat elemen yang kita tentukan; teks selalu lewat createTextNode. Tidak ada innerHTML,
   // tidak ada tautan dari model (URL ditampilkan sebagai teks), tidak ada gambar/HTML mentah.
+  // Didukung: heading, paragraf, daftar (bersarang), kutipan, garis, tabel, blok kode, **tebal**, *miring*, `kode`, sitasi.
   function renderMarkdown(src, container, opts) {
+    opts = opts || {};
     while (container.firstChild) container.removeChild(container.firstChild);
-    var lines = String(src).replace(/\r/g, "").split("\n"), i = 0;
+    var lines = String(src).replace(/\r/g, "").split("\n"), i = 0, depth = opts._depth || 0;
     function textWithCites(parent, text) {
       var last = 0, m;
       CITE_RE.lastIndex = 0;
@@ -731,13 +765,17 @@
       }
       if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
     }
+    // Sitasi tampil sebagai chip "NamaBerkas:baris" (path lengkap di tooltip & label pembaca layar). Klik membuka pratinjau.
     function cite(path, line) {
       var a = document.createElement("a");
-      a.className = "cite"; a.textContent = path + ":" + line;
+      a.className = "cite"; a.textContent = path.split("/").pop() + ":" + line;
       a.href = citeUrl(opts.analysisId, path, line);
+      a.title = path + ":" + line;
+      a.setAttribute("aria-label", path + " baris " + line);
+      a.setAttribute("data-path", path); a.setAttribute("data-line", String(line));
       var info = opts.citations && opts.citations[path + ":" + line];
       if (info === false) {
-        a.className = "cite cite-bad"; a.title = "Sitasi tidak terverifikasi: berkas atau baris tidak ditemukan";
+        a.className = "cite cite-bad"; a.title = "Sitasi tidak terverifikasi: berkas atau baris tidak ditemukan (" + path + ":" + line + ")";
         var b = document.createElement("span"); b.className = "cite-flag"; b.textContent = " [tidak terverifikasi]";
         var w = document.createElement("span"); w.appendChild(a); w.appendChild(b); return w;
       }
@@ -776,6 +814,97 @@
       var note = document.createElement("div"); note.className = "codeblock-note muted"; note.textContent = "Dibuat AI. Baca dan pahami sebelum dijalankan; tidak pernah dijalankan oleh aplikasi ini.";
       wrap.appendChild(bar); wrap.appendChild(pre); wrap.appendChild(note); container.appendChild(wrap);
     }
+
+    var LIST_RE = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
+    var HR_RE = /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/;
+    var QUOTE_RE = /^\s{0,3}>\s?(.*)$/;
+    var TABLE_SEP_RE = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+    var MAX_LIST_DEPTH = 6;
+
+    function splitRow(ln) {
+      var s = ln.trim();
+      if (s.charAt(0) === "|") s = s.slice(1);
+      if (s.length && s.charAt(s.length - 1) === "|" && s.charAt(s.length - 2) !== "\\") s = s.slice(0, -1);
+      var cells = [], cur = "", tick = false;
+      for (var k = 0; k < s.length; k++) {
+        var ch = s.charAt(k);
+        if (ch === "\\" && s.charAt(k + 1) === "|") { cur += "|"; k++; continue; }
+        if (ch === "`") tick = !tick;
+        if (ch === "|" && !tick) { cells.push(cur.trim()); cur = ""; continue; }
+        cur += ch;
+      }
+      cells.push(cur.trim());
+      return cells;
+    }
+    function isTableStart(idx) {
+      return idx + 1 < lines.length && lines[idx].indexOf("|") >= 0 && TABLE_SEP_RE.test(lines[idx + 1]) && lines[idx + 1].indexOf("-") >= 0 &&
+             (lines[idx + 1].indexOf("|") >= 0 || splitRow(lines[idx]).length === 1);
+    }
+    function buildTable() {
+      var head = splitRow(lines[i]), aligns = splitRow(lines[i + 1]).map(function (c) {
+        return /^:-+:$/.test(c) ? "ta-center" : /-:$/.test(c) ? "ta-right" : "";
+      });
+      i += 2;
+      var wrap = document.createElement("div"); wrap.className = "md-tablewrap";
+      wrap.tabIndex = 0; wrap.setAttribute("role", "region"); wrap.setAttribute("aria-label", "Tabel (geser untuk melihat semua kolom)");
+      var table = document.createElement("table"); table.className = "md-table";
+      var thead = document.createElement("thead"), hr = document.createElement("tr");
+      head.forEach(function (h, idx) { var th = document.createElement("th"); th.scope = "col"; if (aligns[idx]) th.className = aligns[idx]; inline(th, h); hr.appendChild(th); });
+      thead.appendChild(hr); table.appendChild(thead);
+      var tbody = document.createElement("tbody");
+      while (i < lines.length && lines[i].trim() && lines[i].indexOf("|") >= 0) {
+        var cells = splitRow(lines[i]), tr = document.createElement("tr");
+        for (var c = 0; c < head.length; c++) { var td = document.createElement("td"); if (aligns[c]) td.className = aligns[c]; inline(td, cells[c] || ""); tr.appendChild(td); }
+        tbody.appendChild(tr); i++;
+      }
+      table.appendChild(tbody); wrap.appendChild(table); container.appendChild(wrap);
+    }
+
+    // Daftar bersarang berdasarkan indentasi; baris kosong di antara item tidak memutus daftar (penomoran tetap berlanjut).
+    function parseList() {
+      var stack = [], top = null, last = null, rootList = null;
+      while (i < lines.length) {
+        var ln = lines[i], m = LIST_RE.exec(ln);
+        if (!m || HR_RE.test(ln)) {
+          if (!ln.trim()) {
+            var j = i + 1;
+            while (j < lines.length && !lines[j].trim()) j++;
+            if (j < lines.length && LIST_RE.test(lines[j]) && !HR_RE.test(lines[j])) { i = j; continue; }
+            break;
+          }
+          if (m || !last || !/^\s{2,}\S/.test(ln) || /^\s*```/.test(ln)) break;
+          last.text += "\n" + ln.trim(); i++; continue;               // lanjutan item (baris terindentasi)
+        }
+        var indent = m[1].replace(/\t/g, "    ").length, ordered = /^\d/.test(m[2]);
+        var startNo = ordered ? parseInt(m[2], 10) : 1;
+        if (!stack.length) {
+          top = { indent: indent, ordered: ordered, items: [], start: startNo }; rootList = top; stack.push(top);
+        } else {
+          while (stack.length > 1 && indent < stack[stack.length - 1].indent) stack.pop();
+          top = stack[stack.length - 1];
+          if (stack.length === 1 && indent < top.indent) top.indent = indent;
+          if (indent > top.indent && last && stack.length < MAX_LIST_DEPTH) {
+            var child = { indent: indent, ordered: ordered, items: [], start: startNo };
+            last.children.push(child); stack.push(child); top = child;
+          } else if (stack.length === 1 && ordered !== top.ordered && indent <= top.indent) {
+            break;                                                    // ganti jenis daftar di tingkat atas = daftar baru
+          }
+        }
+        last = { text: m[3], children: [] }; top.items.push(last); i++;
+      }
+      return rootList;
+    }
+    function buildList(L) {
+      var el = document.createElement(L.ordered ? "ol" : "ul"); el.className = "md-list";
+      if (L.ordered && L.start !== 1) el.start = L.start;
+      L.items.forEach(function (it) {
+        var li = document.createElement("li"); inline(li, it.text);
+        it.children.forEach(function (ch) { li.appendChild(buildList(ch)); });
+        el.appendChild(li);
+      });
+      return el;
+    }
+
     while (i < lines.length) {
       var ln = lines[i], fence = /^\s*```\s*([\w+-]*)\s*$/.exec(ln);
       if (fence) {
@@ -783,45 +912,155 @@
         while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) { buf.push(lines[i]); i++; }
         i++; codeBlock(fence[1], buf.join("\n")); continue;
       }
+      if (!ln.trim()) { i++; continue; }
       var h = /^(#{1,4})\s+(.*)$/.exec(ln);
       if (h) { var hd = document.createElement("h" + (Math.min(h[1].length, 3) + 2)); hd.className = "md-h"; inline(hd, h[2]); container.appendChild(hd); i++; continue; }
-      var ul = /^\s*[-*]\s+(.*)$/.exec(ln), ol = /^\s*\d+[.)]\s+(.*)$/.exec(ln);
-      if (ul || ol) {
-        var list = document.createElement(ul ? "ul" : "ol"); list.className = "md-list";
-        while (i < lines.length) {
-          var mm = (ul ? /^\s*[-*]\s+(.*)$/ : /^\s*\d+[.)]\s+(.*)$/).exec(lines[i]);
-          if (!mm) break;
-          var li = document.createElement("li"); inline(li, mm[1]); list.appendChild(li); i++;
-        }
-        container.appendChild(list); continue;
+      if (HR_RE.test(ln)) { var hrEl = document.createElement("hr"); hrEl.className = "md-hr"; container.appendChild(hrEl); i++; continue; }
+      if (QUOTE_RE.test(ln)) {
+        var qb = [];
+        while (i < lines.length) { var q = QUOTE_RE.exec(lines[i]); if (!q) break; qb.push(q[1]); i++; }
+        var bq = document.createElement("blockquote"); bq.className = "md-quote";
+        if (depth < 3) renderMarkdown(qb.join("\n"), bq, { analysisId: opts.analysisId, citations: opts.citations, _depth: depth + 1 });
+        else bq.textContent = qb.join("\n");
+        container.appendChild(bq); continue;
       }
-      if (!ln.trim()) { i++; continue; }
+      if (isTableStart(i)) { buildTable(); continue; }
+      if (LIST_RE.test(ln)) { var L = parseList(); if (L) container.appendChild(buildList(L)); continue; }
       var para = [];
-      while (i < lines.length && lines[i].trim() && !/^\s*```/.test(lines[i]) && !/^(#{1,4})\s+/.test(lines[i]) &&
-             !/^\s*[-*]\s+/.test(lines[i]) && !/^\s*\d+[.)]\s+/.test(lines[i])) { para.push(lines[i]); i++; }
+      while (i < lines.length && lines[i].trim() && !/^\s*```/.test(lines[i]) && !/^(#{1,4})\s+/.test(lines[i]) && !LIST_RE.test(lines[i]) &&
+             !HR_RE.test(lines[i]) && !QUOTE_RE.test(lines[i]) && !isTableStart(i)) { para.push(lines[i]); i++; }
+      if (!para.length) { para.push(lines[i]); i++; }
       var p = document.createElement("p"); p.className = "md-p"; inline(p, para.join("\n")); container.appendChild(p);
     }
   }
   window.__rvRenderMarkdown = renderMarkdown;    // dipakai pengujian
 
-  // HARUS setelah semua `var` di atas (CITE_RE, FILE_EXT) terisi: `var` ter-hoist sebagai undefined, jadi memanggil initChat
-  // lebih awal membuat render riwayat melempar galat dan listener form tidak pernah terpasang (Kirim = GET biasa ke /chat?).
-  var chatRoot = $("[data-chat]");
-  if (chatRoot) initChat(chatRoot);
+  // ---- label langkah tool yang manusiawi (argumen berasal dari model: selalu lewat textContent)
+  function shortCls(n) { n = String(n || ""); var k = n.lastIndexOf("."); return k >= 0 ? n.slice(k + 1) : n; }
+  function baseName(p) { var s = String(p || "").split("/"); return s[s.length - 1]; }
+  var TOOL_LABELS = {
+    get_overview: function () { return "Ringkasan aplikasi"; },
+    get_manifest: function () { return "Baca manifest"; },
+    list_packages: function (a) { return "Daftar package" + (a.prefix ? " " + a.prefix : ""); },
+    list_classes: function (a) { return "Daftar class di " + (a["package"] || "?"); },
+    search_code: function (a) { return "Cari “" + (a.query || "") + "”"; },
+    get_class: function (a) { return "Baca " + shortCls(a.name) + (a.format === "smali" ? " (smali)" : "") + (a.start_line > 1 ? " dari baris " + a.start_line : ""); },
+    get_method: function (a) { return "Baca " + shortCls(a["class"]) + "." + (a.method || ""); },
+    find_xrefs: function (a) { return a.string ? "Cari pemakai string “" + a.string + "”" : "Cari pemakai " + shortCls(a["class"]) + (a.member ? "." + a.member : ""); },
+    find_callees: function (a) { return "Isi method " + shortCls(a["class"]) + "." + (a.method || ""); },
+    class_info: function (a) { return "Struktur " + shortCls(a["class"]); },
+    find_paths: function (a) { return "Jalur " + shortCls(a.from_class) + (a.from_method ? "." + a.from_method : "") + " → " + shortCls(a.to_class) + (a.to_method ? "." + a.to_method : ""); },
+    list_strings: function (a) { return "Daftar string" + (a.kind ? " " + a.kind : "") + (a.filter ? " “" + a.filter + "”" : ""); },
+    get_findings: function (a) { return "Temuan statis" + (a.category ? " (" + a.category + ")" : ""); },
+    read_file: function (a) { return "Baca " + baseName(a.path) + (a.start_line ? ":" + a.start_line + (a.end_line ? "-" + a.end_line : "") : ""); }
+  };
+  function toolLabel(name, argsText) {
+    var a = null;
+    try { a = JSON.parse(argsText || "{}"); } catch (_) { a = null; }
+    var fn = Object.prototype.hasOwnProperty.call(TOOL_LABELS, name) ? TOOL_LABELS[name] : null;
+    var label = "";
+    if (fn && a && typeof a === "object") { try { label = String(fn(a)); } catch (_) { label = ""; } }
+    if (!label) label = name;
+    return label.length > 110 ? label.slice(0, 109) + "…" : label;
+  }
+  window.__rvToolLabel = toolLabel;
+  function fmtDur(ms) { return ms < 950 ? Math.max(1, Math.round(ms / 100) * 100) + " ms" : (ms / 1000).toFixed(ms < 10000 ? 1 : 0).replace(".", ",") + " dtk"; }
+
+  function makeStep(name, argsText) {
+    var li = document.createElement("li"); li.className = "tstep is-run";
+    var ic = document.createElement("span"); ic.className = "tstep-ic"; ic.appendChild(svgIcon("spinner", 16, true));
+    var body = document.createElement("span");
+    var label = document.createElement("span"); label.className = "tstep-label"; label.textContent = toolLabel(name, argsText); label.title = name + " " + argsText;
+    var sub = document.createElement("span"); sub.className = "tstep-sub"; sub.hidden = true;
+    body.appendChild(label); body.appendChild(sub);
+    var time = document.createElement("span"); time.className = "tstep-time";
+    li.appendChild(ic); li.appendChild(body); li.appendChild(time);
+    var t0 = Date.now();
+    var api = {
+      li: li,
+      done: function (ok, summary, ms) {
+        li.className = "tstep " + (ok ? "is-ok" : "is-bad");
+        while (ic.firstChild) ic.removeChild(ic.firstChild);
+        ic.appendChild(svgIcon(ok ? "check" : "x", 16, false));
+        if (summary) { sub.textContent = summary; sub.hidden = false; }
+        time.textContent = fmtDur(ms === undefined ? Date.now() - t0 : ms);
+        li.setAttribute("aria-label", label.textContent + (ok ? ": berhasil" : ": gagal"));
+      }
+    };
+    return api;
+  }
 
   function initChat(root) {
     var aid = root.getAttribute("data-analysis-id"), csrf = root.getAttribute("data-csrf");
     var sessionId = root.getAttribute("data-session-id") || null;
     var log = $("[data-log]", root), form = $("[data-form]", root), input = $("[data-input]", root);
     var statusEl = $("[data-status]", root), stopBtn = $("[data-stop]", root), sendBtn = $("[data-send]", root);
-    var modelEl = $("[data-model]", root), sugg = $("[data-suggestions]", root);
-    var es = null, busy = false;
+    var modelEl = $("[data-model]", root), sugg = $("[data-suggestions]", root), jumpBtn = $("[data-jump]", root);
+    var peek = $("[data-peek]", root), peekTitle = $("[data-peek-title]", root), peekOpen = $("[data-peek-open]", root);
+    var peekNote = $("[data-peek-note]", root), peekCode = $("[data-peek-code]", root), peekClose = $("[data-peek-close]", root);
+    var fold = $("[data-sidefold]", root);
+    var es = null, busy = false, lastUserText = "", peekToken = 0, peekOpener = null, peekDir = "";
+    function setPeekNote(t) { peekNote.textContent = (peekDir ? peekDir + "  ·  " : "") + t; }
+
+    // Daftar sesi dilipat otomatis di layar sempit agar percakapan langsung terlihat.
+    if (fold && window.matchMedia && window.matchMedia("(max-width: 900px)").matches) fold.open = false;
 
     function citeMap(list) {
       var m = {}; (list || []).forEach(function (c) { m[c.path + ":" + c.line] = !!c.valid; }); return m;
     }
+    // Tinggi log = sisa layar di bawah posisinya (dihitung dari posisi absolut, jadi benar walau halaman sedang digulir) dikurangi tinggi
+    // kotak pesan. Tanpa ini bagian bawah log (pesan terbaru) menjulur ke luar layar atau tertutup kotak pesan.
+    var pinned = true;      // true = log mengikuti isi baru sampai pengguna sendiri menggulir ke atas
+    function fitLog() {
+      var top = log.getBoundingClientRect().top + (window.pageYOffset || 0);
+      var avail = window.innerHeight - top - form.offsetHeight - 28;
+      var h = Math.max(320, Math.round(avail)) + "px";
+      if (log.style.maxHeight !== h) { log.style.maxHeight = h; if (pinned) log.scrollTop = log.scrollHeight; updateJump(); }
+    }
     function nearBottom() { return log.scrollHeight - log.scrollTop - log.clientHeight < 80; }
-    function scrollDown(force) { if (force || nearBottom()) log.scrollTop = log.scrollHeight; }
+    // "Menempel di dasar": log terus mengikuti isi baru SAMPAI pengguna sendiri menggulir ke atas. Jarak ke dasar tidak dipakai untuk
+    // memutuskan mengikuti, karena satu blok langkah tool bisa menambah >80px sekaligus dan membuat log tertinggal.
+    function updateJump() { if (jumpBtn) jumpBtn.hidden = nearBottom(); }
+    function scrollDown(force) { if (force) pinned = true; if (pinned) log.scrollTop = log.scrollHeight; updateJump(); }
+    // Hanya gulir oleh PENGGUNA (roda, sentuh, keyboard, klik bilah gulir) yang boleh melepas "menempel". Peristiwa gulir akibat tata
+    // letak (font termuat, kotak pesan tumbuh, scroll anchoring browser) tidak boleh membuat log berhenti mengikuti.
+    var userAt = 0;
+    function markUser() { userAt = Date.now(); }
+    ["wheel", "touchstart", "touchmove", "mousedown", "keydown"].forEach(function (ev) { log.addEventListener(ev, markUser, { passive: true }); });
+    log.addEventListener("scroll", function () {
+      if (Date.now() - userAt < 800) pinned = nearBottom();
+      else if (nearBottom()) pinned = true;
+      updateJump();
+    });
+    if (jumpBtn) jumpBtn.addEventListener("click", function () { pinned = true; log.scrollTop = log.scrollHeight; updateJump(); log.focus(); });
+
+    function copyBtn(getText) {
+      var b = document.createElement("button"); b.type = "button"; b.className = "btn btn-ghost btn-sm";
+      var ic = svgIcon("copy", 14), tx = document.createElement("span"); tx.textContent = "Salin";
+      b.appendChild(ic); b.appendChild(tx); b.setAttribute("aria-label", "Salin jawaban sebagai Markdown");
+      b.addEventListener("click", function () {
+        function flash(t) { tx.textContent = t; setTimeout(function () { tx.textContent = "Salin"; }, 1500); }
+        if (navigator.clipboard) navigator.clipboard.writeText(getText()).then(function () { flash("Tersalin"); }, function () { flash("Gagal"); });
+        else flash("Tidak didukung");
+      });
+      return b;
+    }
+    function addActions(art, getText) {
+      var head = $(".msg-head", art);
+      if (!head || $(".msg-actions", head)) return;
+      var box = document.createElement("span"); box.className = "msg-actions"; box.appendChild(copyBtn(getText)); head.appendChild(box);
+    }
+    function stepsFromStored(art) {
+      var items = $all(".msg-tools li[data-tool]", art);
+      if (!items.length) return;
+      var ul = items[0].parentNode; ul.className = "tsteps";
+      items.forEach(function (li) {
+        var st = makeStep(li.getAttribute("data-tool"), li.getAttribute("data-args") || "");
+        st.done(li.getAttribute("data-ok") === "1", li.getAttribute("data-summary") || "", 0);
+        st.li.querySelector(".tstep-time").textContent = "";
+        ul.replaceChild(st.li, li);
+      });
+    }
 
     // --- render pesan yang sudah tersimpan (dari server)
     $all("article.msg", log).forEach(function (art) {
@@ -831,8 +1070,9 @@
       try { cites = citeMap(JSON.parse(body.getAttribute("data-citations") || "[]")); } catch (_) { /* abaikan */ }
       // Satu pesan yang gagal dirender tidak boleh mematikan seluruh halaman: tampilkan teks apa adanya.
       try {
-        if (art.getAttribute("data-role") === "assistant") renderMarkdown(raw, body, { analysisId: aid, citations: cites });
+        if (art.getAttribute("data-role") === "assistant") { renderMarkdown(raw, body, { analysisId: aid, citations: cites }); addActions(art, function () { return raw; }); }
         else body.classList.add("msg-plain");
+        stepsFromStored(art);
       } catch (err) {
         body.textContent = raw; body.classList.add("msg-plain");
         if (window.console) console.error("render pesan gagal:", err);
@@ -845,89 +1085,212 @@
       var head = document.createElement("header"); head.className = "msg-head"; head.textContent = label; art.appendChild(head);
       log.appendChild(art); return art;
     }
+    function updateSend() { sendBtn.disabled = busy || !input.value.trim(); }
+    function grow() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight + 2, 224) + "px"; if (log.style.maxHeight) fitLog(); }
     function setBusy(b) {
-      busy = b; sendBtn.disabled = b; input.disabled = b; stopBtn.hidden = !b;
+      busy = b; input.disabled = b; stopBtn.hidden = !b; updateSend();
       if (modelEl && modelEl.tagName === "SELECT") modelEl.disabled = b;
+      // Pembaca layar: jangan umumkan setiap potongan streaming; cukup status ringkas + hasil akhir.
+      log.setAttribute("aria-busy", b ? "true" : "false");
+      log.setAttribute("aria-live", b ? "off" : "polite");
     }
-    function fail(msg) {
+    function fail(msg, retryText) {
       var art = addMsg("error", "Galat"); var d = document.createElement("div"); d.className = "msg-body"; d.textContent = msg; art.appendChild(d);
-      art.setAttribute("role", "alert"); scrollDown(true);
+      art.setAttribute("role", "alert");
+      if (retryText) {
+        var row = document.createElement("div"); row.className = "msg-note";
+        var rb = document.createElement("button"); rb.type = "button"; rb.className = "btn btn-ghost btn-sm"; rb.textContent = "Coba lagi";
+        rb.addEventListener("click", function () { rb.disabled = true; send(retryText); });
+        row.appendChild(rb); art.appendChild(row);
+      }
+      scrollDown(true);
     }
+    function updateBudget(b) {
+      if (!b) return;
+      var set = function (sel, t) { var el = $(sel, root); if (el) el.textContent = t; };
+      set("[data-b-today]", Number(b.today).toFixed(3));
+      set("[data-b-idr]", Math.round(b.today_idr).toLocaleString("id-ID"));
+      var bar = $("[data-b-bar]", root), meter = $("[data-b-meter]", root);
+      if (bar && b.today_limit) {
+        var pct = Math.min(100, b.today / b.today_limit * 100);
+        bar.style.width = pct.toFixed(1) + "%";
+        if (meter) meter.className = "meter" + (pct >= 90 ? " is-bad" : pct >= 70 ? " is-warn" : "");
+      }
+    }
+
+    // --- pratinjau kode untuk sitasi (tanpa meninggalkan percakapan)
+    function openPeek(opener, path, line) {
+      if (!peek) return;
+      var parts = citeParts(path), tok = ++peekToken;
+      peekOpener = opener;
+      var base = baseName(path);
+      peekDir = path.slice(0, path.length - base.length);
+      peekTitle.textContent = base + ":" + line; peekTitle.title = path + ":" + line;
+      peekOpen.href = citeUrl(aid, path, line);
+      setPeekNote("Memuat…"); while (peekCode.firstChild) peekCode.removeChild(peekCode.firstChild);
+      peek.hidden = false; peek.focus();
+      fetch("/analyses/" + enc(aid) + "/code/file?root=" + parts.root + "&path=" + enc(parts.rel), { credentials: "same-origin", cache: "no-store" })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          if (tok !== peekToken) return;                                  // sitasi lain sudah diklik
+          if (!res.ok) { setPeekNote(res.d.error || "Berkas tidak dapat dimuat."); return; }
+          var d = res.d;
+          if (d.binary) { setPeekNote("Berkas biner: tidak ditampilkan."); return; }
+          var all = String(d.text).split("\n"), from = Math.max(1, line - 12), to = Math.min(all.length, line + 12), note = "";
+          if (line > all.length) { from = Math.max(1, all.length - 24); to = all.length; note = "Baris " + line + " di luar berkas (" + all.length + " baris). "; }
+          var lang = langOf(path), state = { block: false }, hit = null;
+          for (var n = from; n <= to; n++) {
+            var row = document.createElement("div"); row.className = "pl" + (n === line ? " pl-hit" : "");
+            var ln = document.createElement("span"); ln.className = "ln"; ln.textContent = String(n);
+            var cd = document.createElement("code"); cd.appendChild(highlightLine(all[n - 1], lang, state));
+            row.appendChild(ln); row.appendChild(cd); peekCode.appendChild(row);
+            if (n === line) { hit = row; row.setAttribute("aria-current", "true"); }
+          }
+          setPeekNote(note + "Baris " + from + "–" + to + " dari " + all.length + (d.truncated ? " · berkas dipotong" : ""));
+          if (hit) peekCode.scrollTop = Math.max(0, hit.offsetTop - peekCode.offsetTop - peekCode.clientHeight / 2);
+        })
+        .catch(function () { if (tok === peekToken) setPeekNote("Koneksi gagal. Coba lagi."); });
+    }
+    function closePeek() {
+      peekToken++; peek.hidden = true;
+      var o = peekOpener; peekOpener = null;
+      if (o && document.body.contains(o)) o.focus();
+    }
+    if (peekClose) peekClose.addEventListener("click", closePeek);
+    root.addEventListener("click", function (e) {
+      var a = peek && e.target && e.target.closest ? e.target.closest("a.cite") : null;
+      if (!a || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;   // modifier = perilaku bawaan (tab baru)
+      var path = a.getAttribute("data-path"), line = parseInt(a.getAttribute("data-line"), 10);
+      if (!path || !line) return;
+      e.preventDefault(); openPeek(a, path, line);
+    });
 
     function send(text) {
       text = String(text || "").trim();
       if (!text || busy) return;
+      lastUserText = text;
       if (sugg) sugg.hidden = true;
       var u = addMsg("user", "Anda"); var ub = document.createElement("div"); ub.className = "msg-body msg-plain"; ub.textContent = text; u.appendChild(ub);
-      input.value = ""; setBusy(true); statusEl.textContent = "Mengirim…"; scrollDown(true);
+      input.value = ""; grow(); setBusy(true); statusEl.textContent = "Mengirim…"; scrollDown(true);
 
-      var asst = addMsg("assistant", "Asisten"), toolsBox = null, toolsList = null, bodyEl = document.createElement("div"), raw = "", pending = false;
-      bodyEl.className = "msg-body"; asst.appendChild(bodyEl);
+      var asst = addMsg("assistant", "Asisten"), toolsBox = null, toolsList = null, toolsSummary = null, bodyEl = document.createElement("div"), raw = "", pending = false;
+      var typing = document.createElement("div"); typing.className = "typing"; typing.setAttribute("aria-hidden", "true");
+      typing.appendChild(document.createElement("span")); typing.appendChild(document.createElement("span")); typing.appendChild(document.createElement("span"));
+      bodyEl.className = "msg-body"; asst.appendChild(typing); asst.appendChild(bodyEl);
+      var t0 = Date.now(), nSteps = 0, running = 0;
+      function setTyping(on) { if (on && !typing.parentNode) asst.insertBefore(typing, bodyEl); else if (!on && typing.parentNode) typing.parentNode.removeChild(typing); }
       function ensureTools() {
         if (toolsBox) return;
-        toolsBox = document.createElement("details"); toolsBox.className = "msg-tools"; toolsBox.open = true;
-        var sm = document.createElement("summary"); sm.textContent = "Langkah tool"; toolsList = document.createElement("ul"); toolsList.className = "plain-list";
-        toolsBox.appendChild(sm); toolsBox.appendChild(toolsList); asst.insertBefore(toolsBox, bodyEl);
+        toolsBox = document.createElement("details"); toolsBox.className = "msg-tools is-running"; toolsBox.open = true;
+        toolsSummary = document.createElement("summary"); toolsList = document.createElement("ul"); toolsList.className = "tsteps";
+        toolsBox.appendChild(toolsSummary); toolsBox.appendChild(toolsList); asst.insertBefore(toolsBox, typing.parentNode ? typing : bodyEl);
       }
-      var toolItems = {};
+      function sumText() { toolsSummary.textContent = "Langkah tool (" + nSteps + ")" + (running ? " · bekerja…" : ""); }
+      var stepById = {};
       function paint() {                                   // render ulang dibatasi ~8x/detik agar streaming tidak berat
         if (pending) return; pending = true;
-        setTimeout(function () { pending = false; var nb = nearBottom(); renderMarkdown(raw, bodyEl, { analysisId: aid, citations: {} }); if (nb) scrollDown(true); }, 120);
+        setTimeout(function () { pending = false; renderMarkdown(raw, bodyEl, { analysisId: aid, citations: {} }); scrollDown(false); }, 120);
       }
 
       var payload = { text: text, session_id: sessionId ? parseInt(sessionId, 10) : null };
       if (modelEl && modelEl.value) payload.model = modelEl.value;
-      fetch("/analyses/" + encodeURIComponent(aid) + "/chat/send", { method: "POST", credentials: "same-origin",
+      fetch("/analyses/" + enc(aid) + "/chat/send", { method: "POST", credentials: "same-origin",
         headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify(payload) })
         .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
         .then(function (res) {
-          if (!res.ok) { log.removeChild(asst); setBusy(false); statusEl.textContent = ""; fail(res.d.error || "Gagal mengirim pesan."); return; }
+          if (!res.ok) { log.removeChild(asst); setBusy(false); statusEl.textContent = ""; fail(res.d.error || "Gagal mengirim pesan.", lastUserText); return; }
           sessionId = String(res.d.session_id); root.setAttribute("data-session-id", sessionId);
           history.replaceState(null, "", "?s=" + sessionId);
           statusEl.textContent = "Asisten bekerja…";
           es = new EventSource(res.d.stream);
           var finished = false;
-          es.addEventListener("delta", function (e) { raw += JSON.parse(e.data).text; paint(); });
+          es.addEventListener("delta", function (e) { setTyping(false); raw += JSON.parse(e.data).text; paint(); });
           es.addEventListener("tool_start", function (e) {
-            var d = JSON.parse(e.data); ensureTools();
-            var li = document.createElement("li"); var nm = document.createElement("span"); nm.className = "mono"; nm.textContent = d.name;
-            var ar = document.createElement("span"); ar.className = "muted mono break"; ar.textContent = " " + d.args;
-            var st = document.createElement("span"); st.className = "hint muted"; st.textContent = " …";
-            li.appendChild(nm); li.appendChild(ar); li.appendChild(st); toolsList.appendChild(li); toolItems[d.id] = st; scrollDown(false);
+            var d = JSON.parse(e.data); ensureTools(); setTyping(false);
+            var st = makeStep(d.name, d.args || ""); stepById[d.id] = { step: st, t0: Date.now() };
+            toolsList.appendChild(st.li); nSteps++; running++; sumText(); scrollDown(false);
             statusEl.textContent = "Memanggil " + d.name + "…";
           });
           es.addEventListener("tool_end", function (e) {
-            var d = JSON.parse(e.data), st = toolItems[d.id];
-            if (st) { st.textContent = " " + (d.summary || (d.ok ? "ok" : "galat")); st.className = "hint " + (d.ok ? "ok" : "bad"); }
+            var d = JSON.parse(e.data), rec = stepById[d.id];
+            if (rec) { rec.step.done(!!d.ok, d.summary || (d.ok ? "ok" : "galat"), Date.now() - rec.t0); running = Math.max(0, running - 1); sumText(); }
+            if (!running && !raw) setTyping(true);
+            scrollDown(false);
           });
           es.addEventListener("final", function (e) {
             finished = true; var d = JSON.parse(e.data);
-            var text = d.content || ""; raw = text;
+            var text = d.content || ""; raw = text; setTyping(false);
             renderMarkdown(text, bodyEl, { analysisId: aid, citations: citeMap(d.citations) });
-            if (toolsBox) { toolsBox.open = false; toolsBox.firstChild.textContent = d.tools + " langkah tool"; }
-            var notes = { max_steps: "Berhenti di batas langkah.", budget: "Anggaran habis.", cancelled: "Dihentikan.", error: "Terjadi galat.", tool_budget: "Batas total data tool giliran ini tercapai; jawaban disusun dari yang sudah dibaca. Kirim \"lanjutkan\" atau pertanyaan yang lebih sempit untuk menggali bagian berikutnya." };
-            if (d.stopped !== "done" && notes[d.stopped]) {
-              var n = document.createElement("div"); n.className = "msg-note"; n.textContent = notes[d.stopped] + (d.error ? " " + d.error : ""); asst.appendChild(n);
+            if (toolsBox) {
+              toolsBox.open = false; toolsBox.className = "msg-tools";
+              toolsSummary.textContent = d.tools + " langkah tool · " + fmtDur(Date.now() - t0);
             }
+            addActions(asst, function () { return raw; });
+            var meta = document.createElement("div"); meta.className = "msg-meta";
+            meta.textContent = d.steps + " langkah · giliran ≈ Rp" + Number(d.turn_idr).toFixed(2) + " · sesi ≈ Rp" + Number(d.session_idr).toFixed(2);
+            asst.appendChild(meta);
+            var notes = { max_steps: "Berhenti di batas langkah (AI_MAX_STEPS).", budget: "Anggaran habis.", cancelled: "Dihentikan.", error: "Terjadi galat.",
+                          tool_budget: "Batas total data tool giliran ini tercapai; jawaban disusun dari yang sudah dibaca." };
+            if (d.stopped !== "done" && notes[d.stopped]) {
+              var n = document.createElement("div"); n.className = "msg-note";
+              var nt = document.createElement("span"); nt.textContent = notes[d.stopped] + (d.error ? " " + d.error : ""); n.appendChild(nt);
+              if (d.stopped === "max_steps" || d.stopped === "tool_budget") {
+                var cb = document.createElement("button"); cb.type = "button"; cb.className = "btn btn-ghost btn-sm"; cb.textContent = "Lanjutkan";
+                cb.addEventListener("click", function () { cb.disabled = true; send("lanjutkan"); });
+                n.appendChild(cb);
+              } else if (d.stopped === "error") {
+                var rb = document.createElement("button"); rb.type = "button"; rb.className = "btn btn-ghost btn-sm"; rb.textContent = "Coba lagi";
+                rb.addEventListener("click", function () { rb.disabled = true; send(lastUserText); });
+                n.appendChild(rb);
+              }
+              asst.appendChild(n);
+            }
+            updateBudget(d.budget);
             statusEl.textContent = "Biaya giliran ≈ Rp" + Number(d.turn_idr).toFixed(2) + " · sesi ≈ Rp" + Number(d.session_idr).toFixed(2) + " · " + d.steps + " langkah";
             scrollDown(true);
           });
-          es.addEventListener("end", function () { if (es) es.close(); es = null; setBusy(false); input.focus(); if (!finished) fail("Koneksi terputus sebelum jawaban selesai. Muat ulang halaman untuk melihat hasil tersimpan."); });
+          es.addEventListener("end", function () { if (es) es.close(); es = null; setTyping(false); setBusy(false); input.focus(); if (!finished) fail("Koneksi terputus sebelum jawaban selesai. Muat ulang halaman untuk melihat hasil tersimpan."); });
           es.onerror = function () {
-            if (es && es.readyState === 2) { es = null; if (!finished) { setBusy(false); fail("Koneksi stream terputus. Muat ulang halaman untuk melihat hasil tersimpan."); } }
+            if (es && es.readyState === 2) { es = null; setTyping(false); if (!finished) { setBusy(false); fail("Koneksi stream terputus. Muat ulang halaman untuk melihat hasil tersimpan."); } }
           };
         })
-        .catch(function () { setBusy(false); statusEl.textContent = ""; fail("Koneksi gagal. Periksa jaringan lalu coba lagi."); });
+        .catch(function () { setTyping(false); setBusy(false); statusEl.textContent = ""; fail("Koneksi gagal. Periksa jaringan lalu coba lagi.", lastUserText); });
     }
 
     form.addEventListener("submit", function (e) { e.preventDefault(); send(input.value); });
+    input.addEventListener("input", function () { grow(); updateSend(); });
     input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(input.value); } });
     $all("[data-suggest]", root).forEach(function (b) { b.addEventListener("click", function () { send(b.getAttribute("data-suggest")); }); });
-    stopBtn.addEventListener("click", function () {
+    function stop() {
       if (!sessionId) return;
       stopBtn.disabled = true; statusEl.textContent = "Menghentikan…";
-      fetch("/analyses/" + encodeURIComponent(aid) + "/chat/cancel?s=" + encodeURIComponent(sessionId), { method: "POST", credentials: "same-origin", headers: { "X-CSRF-Token": csrf } })
+      fetch("/analyses/" + enc(aid) + "/chat/cancel?s=" + enc(sessionId), { method: "POST", credentials: "same-origin", headers: { "X-CSRF-Token": csrf } })
         .finally(function () { stopBtn.disabled = false; });
+    }
+    stopBtn.addEventListener("click", stop);
+    // Esc: tutup pratinjau dulu; bila tidak ada, hentikan giliran yang sedang berjalan.
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      if (peek && !peek.hidden) { e.preventDefault(); closePeek(); }
+      else if (busy) { e.preventDefault(); stop(); }
     });
+    window.addEventListener("resize", function () { fitLog(); updateJump(); });
+    if (window.ResizeObserver) {
+      var ro = new window.ResizeObserver(function () { if (pinned) log.scrollTop = log.scrollHeight; updateJump(); });
+      ro.observe(log);                                        // tinggi kotak log berubah (mis. kotak pesan tumbuh)
+      if (log.firstElementChild) { /* isi diamati lewat MutationObserver di bawah */ }
+    }
+    if (window.MutationObserver) {
+      new window.MutationObserver(function () { if (pinned) log.scrollTop = log.scrollHeight; updateJump(); })
+        .observe(log, { childList: true, subtree: true, characterData: true });   // isi tumbuh: tetap menempel di dasar
+    }
+    grow(); updateSend(); fitLog(); scrollDown(true);
+    // Font web memuat belakangan dan mengubah tinggi isi: sesuaikan lagi agar posisi "dasar" tetap benar.
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () { fitLog(); scrollDown(true); });
   }
+
+  // HARUS setelah semua `var` di atas (CITE_RE, FILE_EXT, TOOL_LABELS, JAVA_KW/TOKEN_RE) terisi: `var` ter-hoist sebagai undefined, jadi
+  // memanggil initChat lebih awal membuat render riwayat melempar galat dan listener form tidak pernah terpasang (Kirim = GET biasa).
+  var chatRoot = $("[data-chat]");
+  if (chatRoot) initChat(chatRoot);
 })();

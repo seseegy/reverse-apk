@@ -81,6 +81,17 @@ Permintaan untuk menyerang layanan pihak ketiga (mis. mengeksploitasi endpoint y
 - **Class yang tidak dihasilkan jadx** (mis. satu dex gagal didekompilasi, `smali_classes7`): `get_class`/`get_method` otomatis jatuh ke smali dan mengatakannya (`format: smali`, nomor baris = baris berkas smali, bisa disitir `apktool/smali_classes7/pkg/A.smali:123`); `read_file` membaca path apa pun persis seperti sitasi; `list_classes` memuat `hanya_smali`. Analyzer memindai smali class-class itu (secret, URL, string) dan mengindeksnya ke `search_code`, serta menambah temuan `coverage.jadx_missing_classes`. Artefak desugar (`$$ExternalSyntheticLambda`) dan stub `android/`/`java/` tidak dihitung sebagai hilang.
 - **Pembacaan terhadap hasil kerja model sendiri**: bila `get_method` menemukan `Method not decompiled`, smali method itu diberikan sebagai gantinya.
 
+## UI/UX chat (peningkatan)
+- **Lini masa langkah tool** dengan label manusiawi ("Baca LoginActivity (smali)", "Cari pemakai Cipher.doFinal"), status (centang/silang/berputar), ringkasan hasil, dan durasi per langkah; terlipat setelah selesai ("11 langkah tool · 38 dtk").
+- **Sitasi sebagai chip** `NamaBerkas:baris` (path lengkap di tooltip dan label pembaca layar). Klik membuka **pratinjau kode** (±12 baris, baris target disorot) tanpa meninggalkan percakapan; Ctrl/Cmd+klik tetap membuka tab baru; Esc menutup.
+- **Markdown lebih lengkap**: tabel (dapat digeser dan difokus), daftar bersarang, kutipan, garis. Semua tetap dibangun lewat DOM (tanpa `innerHTML`).
+- **Indikator "berpikir"** sebelum token pertama (bukan gelembung kosong); tombol **Salin** per jawaban; tombol **Lanjutkan** saat berhenti di batas langkah, **Coba lagi** saat galat; baris meta (langkah, biaya).
+- **Mengikuti isi baru** hanya sampai pengguna menggulir ke atas sendiri; tombol "Ke pesan terbaru" bila tertinggal.
+- **Anggaran** harian ditampilkan sebagai meter (kuning ≥ 70%, merah ≥ 90%) dan diperbarui langsung dari event `final`.
+- **Kotak pesan** tumbuh otomatis, Kirim nonaktif saat kosong, pintasan Enter / Shift+Enter / Esc (berhenti).
+- **Aksesibilitas**: `aria-busy` dan `aria-live=off` selama streaming (pembaca layar tidak dibanjiri), status per langkah memakai label teks (bukan hanya warna/ikon), area tabel dapat difokus.
+- **Ponsel**: daftar sesi terlipat otomatis, pratinjau menjadi *bottom sheet*, tab dapat digulir dan tab aktif dipusatkan. Memperbaiki overflow horizontal ±60px di semua halaman analisis pada layar sempit (grid `.page` satu-kolom melebar mengikuti daftar tab).
+
 ## Batas yang dikenakan pada AI
 **Prinsip: hanya batas dari `.env` yang berlaku.** Tidak ada lagi batas jumlah/panjang yang ditulis di kode untuk apa yang boleh dilihat atau dilakukan AI:
 - Pesan pengguna, riwayat percakapan, jumlah tool call per respons, dan panggilan identik berulang: **tanpa batas** (loop dibatasi `AI_MAX_STEPS`).
