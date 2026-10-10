@@ -448,7 +448,9 @@ def reset_for_retry(conn: sqlite3.Connection, analysis_id: int, only_stage: str 
                 (PENDING, analysis_id, only_stage),
             )
             conn.execute("DELETE FROM finding WHERE analysis_id = ?", (analysis_id,))
-            conn.execute("DELETE FROM analysis_log WHERE analysis_id = ? AND stage = ?", (analysis_id, only_stage))
+            # Baris log TANPA tahap (ringkasan akhir seperti "Semua tahap selesai.") ikut dihapus: tanpa ini, tiap ulang statis
+            # menambah satu baris duplikat yang tidak pernah dibersihkan.
+            conn.execute("DELETE FROM analysis_log WHERE analysis_id = ? AND (stage = ? OR stage IS NULL)", (analysis_id, only_stage))
             return True
     with tx(conn):
         cur = conn.execute(
