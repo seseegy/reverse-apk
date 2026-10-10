@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import rules as R
+from .common import LIB_PREFIXES as LIB_SLASH
 from .common import Findings, Lines, is_library, iter_files, mask_secret, read_text, shannon_entropy
 from .index import IndexWriter
 
@@ -32,6 +33,8 @@ JADX_RENAMED_RE = re.compile(r"JADX INFO: renamed from")
 
 TEXT_RES_SUFFIXES = (".xml", ".json", ".txt", ".properties", ".html", ".js", ".yml", ".yaml", ".cfg", ".conf", ".ini", ".pem", ".config")
 MAX_RES_BYTES = 512 * 1024
+MAX_SMALI_ONLY_FILE = 2 * 1024 * 1024
+MAX_SMALI_ONLY_BYTES = 200 * 1024 * 1024   # total teks smali-saja yang dipindai; melindungi waktu & ukuran indeks
 
 
 @dataclass
@@ -45,6 +48,9 @@ class ScanStats:
     methods_not_decompiled: int = 0
     failed_samples: list[str] = field(default_factory=list)
     smali_fallback_files: int = 0
+    smali_only_files: int = 0          # class aplikasi yang ADA di smali tetapi tidak dihasilkan jadx
+    smali_only_samples: list[str] = field(default_factory=list)
+    per_dex: dict[str, dict[str, int]] = field(default_factory=dict)   # smali, smali_classes2.. -> {app, tanpa_java}
     r8_marker: bool = False
     renamed_markers: int = 0
     short_names: int = 0
@@ -101,6 +107,8 @@ class Scanner:
         self.work, self.index, self.findings, self.log = work, index, findings, log
         self.stats = ScanStats()
         self._seen_endpoint_keys: set[tuple[str, str]] = set()
+        self._java_rels: set[str] = set()       # berkas Java hasil jadx yang ada (untuk mendeteksi class yang hilang dari jadx)
+        self._smali_only_bytes = 0
 
     # ------------------------------------------------------------------ string & secret
     def _add_string(self, kind: str, value: str, rel: str, line: int, *, host: str | None = None,
@@ -250,6 +258,7 @@ class Scanner:
     def scan_java(self, path: Path) -> None:
         rel = _rel(path, self.work)
         lib = is_library(rel)
+        self._java_rels.add(rel)
         text = read_text(path)
         s = self.stats
         s.java_files += 1
@@ -316,6 +325,50 @@ class Scanner:
             self._scan_literals(text, rel, lines, lib, SMALI_LITERAL_RE)
             return
 
+    def _scan_smali_only(self) -> None:
+        """Class aplikasi yang ada di smali tetapi TIDAK dihasilkan jadx (jadx gagal/melewati sebagian dex).
+
+        Tanpa ini, string, secret, dan URL di class-class itu tidak pernah dipindai dan tidak bisa dicari. Smali-nya
+        dipindai seperti cadangan method gagal, dan diindeks ke pencarian dengan path smali (bisa disitir `file:baris`).
+        Class dalam (A$B) ikut berkas luarnya, jadi hanya dicek lewat nama class luar.
+        """
+        apktool = self.work / "apktool"
+        try:
+            roots = [apktool / "smali"] + sorted(p for p in apktool.glob("smali_classes*") if p.is_dir() and not p.is_symlink())
+        except OSError:
+            return
+        for root in roots:
+            dex = self.stats.per_dex.setdefault(root.name, {"app": 0, "tanpa_java": 0})
+            for path in iter_files(root, (".smali",)):
+                inner = path.relative_to(root).as_posix()
+                if inner.startswith(LIB_SLASH):
+                    continue
+                full = inner[:-len(".smali")]
+                # Artefak desugar D8/R8 (lambda sintetis) dan stub platform bukan "hilang": jadx memang meleburkannya ke class luar.
+                if "$$ExternalSynthetic" in full or "$$Lambda" in full or full.startswith(("android/", "java/")):
+                    continue
+                # jadx menulis class dalam di berkas luar ATAU di berkasnya sendiri (Luar$Dalam.java): cek keduanya.
+                dex["app"] += 1
+                if f"jadx/sources/{full}.java" in self._java_rels or f"jadx/sources/{full.split('$', 1)[0]}.java" in self._java_rels:
+                    continue
+                dex["tanpa_java"] += 1
+                if self._smali_only_bytes > MAX_SMALI_ONLY_BYTES:
+                    self.log("W: batas ukuran smali-saja tercapai; sisa class tanpa Java tidak dipindai")
+                    return
+                text = read_text(path, MAX_SMALI_ONLY_FILE)
+                if text is None:
+                    continue
+                self._smali_only_bytes += len(text)
+                rel = _rel(path, self.work)
+                lines = Lines(text)
+                s = self.stats
+                s.smali_only_files += 1
+                if len(s.smali_only_samples) < 20:
+                    s.smali_only_samples.append(inner[:-len(".smali")].replace("/", "."))
+                self.index.add_code(rel, text)
+                self._scan_secrets(text, rel, lines, False)
+                self._scan_literals(text, rel, lines, False, SMALI_LITERAL_RE)
+
     def scan_resource(self, path: Path) -> None:
         rel = _rel(path, self.work)
         try:
@@ -354,6 +407,10 @@ class Scanner:
                 last = time.monotonic()
                 self.log(f"progress: {i} of {total}")
         self.log(f"progress: {total} of {total}")
+
+        self._scan_smali_only()
+        if self.stats.smali_only_files:
+            self.log(f"W: {self.stats.smali_only_files:,} class aplikasi ada di smali tetapi tidak dihasilkan jadx; dipindai dari smali")
 
         res_roots = [self.work / "apktool" / "res" / "values", self.work / "apktool" / "res" / "xml",
                      self.work / "apktool" / "res" / "raw", self.work / "apktool" / "assets"]

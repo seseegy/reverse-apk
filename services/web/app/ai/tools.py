@@ -29,6 +29,10 @@ class ToolError(Exception):
     """Galat tool yang aman ditampilkan ke model (mis. argumen salah). Dikembalikan sebagai hasil tool, bukan crash."""
 
 
+class NoJava(ToolError):
+    """Class tidak punya Java hasil jadx (jadx gagal/melewati dex-nya). Pemanggil boleh jatuh ke smali."""
+
+
 @dataclass
 class ToolContext:
     analysis_id: int
@@ -169,7 +173,17 @@ def list_classes(ctx: ToolContext, args: dict) -> dict:
     r = codeindex.list_classes_in(ctx.work, ctx.analysis_id, package, _int(args, "limit", 100, 1, 200))
     if not r["available"]:
         raise ToolError("indeks kode belum tersedia (jalankan analisis statis)")
-    return {"class": [{"nama": c["name"], "baris": c["lines"]} for c in r["classes"]]}
+    out: dict[str, Any] = {"class": [{"nama": c["name"], "baris": c["lines"]} for c in r["classes"]]}
+    try:   # class yang tidak dihasilkan jadx tetap ada di bytecode: tampilkan agar tidak dikira tidak ada
+        with callgraph.open_graph(ctx.work, ctx.analysis_id) as (conn, _state):
+            only = callgraph.smali_only_in_package(conn, package, {c["name"] for c in r["classes"]})
+        if only:
+            out["hanya_smali"] = only
+            out["catatan"] = ("'hanya_smali' = class yang ADA di bytecode tetapi tidak dihasilkan jadx; baca dengan get_class/get_method "
+                              "(otomatis smali) atau read_file.")
+    except callgraph.GraphError:
+        pass
+    return out
 
 
 def search_code(ctx: ToolContext, args: dict) -> dict:
@@ -195,7 +209,7 @@ def _read_source(ctx: ToolContext, name: str, fmt: str) -> tuple[str, str, dict]
     if not found["available"]:
         raise ToolError("indeks kode belum tersedia (jalankan analisis statis)")
     if not found["matches"]:
-        raise ToolError(f"class '{name}' tidak ditemukan. Gunakan search_code atau list_classes untuk mencari nama yang benar.")
+        raise NoJava(f"class '{name}' tidak ditemukan. Gunakan search_code atau list_classes untuk mencari nama yang benar.")
     if len(found["matches"]) > 1 and "." not in name:
         opts = [f"{m['package']}.{m['name']}" if m["package"] else m["name"] for m in found["matches"][:8]]
         raise ToolError("nama class ambigu; gunakan nama lengkap: " + ", ".join(opts))
@@ -214,21 +228,52 @@ def _read_source(ctx: ToolContext, name: str, fmt: str) -> tuple[str, str, dict]
     return rel, "java", data
 
 
+def _smali_of_class(ctx: ToolContext, name: str) -> tuple[str, dict]:
+    """(path relatif work, hasil read_file) untuk smali sebuah class, lewat call graph. Dipakai bila jadx tidak menghasilkan Java."""
+    try:
+        with callgraph.open_graph(ctx.work, ctx.analysis_id) as (conn, _state):
+            cls = callgraph.resolve_class(conn, name)
+            rel = cls["file"] if cls["declared"] else None
+    except callgraph.GraphError as exc:
+        raise ToolError(str(exc)) from None
+    if not rel or not rel.startswith("apktool/"):
+        raise ToolError(f"class '{name}' tidak punya smali (class framework/pustaka yang tidak ada di APK).")
+    data = codeindex.read_file(ctx.work, ctx.analysis_id, "smali", rel[len("apktool/"):])
+    if data is None or data.get("binary"):
+        raise ToolError("berkas smali tidak dapat dibaca")
+    return rel, data
+
+
+_NO_JAVA_NOTE = ("jadx TIDAK menghasilkan Java untuk class ini (gagal/melewati dex-nya); yang ditampilkan adalah smali (bytecode). "
+                 "Sitasi dengan path ini apa adanya, mis. `{path}:123`.")
+
+
 def get_class(ctx: ToolContext, args: dict) -> dict:
     name = _str(args, "name", maxlen=300)
     fmt = _str(args, "format", required=False, maxlen=10, default="java").lower()
     if fmt not in ("java", "smali"):
         raise ToolError("format harus 'java' atau 'smali'")
     start = _int(args, "start_line", 1, 1, 10_000_000)
-    rel, _root, data = _read_source(ctx, name, fmt)
+    note = None
+    try:
+        rel, _root, data = _read_source(ctx, name, fmt)
+    except NoJava as exc:
+        try:
+            rel, data = _smali_of_class(ctx, name)
+        except ToolError:
+            raise exc from None
+        fmt, note = "smali", _NO_JAVA_NOTE.format(path=rel)
     lines = data["text"].split("\n")
     chunk = "\n".join(lines[start - 1:])
     chunk, cut = _clip(chunk, ctx.cfg.max_tool_chars)
     shown = chunk.count("\n") + 1
-    return {"berkas": rel, "format": fmt, "total_baris": len(lines), "baris_mulai": start,
-            "baris_akhir": start + shown - 1, "dipotong": cut,
-            "lanjut": f"panggil lagi dengan start_line={start + shown}" if cut else None,
-            "kode": ctx.redactor.text(_numbered(chunk, start))}
+    out = {"berkas": rel, "format": fmt, "total_baris": len(lines), "baris_mulai": start,
+           "baris_akhir": start + shown - 1, "dipotong": cut,
+           "lanjut": f"panggil lagi dengan start_line={start + shown}" if cut else None,
+           "kode": ctx.redactor.text(_numbered(chunk, start))}
+    if note:
+        out["catatan"] = note
+    return out
 
 
 _METHOD_DECL = r"(?:public|protected|private|static|final|abstract|synchronized|native|default|\s)+[\w<>\[\],.? $]+?\s+{name}\s*\("
@@ -239,11 +284,24 @@ def get_method(ctx: ToolContext, args: dict) -> dict:
     meth = _str(args, "method", maxlen=100)
     if not re.fullmatch(r"[A-Za-z_$<][\w$<>]*", meth):
         raise ToolError("nama method tidak valid")
-    rel, _root, data = _read_source(ctx, cls, "java")
+    try:
+        rel, _root, data = _read_source(ctx, cls, "java")
+    except NoJava as exc:
+        try:
+            srel, sdata = _smali_of_class(ctx, cls)
+        except ToolError:
+            raise exc from None
+        return _smali_method(ctx, srel, sdata, meth, _NO_JAVA_NOTE.format(path=srel))
     text = data["text"]
     decl = re.compile(r"^[ \t]*" + _METHOD_DECL.format(name=re.escape(meth)), re.M)
     m = decl.search(text)
     if not m:
+        # Method bisa saja ada di bytecode tetapi tidak muncul di Java (mis. sintetis, gagal dekompilasi).
+        try:
+            srel, sdata = _smali_of_class(ctx, cls)
+            return _smali_method(ctx, srel, sdata, meth, "method tidak ada di Java hasil jadx; ditampilkan dari smali.")
+        except ToolError:
+            pass
         raise ToolError(f"method '{meth}' tidak ditemukan di {cls}. Gunakan get_class untuk melihat seluruh class.")
     start_pos = m.start()
     brace = text.find("{", m.end())
@@ -275,6 +333,13 @@ def get_method(ctx: ToolContext, args: dict) -> dict:
                 break
         i += 1
     body = text[start_pos:i + 1]
+    if "Method not decompiled" in body:
+        try:
+            srel, sdata = _smali_of_class(ctx, cls)
+            return _smali_method(ctx, srel, sdata, meth, "jadx gagal mendekompilasi method ini ('Method not decompiled'); "
+                                 "ditampilkan dari smali.")
+        except ToolError:
+            pass
     first_line = text.count("\n", 0, start_pos) + 1
     body, cut = _clip(body, ctx.cfg.max_tool_chars)
     overloads = len(decl.findall(text))
@@ -300,6 +365,36 @@ def _graph_call(ctx: ToolContext, fn: Callable[..., dict]) -> dict:
         out["PERINGATAN_GRAF"] = ("call graph PARSIAL (dipotong oleh batas waktu/jumlah saat analisis); hasil bisa kurang "
                                   "lengkap, jadi 'tidak ada' tidak berarti tidak ada.")
     return out
+
+
+def _smali_method(ctx: ToolContext, rel: str, data: dict, meth: str, note: str) -> dict:
+    """Semua overload `meth` dari teks smali, dengan nomor baris BERKAS smali (siap disitir)."""
+    lines = data["text"].split("\n")
+    blocks: list[tuple[int, int]] = []
+    pat = re.compile(r"^\.method\s.*\s" + re.escape(meth) + r"\(")
+    i = 0
+    while i < len(lines):
+        if pat.match(lines[i]):
+            j = i
+            while j < len(lines) and not lines[j].startswith(".end method"):
+                j += 1
+            blocks.append((i + 1, min(j, len(lines) - 1) + 1))
+            i = j
+        i += 1
+    if not blocks:
+        raise ToolError(f"method '{meth}' tidak ada di {rel}. Gunakan class_info untuk daftar method class ini.")
+    parts, used, cut = [], 0, False
+    for b0, b1 in blocks:
+        piece = _numbered("\n".join(lines[b0 - 1:b1]), b0)
+        if used + len(piece) > ctx.cfg.max_tool_chars and parts:
+            cut = True
+            break
+        parts.append(piece)
+        used += len(piece)
+    code, cut2 = _clip("\n\n".join(parts), ctx.cfg.max_tool_chars)
+    return {"berkas": rel, "format": "smali", "method": meth, "overload_ditemukan": len(blocks),
+            "rentang_baris": [f"{b0}-{b1}" for b0, b1 in blocks[:10]], "dipotong": cut or cut2, "catatan": note,
+            "kode": ctx.redactor.text(code)}
 
 
 def find_xrefs(ctx: ToolContext, args: dict) -> dict:
@@ -423,20 +518,40 @@ def get_findings(ctx: ToolContext, args: dict) -> dict:
             "catatan": "Heuristik, bukan klaim kerentanan. Nilai secret tidak ditampilkan."}
 
 
-def get_resource(ctx: ToolContext, args: dict) -> dict:
-    path = _str(args, "path", maxlen=400)
-    data = None
-    for root in ("smali", "jres"):
-        data = codeindex.read_file(ctx.work, ctx.analysis_id, root, path)
-        if data is not None:
+_ROOT_PREFIXES = (("jadx/sources/", "java"), ("jadx/resources/", "jres"), ("apktool/", "smali"))
+
+
+def read_file(ctx: ToolContext, args: dict) -> dict:
+    """Baca berkas teks apa pun yang boleh dijelajahi, dengan PATH PERSIS seperti yang dipakai untuk sitasi.
+
+    jadx/sources/...java, jadx/resources/..., apktool/smali*/...smali, apktool/res/..., apktool/AndroidManifest.xml.
+    """
+    path = _str(args, "path", maxlen=500).replace("\\", "/")
+    start = _int(args, "start_line", 1, 1, 10_000_000)
+    end = _int(args, "end_line", 0, 0, 10_000_000)
+    root, rel = "smali", path           # path tanpa awalan dianggap relatif terhadap apktool/ (kompatibel dengan get_resource lama)
+    for prefix, r in _ROOT_PREFIXES:
+        if path.startswith(prefix):
+            root, rel = r, path[len(prefix):]
             break
+    data = codeindex.read_file(ctx.work, ctx.analysis_id, root, rel)
     if data is None:
-        raise ToolError("resource tidak ditemukan. Path relatif terhadap apktool/ (mis. res/xml/network_security_config.xml, "
-                        "AndroidManifest.xml, assets/...).")
+        raise ToolError("berkas tidak ditemukan. Pakai path persis dari hasil tool lain, mis. jadx/sources/pkg/Kelas.java, "
+                        "apktool/smali_classes7/pkg/Kelas.smali, apktool/res/xml/network_security_config.xml, apktool/AndroidManifest.xml.")
     if data.get("binary"):
         raise ToolError("berkas biner tidak ditampilkan")
-    text, cut = _clip(data["text"], ctx.cfg.max_tool_chars)
-    return {"path": path, "dipotong": cut or data["truncated"], "isi": ctx.redactor.text(text)}
+    lines = data["text"].split("\n")
+    if start > len(lines):
+        raise ToolError(f"berkas hanya {len(lines)} baris")
+    last = min(end, len(lines)) if end else len(lines)
+    if last < start:
+        raise ToolError("end_line harus >= start_line")
+    chunk, cut = _clip("\n".join(lines[start - 1:last]), ctx.cfg.max_tool_chars)
+    shown = chunk.count("\n") + 1
+    return {"path": path, "total_baris": len(lines), "baris_mulai": start, "baris_akhir": start + shown - 1,
+            "dipotong": cut or (data["truncated"] and last == len(lines)),
+            "lanjut": f"panggil lagi dengan start_line={start + shown}" if cut else None,
+            "isi": ctx.redactor.text(_numbered(chunk, start))}
 
 
 # ---------------------------------------------------------------- registri & skema untuk model
@@ -454,12 +569,12 @@ TOOLS: dict[str, tuple[Callable[[ToolContext, dict], dict], dict]] = {
                                                  "encrypt, okhttp, baseUrl, SharedPreferences.",
                                   "properties": {"query": {"type": "string"}, "include_libraries": {"type": "boolean"}},
                                   "required": ["query"]}),
-    "get_class": (get_class, {"description": "Baca kode sebuah class (nomor baris disertakan). Besar -> dipotong, lanjutkan dengan start_line.",
+    "get_class": (get_class, {"description": "Baca kode sebuah class (nomor baris disertakan). Besar -> dipotong, lanjutkan dengan start_line. Bila jadx tidak menghasilkan Java untuk class itu, otomatis diberi smali (cek field 'format' & 'berkas').",
                               "properties": {"name": {"type": "string", "description": "nama lengkap com.x.Kelas atau nama sederhana"},
                                              "format": {"type": "string", "enum": ["java", "smali"]},
                                              "start_line": {"type": "integer"}},
                               "required": ["name"]}),
-    "get_method": (get_method, {"description": "Baca satu method dari sebuah class.",
+    "get_method": (get_method, {"description": "Baca satu method dari sebuah class (semua overload di smali). Jatuh ke smali bila jadx gagal.",
                                 "properties": {"class": {"type": "string"}, "method": {"type": "string"}},
                                 "required": ["class", "method"]}),
     "find_xrefs": (find_xrefs, {"description": "Siapa yang memakai sebuah class/method/field (pemanggil NYATA dari bytecode, termasuk lewat "
@@ -491,8 +606,11 @@ TOOLS: dict[str, tuple[Callable[[ToolContext, dict], dict], dict]] = {
                                                    "include_libraries": {"type": "boolean"}}}),
     "get_findings": (get_findings, {"description": "Temuan analisis statis (tanpa nilai secret mentah).",
                                     "properties": {"category": {"type": "string", "enum": list(store.FINDING_CATEGORIES)}}}),
-    "get_resource": (get_resource, {"description": "Baca resource/manifest teks di apktool/ (mis. res/xml/network_security_config.xml).",
-                                    "properties": {"path": {"type": "string"}}, "required": ["path"]}),
+    "read_file": (read_file, {"description": "Baca berkas teks APA PUN dengan rentang baris, memakai path persis seperti sitasi: "
+                                             "jadx/sources/pkg/A.java, apktool/smali_classes7/pkg/A.smali (smali SEMUA class, termasuk yang "
+                                             "tidak dihasilkan jadx), apktool/res/..., apktool/AndroidManifest.xml. class_info memberi path smali.",
+                              "properties": {"path": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}},
+                              "required": ["path"]}),
 }
 
 
