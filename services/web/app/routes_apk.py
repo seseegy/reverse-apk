@@ -25,6 +25,10 @@ from rvcore.fsutil import read_json_under, safe_rmtree
 
 from . import codeindex
 from . import status as system_status
+from .ai import budget as ai_budget
+from .ai import chat as ai_chat
+from .ai.config import ConfigError, load_ai_config
+from .ai.pricing import PriceTable
 from .apkcheck import ApkRejected, Limits, validate_apk
 from .context import (
     client_ip,
@@ -490,6 +494,232 @@ async def analysis_static(request: Request, analysis_id: AnalysisId,
         await run_in_threadpool(_mark_enqueue_failed, analysis_id)
         return RedirectResponse(f"/analyses/{analysis_id}?notice=enqueue_failed", status_code=303)
     return RedirectResponse(f"/analyses/{analysis_id}?notice=static_started", status_code=303)
+
+
+
+# ================================================================== M4: chat agent
+
+
+def _ai():
+    """(cfg, prices, error). Konfigurasi dibaca ulang tiap permintaan agar perubahan .env + restart langsung berlaku."""
+    try:
+        cfg = load_ai_config()
+    except ConfigError as exc:
+        return None, None, str(exc)
+    return cfg, PriceTable.load(cfg.models_file), None
+
+
+def _allowed_models(cfg, prices) -> list[dict[str, str]]:
+    """Daftar model yang boleh dipilih pengguna: yang dikonfigurasi di .env saja (bukan slug bebas dari browser)."""
+    out, seen = [], set()
+    for slug, role in ((cfg.model, "utama"), (cfg.model_pro, "kuat")):
+        if slug and slug not in seen:
+            seen.add(slug)
+            r = prices.rate(slug)
+            out.append({"slug": slug, "label": prices.labels.get(slug, slug), "role": role, "known": r.known,
+                        "idr_per_m": round(cfg.idr((r.in_per_m + r.out_per_m) / 2), 1)})
+    return out
+
+
+def _chat_state(analysis_id: int, session_id: int | None):
+    with closing(db()) as conn:
+        sessions = [dict(r) for r in store.list_chat_sessions(conn, analysis_id)]
+        messages = []
+        if session_id is not None and store.get_chat_session(conn, analysis_id, session_id):
+            for m in store.get_chat_messages(conn, session_id):
+                d = dict(m)
+                for k in ("tool_calls", "citations"):
+                    try:
+                        d[k] = json.loads(d[k]) if d[k] else []
+                    except ValueError:
+                        d[k] = []
+                messages.append(d)
+        return sessions, messages
+
+
+@router.get("/analyses/{analysis_id}/chat", include_in_schema=False)
+async def analysis_chat(request: Request, analysis_id: AnalysisId, s: int | None = Query(None, ge=1, le=2**31 - 1)) -> Response:
+    early, ctx = await _tab_context(request, analysis_id, "chat")
+    if early is not None:
+        return early
+    cfg, prices, cfg_error = _ai()
+    sessions, messages = await run_in_threadpool(_chat_state, analysis_id, s)
+    snap = None
+    if cfg and cfg.enabled:
+        with closing(db()) as conn:
+            snap = ai_budget.snapshot(conn, cfg, s if messages or s else None)
+    has_index = await run_in_threadpool(codeindex.index_exists, layout.work, analysis_id)
+    return render(request, "chat.html", {
+        **ctx, "ai_enabled": bool(cfg and cfg.enabled), "ai_error": cfg_error, "sessions": sessions, "messages": messages,
+        "session_id": s if messages or any(x["id"] == s for x in sessions) else None, "budget": snap,
+        "models": _allowed_models(cfg, prices) if cfg and cfg.enabled else [], "has_index": has_index, "cfg": cfg,
+        "suggestions": _suggestions(ctx),
+    })
+
+
+def _suggestions(ctx: dict) -> list[str]:
+    out = ["Bagaimana alur login aplikasi ini?", "Di mana base URL API ditentukan?", "Di mana kunci enkripsi dibuat atau dipakai?"]
+    counts = (ctx.get("counts") or {}).get("by_category") or {}
+    if counts.get("secret"):
+        out.insert(0, "Jelaskan temuan secret: di mana dipakai dan seberapa berisiko?")
+    if counts.get("network"):
+        out.append("Apakah ada komunikasi tanpa TLS atau validasi sertifikat yang dimatikan?")
+    return out[:5]
+
+
+MAX_CHAT_BODY = 16 * 1024
+
+
+@router.post("/analyses/{analysis_id}/chat/send", include_in_schema=False)
+async def chat_send(request: Request, analysis_id: AnalysisId) -> Response:
+    session = current_session(request)
+    if not session:
+        return _json(401, error="Sesi berakhir. Muat ulang halaman.")
+    if not tokens_equal(session.csrf, request.headers.get("x-csrf-token")):
+        return _json(403, error="Token keamanan tidak valid. Muat ulang halaman.")
+    cfg, prices, cfg_error = _ai()
+    if cfg is None or not cfg.enabled:
+        return _json(409, error=cfg_error or "AI belum dikonfigurasi (AI_BASE_URL, AI_API_KEY, AI_MODEL di .env).")
+    raw = await request.body()
+    if len(raw) > MAX_CHAT_BODY:
+        return _json(413, error="Pesan terlalu besar.")
+    try:
+        body = json.loads(raw or b"{}")
+        text = str(body.get("text", "")).strip()
+        model = body.get("model")
+        session_id = body.get("session_id")
+    except (ValueError, AttributeError):
+        return _json(400, error="Format permintaan tidak valid.")
+    if not text:
+        return _json(422, error="Pesan kosong.")
+    allowed = {m["slug"] for m in _allowed_models(cfg, prices)}
+    if model and model not in allowed:
+        return _json(422, error="Model tidak diizinkan.")
+    if session_id is not None and (isinstance(session_id, bool) or not isinstance(session_id, int)):
+        return _json(422, error="session_id tidak valid.")
+
+    def prepare():
+        with closing(db()) as conn:
+            an = store.get_analysis(conn, analysis_id)
+            if an is None:
+                return "not_found", None
+            if session_id is None:
+                sid = store.create_chat_session(conn, analysis_id, text[:60])
+            else:
+                if store.get_chat_session(conn, analysis_id, session_id) is None:
+                    return "no_session", None
+                sid = session_id
+            try:
+                ai_budget.check(conn, cfg, sid)
+            except Exception as exc:  # AIError(budget)
+                return "budget", str(getattr(exc, "message", exc))
+            return "ok", sid
+
+    status, sid = await run_in_threadpool(prepare)
+    if status == "not_found":
+        return _json(404, error="Analisis tidak ditemukan.")
+    if status == "no_session":
+        return _json(404, error="Sesi chat tidak ditemukan untuk analisis ini.")
+    if status == "budget":
+        return _json(402, error=sid, code="budget")
+    turn = ai_chat.REGISTRY.start(sid)
+    if turn is None:
+        return _json(409, error="Masih ada jawaban yang berjalan di sesi ini. Tunggu atau tekan Berhenti.")
+    ai_chat.run_in_thread(turn, cfg=cfg, prices=prices, analysis_id=analysis_id, work=layout.work, db=db, session_id=sid,
+                          user_text=text, model=model)
+    return _json(202, session_id=sid, stream=f"/analyses/{analysis_id}/chat/stream?s={sid}")
+
+
+@router.get("/analyses/{analysis_id}/chat/stream", include_in_schema=False)
+async def chat_stream(request: Request, analysis_id: AnalysisId, s: int = Query(..., ge=1, le=2**31 - 1)) -> Response:
+    if not current_session(request):
+        return PlainTextResponse("auth", status_code=401)
+    ok = await run_in_threadpool(lambda: _owns(analysis_id, s))
+    turn = ai_chat.REGISTRY.get(s) if ok else None
+    if turn is None:
+        return PlainTextResponse("tidak ada giliran aktif", status_code=404)
+
+    async def stream():
+        loop = asyncio.get_running_loop()
+        yield "retry: 0\n\n"
+        last_ping = loop.time()
+        while True:
+            if await request.is_disconnected():
+                return                                       # giliran tetap berjalan & tersimpan
+            try:
+                event, data = await loop.run_in_executor(None, lambda: turn.events.get(timeout=1.0))
+            except Exception:  # queue.Empty
+                if turn.done and turn.events.empty():
+                    return
+                if loop.time() - last_ping > 15:
+                    last_ping = loop.time()
+                    yield ": ping\n\n"
+                continue
+            yield ai_chat.sse_format(event, data)
+            if event == "end":
+                return
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no"})
+
+
+def _owns(analysis_id: int, session_id: int) -> bool:
+    with closing(db()) as conn:
+        return store.get_chat_session(conn, analysis_id, session_id) is not None
+
+
+@router.post("/analyses/{analysis_id}/chat/cancel", include_in_schema=False)
+async def chat_cancel(request: Request, analysis_id: AnalysisId, s: int = Query(..., ge=1, le=2**31 - 1)) -> Response:
+    session = current_session(request)
+    if not session:
+        return _json(401, error="Sesi berakhir.")
+    if not tokens_equal(session.csrf, request.headers.get("x-csrf-token")):
+        return _json(403, error="Token keamanan tidak valid.")
+    if not await run_in_threadpool(lambda: _owns(analysis_id, s)):
+        return _json(404, error="Sesi chat tidak ditemukan.")
+    turn = ai_chat.REGISTRY.get(s)
+    if turn is not None and not turn.done:
+        turn.cancel.set()
+    return _json(200, ok=True)
+
+
+@router.post("/analyses/{analysis_id}/chat/{session_id}/delete", include_in_schema=False)
+async def chat_delete(request: Request, analysis_id: AnalysisId, session_id: ApkId, csrf: str = Form("", max_length=256)) -> Response:
+    session = current_session(request)
+    if not session:
+        return RedirectResponse("/login", status_code=303)
+    if not _csrf_ok(session, csrf):
+        return PlainTextResponse("CSRF token tidak valid", status_code=403)
+    turn = ai_chat.REGISTRY.get(session_id)
+    if turn is not None and not turn.done:
+        turn.cancel.set()
+        return RedirectResponse(f"/analyses/{analysis_id}/chat?s={session_id}", status_code=303)
+
+    def work():
+        with closing(db()) as conn:
+            return store.delete_chat_session(conn, analysis_id, session_id)
+    await run_in_threadpool(work)
+    return RedirectResponse(f"/analyses/{analysis_id}/chat", status_code=303)
+
+
+@router.get("/analyses/{analysis_id}/chat/{session_id}/export.md", include_in_schema=False)
+async def chat_export(request: Request, analysis_id: AnalysisId, session_id: ApkId) -> Response:
+    if not current_session(request):
+        return PlainTextResponse("auth", status_code=401)
+    sessions, messages = await run_in_threadpool(_chat_state, analysis_id, session_id)
+    if not messages:
+        return PlainTextResponse("tidak ditemukan", status_code=404)
+    lines = [f"# Percakapan analisis #{analysis_id}", ""]
+    for m in messages:
+        who = "Anda" if m["role"] == "user" else "Asisten"
+        lines += [f"## {who}", "", m["content"], ""]
+        if m["role"] == "assistant" and m["tool_calls"]:
+            lines += ["<details><summary>Langkah tool</summary>", ""]
+            lines += [f"- `{t.get('name')}` {t.get('summary', '')}" for t in m["tool_calls"]]
+            lines += ["", "</details>", ""]
+    # text/plain + attachment: tidak pernah dirender sebagai HTML oleh browser.
+    return PlainTextResponse("\n".join(lines), media_type="text/markdown; charset=utf-8", headers={
+        "Content-Disposition": f'attachment; filename="chat-{analysis_id}-{session_id}.md"', "X-Content-Type-Options": "nosniff"})
 
 
 # ================================================================== status live

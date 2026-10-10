@@ -19,6 +19,8 @@ COPY web/requirements.txt .
 RUN pip install -r requirements.txt
 
 COPY rvcore ./rvcore
+# Pola secret yang sama dengan analyzer dipakai ulang untuk redaksi sebelum kirim ke AI (satu sumber kebenaran).
+COPY runner/analyzer ./analyzer
 COPY web/app ./app
 
 USER 10001:10001

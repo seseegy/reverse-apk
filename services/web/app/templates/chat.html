@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% set title = an.app_label or an.filename_display %}
+{% block title %}Chat · {{ title }} · reverse-apk{% endblock %}
+
+{% block header %}{% include "_header.html" %}{% endblock %}
+
+{% block content %}
+<div class="container page container-wide">
+  <a class="back-link" href="/">{{ icon('arrow-left', 16) }}<span>Semua APK</span></a>
+  {% include "_analysis_head.html" %}
+
+  {% if not ai_enabled %}
+  <section class="card empty" aria-labelledby="noai-title">
+    <div class="empty-icon">{{ icon('info', 28) }}</div>
+    <h2 id="noai-title">AI belum diaktifkan</h2>
+    <p class="muted">
+      {% if ai_error %}Konfigurasi AI bermasalah: <strong>{{ ai_error }}</strong>.
+      {% else %}Isi <span class="mono">AI_BASE_URL</span>, <span class="mono">AI_API_KEY</span>, dan <span class="mono">AI_MODEL</span> di
+      <span class="mono">.env</span>, jalankan <span class="mono">docker compose up -d web</span>, lalu <span class="mono">make ai-check</span>.{% endif %}
+      Selama kosong, tidak ada data APK yang dikirim ke pihak mana pun.
+    </p>
+  </section>
+  {% else %}
+  <section class="chat-app" data-chat data-analysis-id="{{ an.id }}" data-csrf="{{ csrf }}"
+           data-session-id="{{ session_id or '' }}" data-ready="{{ 'true' if has_index else 'false' }}">
+
+    <aside class="chat-side">
+      <a class="btn btn-primary btn-sm" href="/analyses/{{ an.id }}/chat">{{ icon('refresh', 16) }}<span>Sesi baru</span></a>
+      <h2 class="chat-side-title">Sesi</h2>
+      {% if sessions %}
+      <ul class="plain-list chat-sessions">
+        {% for ss in sessions %}
+        <li{% if ss.id == session_id %} class="is-current"{% endif %}>
+          <a href="/analyses/{{ an.id }}/chat?s={{ ss.id }}"{% if ss.id == session_id %} aria-current="page"{% endif %}>{{ ss.title or ('Sesi ' ~ ss.id) }}</a>
+          <span class="muted hint">{{ (ss.cost_credits * cfg.credit_idr)|round(1) }} Rp</span>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}<p class="muted hint">Belum ada sesi.</p>{% endif %}
+
+      <div class="budget" role="status" aria-atomic="true" data-budget>
+        {% if budget %}
+        <div>Hari ini: <strong class="mono">{{ '%.3f'|format(budget.today) }}</strong> / {{ '%g'|format(budget.today_limit) if budget.today_limit else '∞' }} kredit
+          <span class="muted">(≈ Rp{{ '{:,.0f}'.format(budget.today_idr) }})</span></div>
+        {% endif %}
+      </div>
+      <p class="muted hint">Potongan kode yang Anda tanyakan dikirim ke provider AI. Secret diredaksi lebih dulu
+        {% if cfg.redact_secrets %}(aktif){% else %}<strong>(NONAKTIF)</strong>{% endif %}.</p>
+
+      {% if session_id %}
+      <div class="btn-row">
+        <a class="btn btn-ghost btn-sm" href="/analyses/{{ an.id }}/chat/{{ session_id }}/export.md" download>{{ icon('file', 16) }}<span>Ekspor .md</span></a>
+        <form method="post" action="/analyses/{{ an.id }}/chat/{{ session_id }}/delete" data-confirm="Hapus sesi chat ini?">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="btn btn-danger btn-sm">{{ icon('trash', 16) }}<span>Hapus</span></button>
+        </form>
+      </div>
+      {% endif %}
+    </aside>
+
+    <section class="chat-main" aria-label="Percakapan">
+      {% if not has_index %}
+      <div class="alert alert-warn" role="status">{{ icon('alert-triangle') }}
+        <span>Indeks kode belum ada, jadi pencarian tidak tersedia bagi asisten. Jalankan analisis statis dulu (tab Temuan).</span></div>
+      {% endif %}
+
+      <div class="chat-log" data-log tabindex="0" role="log" aria-live="polite" aria-label="Riwayat percakapan">
+        {% for m in messages %}
+        <article class="msg msg-{{ m.role }}" data-role="{{ m.role }}">
+          <header class="msg-head">{{ 'Anda' if m.role == 'user' else 'Asisten' }}{% if m.model %} <span class="muted mono">· {{ m.model }}</span>{% endif %}</header>
+          {% if m.tool_calls %}
+          <details class="msg-tools"><summary>{{ m.tool_calls|length }} langkah tool</summary>
+            <ul class="plain-list">
+              {% for t in m.tool_calls %}<li><span class="mono">{{ t.name }}</span> <span class="muted mono break">{{ t.args }}</span>
+                <span class="{{ 'ok' if t.ok else 'bad' }} hint">{{ t.summary }}</span></li>{% endfor %}
+            </ul></details>
+          {% endif %}
+          <div class="msg-body" data-md data-citations='{{ m.citations|tojson|forceescape }}'>{{ m.content }}</div>
+        </article>
+        {% endfor %}
+      </div>
+
+      {% if not messages %}
+      <div class="suggestions" data-suggestions>
+        <p class="muted">Coba tanyakan:</p>
+        <div class="btn-row">
+          {% for q in suggestions %}<button type="button" class="btn btn-ghost btn-sm" data-suggest="{{ q }}">{{ q }}</button>{% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      <form class="chat-form" data-form novalidate>
+        <label for="chat-text" class="sr-only">Pesan</label>
+        <textarea id="chat-text" rows="2" maxlength="4000" placeholder="Tanya tentang kode APK ini… (Enter kirim, Shift+Enter baris baru)"
+                  data-input></textarea>
+        <div class="chat-controls">
+          {% if models|length > 1 %}
+          <label for="chat-model" class="sr-only">Model</label>
+          <select id="chat-model" data-model>
+            {% for mo in models %}<option value="{{ mo.slug }}">{{ mo.label }} · {{ mo.role }} (~Rp{{ mo.idr_per_m }}/jt token)</option>{% endfor %}
+          </select>
+          {% elif models %}<input type="hidden" data-model value="{{ models[0].slug }}"><span class="muted hint mono">{{ models[0].label }}</span>{% endif %}
+          <span class="muted hint" role="status" aria-atomic="true" data-status></span>
+          <button type="button" class="btn btn-ghost btn-sm" data-stop hidden>{{ icon('x', 16) }}<span>Berhenti</span></button>
+          <button type="submit" class="btn btn-primary" data-send>{{ icon('activity', 16) }}<span>Kirim</span></button>
+        </div>
+      </form>
+    </section>
+  </section>
+  {% endif %}
+</div>
+{% endblock %}

@@ -358,6 +358,46 @@ def ai_spent(conn: sqlite3.Connection, since: float | None = None, session_id: i
     return float(conn.execute(sql, params).fetchone()[0])
 
 
+# ------------------------------------------------------------------ chat
+def create_chat_session(conn: sqlite3.Connection, analysis_id: int, title: str | None = None) -> int:
+    ts = now()
+    with tx(conn):
+        cur = conn.execute("INSERT INTO chat_session (analysis_id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                           (analysis_id, _text(title, 120), ts, ts))
+        return int(cur.lastrowid)
+
+
+def get_chat_session(conn: sqlite3.Connection, analysis_id: int, session_id: int) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM chat_session WHERE id = ? AND analysis_id = ?", (session_id, analysis_id)).fetchone()
+
+
+def list_chat_sessions(conn: sqlite3.Connection, analysis_id: int, limit: int = 30) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM chat_session WHERE analysis_id = ? ORDER BY id DESC LIMIT ?", (analysis_id, limit)).fetchall()
+
+
+def add_chat_message(conn: sqlite3.Connection, session_id: int, role: str, content: str, *, tool_calls: Any = None,
+                     citations: Any = None, model: str | None = None) -> int:
+    ts = now()
+    with tx(conn):
+        cur = conn.execute(
+            "INSERT INTO chat_message (session_id, role, content, tool_calls, citations, model, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (session_id, role, content[:200000], json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None,
+             json.dumps(citations, ensure_ascii=False) if citations else None, _text(model, 120), ts))
+        conn.execute("UPDATE chat_session SET updated_at = ? WHERE id = ?", (ts, session_id))
+        return int(cur.lastrowid)
+
+
+def get_chat_messages(conn: sqlite3.Connection, session_id: int, limit: int = 200) -> list[sqlite3.Row]:
+    rows = conn.execute("SELECT * FROM chat_message WHERE session_id = ? ORDER BY id DESC LIMIT ?", (session_id, limit)).fetchall()
+    return list(reversed(rows))
+
+
+def delete_chat_session(conn: sqlite3.Connection, analysis_id: int, session_id: int) -> bool:
+    with tx(conn):
+        return conn.execute("DELETE FROM chat_session WHERE id = ? AND analysis_id = ?", (session_id, analysis_id)).rowcount == 1
+
+
 # ------------------------------------------------------------------ aksi pengguna (web)
 def request_cancel(conn: sqlite3.Connection, analysis_id: int) -> str:
     """'cancelled' (antre, langsung batal) | 'requested' (sedang jalan) | 'noop'."""

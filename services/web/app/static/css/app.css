@@ -619,3 +619,64 @@ select:hover { border-color: var(--color-muted-foreground); }
   .code-side { position: static; max-height: 60vh; }
   .code-view { max-height: 70vh; }
 }
+
+/* =====================================================================
+   M4 — chat agent
+   ===================================================================== */
+.chat-app { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: var(--space-4); align-items: start; }
+.chat-side { display: grid; gap: var(--space-3); padding: var(--space-3); background: var(--color-card);
+  border: 1px solid var(--color-border); border-radius: var(--radius); align-content: start; position: sticky; top: var(--space-3); }
+.chat-side-title { font-size: 0.9rem; color: var(--color-muted-foreground); }
+.chat-sessions li { display: flex; justify-content: space-between; gap: var(--space-2); align-items: baseline; }
+.chat-sessions a { overflow-wrap: anywhere; }
+.chat-sessions li.is-current a { font-weight: 700; }
+.budget { padding: var(--space-2) var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius); font-size: 0.85rem; }
+
+.chat-main { display: grid; gap: var(--space-3); min-width: 0; }
+.chat-log {
+  display: grid; gap: var(--space-3); align-content: start; min-height: 18rem; max-height: calc(100vh - 21rem); overflow: auto;
+  padding: var(--space-3); background: var(--color-card); border: 1px solid var(--color-border); border-radius: var(--radius);
+}
+.chat-log:focus-visible { outline: 2px solid var(--color-ring); outline-offset: 2px; }
+.msg { display: grid; gap: var(--space-2); padding: var(--space-3) var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius); max-width: 100%; }
+.msg-user { background: var(--color-muted); justify-self: end; max-width: min(46rem, 100%); }
+.msg-assistant { background: var(--color-background); }
+.msg-error { border-color: var(--text-danger); background: rgba(239, 68, 68, 0.1); }
+.msg-head { font-family: var(--font-mono); font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--color-muted-foreground); }
+.msg-body { overflow-wrap: anywhere; max-width: 75ch; }
+.msg-body.msg-plain { white-space: pre-wrap; }
+.msg-note { font-size: 0.85rem; color: var(--text-warn); }
+.msg-tools { font-size: 0.85rem; }
+.msg-tools summary { cursor: pointer; color: var(--color-muted-foreground); width: fit-content; }
+.msg-tools .ok { color: var(--text-ok); }
+.msg-tools .bad { color: var(--text-danger); }
+.md-p { margin: 0 0 var(--space-3); line-height: 1.6; }
+.md-p:last-child { margin-bottom: 0; }
+.md-h { font-size: 1rem; margin: var(--space-3) 0 var(--space-2); }
+.md-list { margin: 0 0 var(--space-3); padding-left: var(--space-5); display: grid; gap: var(--space-1); }
+.ic { padding: 1px 5px; background: var(--code-bg); border: 1px solid var(--color-border); border-radius: 4px; font-family: var(--font-mono); font-size: 0.85em; overflow-wrap: anywhere; }
+/* Sitasi: tautan bergaris bawah + mono; yang tak terverifikasi diberi teks & garis putus-putus (bukan hanya warna) */
+.cite { font-family: var(--font-mono); font-size: 0.85em; overflow-wrap: anywhere; }
+.cite-bad { color: var(--sev-medium); text-decoration-style: dashed; }
+.cite-flag { font-size: 0.75em; font-weight: 700; color: var(--sev-medium); }
+.codeblock { border: 1px solid var(--color-border); border-radius: var(--radius); background: var(--code-bg); margin: 0 0 var(--space-3); overflow: hidden; }
+.codeblock-bar { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-2); border-bottom: 1px solid var(--color-border); }
+.codeblock-bar .mono { flex: 1; }
+.codeblock pre { margin: 0; padding: var(--space-3); overflow: auto; font-family: var(--font-mono); font-size: 13px; line-height: 1.55; max-height: 28rem; }
+.codeblock-note { padding: var(--space-1) var(--space-3); font-size: 0.75rem; border-top: 1px solid var(--color-border); }
+
+.chat-form { display: grid; gap: var(--space-2); }
+.chat-form textarea {
+  width: 100%; min-height: 3.2rem; resize: vertical; padding: var(--space-2) var(--space-3); font: inherit;
+  background: var(--color-background); color: var(--color-foreground); border: 1px solid var(--color-border-control); border-radius: var(--radius);
+}
+.chat-form textarea:hover { border-color: var(--color-muted-foreground); }
+.chat-controls { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; justify-content: flex-end; }
+.chat-controls .hint { margin-right: auto; }
+.suggestions { display: grid; gap: var(--space-2); }
+
+@media (max-width: 900px) {
+  .chat-app { grid-template-columns: 1fr; }
+  .chat-side { position: static; }
+  .chat-log { max-height: 60vh; }
+}
