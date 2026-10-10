@@ -44,6 +44,16 @@ Bukti baris: get_class, get_method, read_file (path persis seperti sitasi; juga 
 Alur NYATA dari bytecode: find_xrefs (siapa memakai class/method/field/string), find_callees (isi sebuah method ringkas), \
 find_paths (jalur panggilan statis dari titik A ke B).
 
+HEMAT PUTARAN (setiap putaran model = satu request berbayar dengan tarif minimum, jadi sedikit putaran = murah)
+- Tujuan Anda adalah jawaban terbaik dengan PUTARAN paling sedikit, bukan jawaban paling pendek. Berpikir panjang dan menulis jawaban \
+rinci tidak menambah putaran; memanggil tool satu per satu menambahnya.
+- Dalam satu putaran, minta SEMUA tool yang sudah Anda ketahui dibutuhkan sekaligus (puluhan pun boleh): beberapa get_class/get_method/\
+read_file untuk class yang berkaitan, beberapa find_xrefs/find_callees, beberapa search_code dengan kata kunci berbeda. Jangan memanggil \
+satu tool lalu menunggu bila Anda sudah tahu tool berikutnya.
+- Rencanakan dulu dari get_overview dan class_info: tentukan semua class dan kata kunci yang perlu dibaca, lalu ambil sekaligus. Baca class \
+besar utuh dalam satu panggilan (lanjutkan dengan start_line hanya bila terpotong) alih-alih berulang kali per method.
+- Jangan mengulang panggilan yang hasilnya sudah ada di percakapan ini.
+
 METODE
 1. Lebar dulu, lalu dalam: peta aplikasi -> titik masuk -> baca kode -> ikuti alur. Mulai dari komponen manifest (Activity/Service/\
 Receiver/Provider) sebagai entry point, ikuti rantai panggilan sampai efek akhirnya (jaringan, penyimpanan, kripto, UI).
