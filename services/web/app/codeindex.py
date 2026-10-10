@@ -231,6 +231,54 @@ def search_code(work: Path, analysis_id: int, q: str, scope: str = "all") -> dic
     return result
 
 
+# ------------------------------------------------------------------------- paket & class (untuk tool agent)
+def list_packages(work: Path, analysis_id: int, prefix: str = "", include_libs: bool = False, limit: int = 200) -> dict[str, Any]:
+    out: dict[str, Any] = {"available": False, "packages": []}
+    with open_index(work, analysis_id) as conn:
+        if conn is None:
+            return out
+        out["available"] = True
+        like = prefix.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        rows = conn.execute(
+            "SELECT package, COUNT(*) AS n, MIN(is_lib) AS is_lib FROM classes WHERE package LIKE ? ESCAPE '\\' "
+            + ("" if include_libs else "AND is_lib = 0 ") + "GROUP BY package ORDER BY package LIMIT ?", (like, limit)).fetchall()
+        out["packages"] = [{"package": r["package"] or "(default)", "classes": r["n"], "library": bool(r["is_lib"])} for r in rows]
+    return out
+
+
+def list_classes_in(work: Path, analysis_id: int, package: str, limit: int = 200) -> dict[str, Any]:
+    out: dict[str, Any] = {"available": False, "classes": []}
+    with open_index(work, analysis_id) as conn:
+        if conn is None:
+            return out
+        out["available"] = True
+        rows = conn.execute("SELECT path, name, lines, size FROM classes WHERE package = ? ORDER BY name LIMIT ?",
+                            (package.strip(), limit)).fetchall()
+        out["classes"] = [dict(r) for r in rows]
+    return out
+
+
+def find_class(work: Path, analysis_id: int, name: str, limit: int = 10) -> dict[str, Any]:
+    """Cari class berdasarkan nama lengkap (com.x.A / com/x/A) atau nama sederhana (A, tidak peka huruf besar-kecil)."""
+    out: dict[str, Any] = {"available": False, "matches": []}
+    name = name.strip().replace("/", ".").removesuffix(".java")
+    if not name:
+        return out
+    with open_index(work, analysis_id) as conn:
+        if conn is None:
+            return out
+        out["available"] = True
+        if "." in name:
+            pkg, _, simple = name.rpartition(".")
+            rows = conn.execute("SELECT path, name, package, lines, is_lib FROM classes WHERE package = ? AND name = ? LIMIT ?",
+                                (pkg, simple, limit)).fetchall()
+        else:
+            rows = conn.execute("SELECT path, name, package, lines, is_lib FROM classes WHERE name = ? COLLATE NOCASE "
+                                "ORDER BY is_lib, package LIMIT ?", (name, limit)).fetchall()
+        out["matches"] = [dict(r) for r in rows]
+    return out
+
+
 # ------------------------------------------------------------------------- string / jaringan
 STRING_KINDS = ("url", "domain", "ip", "path", "base64", "hex")
 

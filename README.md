@@ -3,7 +3,10 @@
 Platform web **privat** (satu pengguna) untuk membongkar dan memahami APK Android dengan bantuan AI (DeepSeek).
 Berjalan di VPS sendiri lewat Docker Compose.
 
-> **Status:** M2 (analisis statis & penjelajah kode) selesai — selain upload & dekompilasi (M1), kini ada tab **Temuan**
+> **Status:** M4 (chat agent) tersedia — tanya kode APK dalam bahasa biasa; AI memakai tool baca-saja dan menyertakan sitasi yang
+> diverifikasi. **Opsional** dan mati secara bawaan (isi `AI_*` di `.env`, lalu `make ai-check`). M3 (laporan otomatis) belum dikerjakan.
+>
+> Sebelumnya: M2 (analisis statis & penjelajah kode) selesai — selain upload & dekompilasi (M1), kini ada tab **Temuan**
 > (secret, kripto, jaringan, manifest, tanda tangan), **Jaringan** (URL/domain/IP, network security config), dan **Kode**
 > (pohon + penampil + pencarian ≤ 500 ms). Ringkasan AI (M3) menyusul.
 > Lihat [roadmap](docs/prd/08-roadmap.md).

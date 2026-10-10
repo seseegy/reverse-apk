@@ -700,4 +700,225 @@
     var p0 = params.get("path"), l0 = parseInt(params.get("line"), 10) || 0;
     loadRoot().then(function () { if (p0) { openFile(p0, l0, []); return revealPath(p0); } });
   }
+
+  // ------------------------------------------------------------------ chat agent
+
+  var chatRoot = $("[data-chat]");
+  if (chatRoot) initChat(chatRoot);
+
+  var CITE_RE = /((?:jadx\/sources|jadx\/resources|apktool)\/[\w$.\/\-]{1,300}?):(\d{1,7})/g;
+  var FILE_EXT = { python: "py", py: "py", javascript: "js", js: "js", java: "java", kotlin: "kt", bash: "sh", sh: "sh", shell: "sh",
+                   json: "json", xml: "xml", markdown: "md", md: "md", smali: "smali", sql: "sql", yaml: "yml", yml: "yml", html: "txt" };
+
+  function citeUrl(analysisId, path, line) {
+    var root, rel;
+    if (path.indexOf("jadx/sources/") === 0) { root = "java"; rel = path.slice(13); }
+    else if (path.indexOf("jadx/resources/") === 0) { root = "jres"; rel = path.slice(15); }
+    else { root = "smali"; rel = path.slice(8); }
+    return "/analyses/" + encodeURIComponent(analysisId) + "/code?root=" + root + "&path=" + encodeURIComponent(rel).replace(/%2F/g, "/") + "&line=" + line;
+  }
+
+  // Markdown -> DOM. HANYA membuat elemen yang kita tentukan; teks selalu lewat createTextNode. Tidak ada innerHTML,
+  // tidak ada tautan dari model (URL ditampilkan sebagai teks), tidak ada gambar/HTML mentah.
+  function renderMarkdown(src, container, opts) {
+    while (container.firstChild) container.removeChild(container.firstChild);
+    var lines = String(src).replace(/\r/g, "").split("\n"), i = 0;
+    function textWithCites(parent, text) {
+      var last = 0, m;
+      CITE_RE.lastIndex = 0;
+      while ((m = CITE_RE.exec(text)) !== null) {
+        if (m.index > last) parent.appendChild(document.createTextNode(text.slice(last, m.index)));
+        parent.appendChild(cite(m[1], parseInt(m[2], 10)));
+        last = m.index + m[0].length;
+      }
+      if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
+    }
+    function cite(path, line) {
+      var a = document.createElement("a");
+      a.className = "cite"; a.textContent = path + ":" + line;
+      a.href = citeUrl(opts.analysisId, path, line);
+      var info = opts.citations && opts.citations[path + ":" + line];
+      if (info === false) {
+        a.className = "cite cite-bad"; a.title = "Sitasi tidak terverifikasi: berkas atau baris tidak ditemukan";
+        var b = document.createElement("span"); b.className = "cite-flag"; b.textContent = " [tidak terverifikasi]";
+        var w = document.createElement("span"); w.appendChild(a); w.appendChild(b); return w;
+      }
+      return a;
+    }
+    function inline(parent, text) {
+      var re = /`([^`\n]+)`|\*\*([^*\n]+)\*\*|\*([^*\s][^*\n]*)\*/g, last = 0, m;
+      while ((m = re.exec(text)) !== null) {
+        if (m.index > last) textWithCites(parent, text.slice(last, m.index));
+        if (m[1] !== undefined) { var c = document.createElement("code"); c.className = "ic"; textWithCites(c, m[1]); parent.appendChild(c); }
+        else if (m[2] !== undefined) { var st = document.createElement("strong"); textWithCites(st, m[2]); parent.appendChild(st); }
+        else { var em = document.createElement("em"); textWithCites(em, m[3]); parent.appendChild(em); }
+        last = m.index + m[0].length;
+      }
+      if (last < text.length) textWithCites(parent, text.slice(last));
+    }
+    function codeBlock(lang, code) {
+      var wrap = document.createElement("div"); wrap.className = "codeblock";
+      var bar = document.createElement("div"); bar.className = "codeblock-bar";
+      var lb = document.createElement("span"); lb.className = "mono muted"; lb.textContent = lang || "teks";
+      var copy = document.createElement("button"); copy.type = "button"; copy.className = "btn btn-ghost btn-sm"; copy.textContent = "Salin";
+      var dl = document.createElement("button"); dl.type = "button"; dl.className = "btn btn-ghost btn-sm"; dl.textContent = "Unduh";
+      copy.addEventListener("click", function () {
+        function ok() { copy.textContent = "Tersalin"; setTimeout(function () { copy.textContent = "Salin"; }, 1500); }
+        if (navigator.clipboard) navigator.clipboard.writeText(code).then(ok, function () { copy.textContent = "Gagal"; }); else copy.textContent = "Tidak didukung";
+      });
+      dl.addEventListener("click", function () {
+        var ext = FILE_EXT[(lang || "").toLowerCase()] || "txt";
+        var blob = new Blob([code], { type: "text/plain;charset=utf-8" });       // text/plain: tidak pernah dijalankan browser
+        var a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "kode-ai." + ext;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(a.href); }, 2000);
+      });
+      bar.appendChild(lb); bar.appendChild(copy); bar.appendChild(dl);
+      var pre = document.createElement("pre"), cd = document.createElement("code"); cd.textContent = code; pre.appendChild(cd);
+      var note = document.createElement("div"); note.className = "codeblock-note muted"; note.textContent = "Dibuat AI. Baca dan pahami sebelum dijalankan; tidak pernah dijalankan oleh aplikasi ini.";
+      wrap.appendChild(bar); wrap.appendChild(pre); wrap.appendChild(note); container.appendChild(wrap);
+    }
+    while (i < lines.length) {
+      var ln = lines[i], fence = /^\s*```\s*([\w+-]*)\s*$/.exec(ln);
+      if (fence) {
+        var buf = []; i++;
+        while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) { buf.push(lines[i]); i++; }
+        i++; codeBlock(fence[1], buf.join("\n")); continue;
+      }
+      var h = /^(#{1,4})\s+(.*)$/.exec(ln);
+      if (h) { var hd = document.createElement("h" + (Math.min(h[1].length, 3) + 2)); hd.className = "md-h"; inline(hd, h[2]); container.appendChild(hd); i++; continue; }
+      var ul = /^\s*[-*]\s+(.*)$/.exec(ln), ol = /^\s*\d+[.)]\s+(.*)$/.exec(ln);
+      if (ul || ol) {
+        var list = document.createElement(ul ? "ul" : "ol"); list.className = "md-list";
+        while (i < lines.length) {
+          var mm = (ul ? /^\s*[-*]\s+(.*)$/ : /^\s*\d+[.)]\s+(.*)$/).exec(lines[i]);
+          if (!mm) break;
+          var li = document.createElement("li"); inline(li, mm[1]); list.appendChild(li); i++;
+        }
+        container.appendChild(list); continue;
+      }
+      if (!ln.trim()) { i++; continue; }
+      var para = [];
+      while (i < lines.length && lines[i].trim() && !/^\s*```/.test(lines[i]) && !/^(#{1,4})\s+/.test(lines[i]) &&
+             !/^\s*[-*]\s+/.test(lines[i]) && !/^\s*\d+[.)]\s+/.test(lines[i])) { para.push(lines[i]); i++; }
+      var p = document.createElement("p"); p.className = "md-p"; inline(p, para.join("\n")); container.appendChild(p);
+    }
+  }
+  window.__rvRenderMarkdown = renderMarkdown;    // dipakai pengujian
+
+  function initChat(root) {
+    var aid = root.getAttribute("data-analysis-id"), csrf = root.getAttribute("data-csrf");
+    var sessionId = root.getAttribute("data-session-id") || null;
+    var log = $("[data-log]", root), form = $("[data-form]", root), input = $("[data-input]", root);
+    var statusEl = $("[data-status]", root), stopBtn = $("[data-stop]", root), sendBtn = $("[data-send]", root);
+    var modelEl = $("[data-model]", root), sugg = $("[data-suggestions]", root);
+    var es = null, busy = false;
+
+    function citeMap(list) {
+      var m = {}; (list || []).forEach(function (c) { m[c.path + ":" + c.line] = !!c.valid; }); return m;
+    }
+    function nearBottom() { return log.scrollHeight - log.scrollTop - log.clientHeight < 80; }
+    function scrollDown(force) { if (force || nearBottom()) log.scrollTop = log.scrollHeight; }
+
+    // --- render pesan yang sudah tersimpan (dari server)
+    $all("article.msg", log).forEach(function (art) {
+      var body = $("[data-md]", art);
+      if (!body) return;
+      var raw = body.textContent, cites = {};
+      try { cites = citeMap(JSON.parse(body.getAttribute("data-citations") || "[]")); } catch (_) { /* abaikan */ }
+      if (art.getAttribute("data-role") === "assistant") renderMarkdown(raw, body, { analysisId: aid, citations: cites });
+      else body.classList.add("msg-plain");
+    });
+    scrollDown(true);
+
+    function addMsg(role, label) {
+      var art = document.createElement("article"); art.className = "msg msg-" + role; art.setAttribute("data-role", role);
+      var head = document.createElement("header"); head.className = "msg-head"; head.textContent = label; art.appendChild(head);
+      log.appendChild(art); return art;
+    }
+    function setBusy(b) {
+      busy = b; sendBtn.disabled = b; input.disabled = b; stopBtn.hidden = !b;
+      if (modelEl && modelEl.tagName === "SELECT") modelEl.disabled = b;
+    }
+    function fail(msg) {
+      var art = addMsg("error", "Galat"); var d = document.createElement("div"); d.className = "msg-body"; d.textContent = msg; art.appendChild(d);
+      art.setAttribute("role", "alert"); scrollDown(true);
+    }
+
+    function send(text) {
+      text = String(text || "").trim();
+      if (!text || busy) return;
+      if (sugg) sugg.hidden = true;
+      var u = addMsg("user", "Anda"); var ub = document.createElement("div"); ub.className = "msg-body msg-plain"; ub.textContent = text; u.appendChild(ub);
+      input.value = ""; setBusy(true); statusEl.textContent = "Mengirim…"; scrollDown(true);
+
+      var asst = addMsg("assistant", "Asisten"), toolsBox = null, toolsList = null, bodyEl = document.createElement("div"), raw = "", pending = false;
+      bodyEl.className = "msg-body"; asst.appendChild(bodyEl);
+      function ensureTools() {
+        if (toolsBox) return;
+        toolsBox = document.createElement("details"); toolsBox.className = "msg-tools"; toolsBox.open = true;
+        var sm = document.createElement("summary"); sm.textContent = "Langkah tool"; toolsList = document.createElement("ul"); toolsList.className = "plain-list";
+        toolsBox.appendChild(sm); toolsBox.appendChild(toolsList); asst.insertBefore(toolsBox, bodyEl);
+      }
+      var toolItems = {};
+      function paint() {                                   // render ulang dibatasi ~8x/detik agar streaming tidak berat
+        if (pending) return; pending = true;
+        setTimeout(function () { pending = false; var nb = nearBottom(); renderMarkdown(raw, bodyEl, { analysisId: aid, citations: {} }); if (nb) scrollDown(true); }, 120);
+      }
+
+      var payload = { text: text, session_id: sessionId ? parseInt(sessionId, 10) : null };
+      if (modelEl && modelEl.value) payload.model = modelEl.value;
+      fetch("/analyses/" + encodeURIComponent(aid) + "/chat/send", { method: "POST", credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify(payload) })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          if (!res.ok) { log.removeChild(asst); setBusy(false); statusEl.textContent = ""; fail(res.d.error || "Gagal mengirim pesan."); return; }
+          sessionId = String(res.d.session_id); root.setAttribute("data-session-id", sessionId);
+          history.replaceState(null, "", "?s=" + sessionId);
+          statusEl.textContent = "Asisten bekerja…";
+          es = new EventSource(res.d.stream);
+          var finished = false;
+          es.addEventListener("delta", function (e) { raw += JSON.parse(e.data).text; paint(); });
+          es.addEventListener("tool_start", function (e) {
+            var d = JSON.parse(e.data); ensureTools();
+            var li = document.createElement("li"); var nm = document.createElement("span"); nm.className = "mono"; nm.textContent = d.name;
+            var ar = document.createElement("span"); ar.className = "muted mono break"; ar.textContent = " " + d.args;
+            var st = document.createElement("span"); st.className = "hint muted"; st.textContent = " …";
+            li.appendChild(nm); li.appendChild(ar); li.appendChild(st); toolsList.appendChild(li); toolItems[d.id] = st; scrollDown(false);
+            statusEl.textContent = "Memanggil " + d.name + "…";
+          });
+          es.addEventListener("tool_end", function (e) {
+            var d = JSON.parse(e.data), st = toolItems[d.id];
+            if (st) { st.textContent = " " + (d.summary || (d.ok ? "ok" : "galat")); st.className = "hint " + (d.ok ? "ok" : "bad"); }
+          });
+          es.addEventListener("final", function (e) {
+            finished = true; var d = JSON.parse(e.data);
+            var text = d.content || ""; raw = text;
+            renderMarkdown(text, bodyEl, { analysisId: aid, citations: citeMap(d.citations) });
+            if (toolsBox) { toolsBox.open = false; toolsBox.firstChild.textContent = d.tools + " langkah tool"; }
+            var notes = { max_steps: "Berhenti di batas langkah.", budget: "Anggaran habis.", cancelled: "Dihentikan.", error: "Terjadi galat.", tool_budget: "Batas data tool tercapai." };
+            if (d.stopped !== "done" && notes[d.stopped]) {
+              var n = document.createElement("div"); n.className = "msg-note"; n.textContent = notes[d.stopped] + (d.error ? " " + d.error : ""); asst.appendChild(n);
+            }
+            statusEl.textContent = "Biaya giliran ≈ Rp" + Number(d.turn_idr).toFixed(2) + " · sesi ≈ Rp" + Number(d.session_idr).toFixed(2) + " · " + d.steps + " langkah";
+            scrollDown(true);
+          });
+          es.addEventListener("end", function () { if (es) es.close(); es = null; setBusy(false); input.focus(); if (!finished) fail("Koneksi terputus sebelum jawaban selesai. Muat ulang halaman untuk melihat hasil tersimpan."); });
+          es.onerror = function () {
+            if (es && es.readyState === 2) { es = null; if (!finished) { setBusy(false); fail("Koneksi stream terputus. Muat ulang halaman untuk melihat hasil tersimpan."); } }
+          };
+        })
+        .catch(function () { setBusy(false); statusEl.textContent = ""; fail("Koneksi gagal. Periksa jaringan lalu coba lagi."); });
+    }
+
+    form.addEventListener("submit", function (e) { e.preventDefault(); send(input.value); });
+    input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(input.value); } });
+    $all("[data-suggest]", root).forEach(function (b) { b.addEventListener("click", function () { send(b.getAttribute("data-suggest")); }); });
+    stopBtn.addEventListener("click", function () {
+      if (!sessionId) return;
+      stopBtn.disabled = true; statusEl.textContent = "Menghentikan…";
+      fetch("/analyses/" + encodeURIComponent(aid) + "/chat/cancel?s=" + encodeURIComponent(sessionId), { method: "POST", credentials: "same-origin", headers: { "X-CSRF-Token": csrf } })
+        .finally(function () { stopBtn.disabled = false; });
+    });
+  }
 })();

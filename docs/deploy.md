@@ -94,6 +94,10 @@ Anggaran dalam *kredit* (`AI_DAILY_BUDGET_CREDITS`, `AI_SESSION_BUDGET_CREDITS`)
 Harga per model ada di `config/ai_models.json` (kredit per 1 juta token): sesuaikan dengan portal, lalu `docker compose restart web`.
 Bandingkan angka token dari `make ai-check` dengan selisih saldo di portal untuk memastikan harga input/output.
 
+**Chat agent:** buka tab **Chat** pada sebuah analisis. Pertanyaan contoh: "Di mana base URL API?", "Bagaimana alur login?",
+"Buatkan skrip Python untuk mendekripsi string di Crypto.java". Hasil berupa teks dengan tombol **Salin/Unduh**; skrip tidak pernah
+dijalankan aplikasi. Butuh analisis statis selesai (agar pencarian tersedia). Ekspor percakapan ke `.md` dari panel samping.
+
 **Privasi:** potongan kode APK yang Anda tanyakan dikirim ke provider (dan model di belakangnya). Secret diredaksi lebih dulu.
 Kunci hanya dibaca service `web`; tidak pernah dikirim ke browser, worker, atau runner, dan tidak dicatat di log.
 

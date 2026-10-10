@@ -60,6 +60,22 @@ Permintaan untuk menyerang layanan pihak ketiga (mis. mengeksploitasi endpoint y
 - Batas langkah tercapai → agent berhenti dan merangkum yang sudah ditemukan.
 - Instruksi tersembunyi di string APK tidak memicu tool call di luar daftar.
 
+## Keputusan M4 (chat agent)
+- **Tab Chat** per analisis; sesi, riwayat, dan biaya tersimpan (`chat_session`, `chat_message`, `ai_call`). Satu giliran aktif per sesi; tombol **Berhenti** membatalkan di tengah streaming.
+- **11 tool baca-saja** (`services/web/app/ai/tools.py`): `get_overview`, `get_manifest`, `list_packages`, `list_classes`, `search_code`, `get_class`, `get_method`, `find_xrefs`, `list_strings`, `get_findings`, `get_resource`. `analysis_id` terikat pada sesi (model tidak bisa menyebutnya); argumen divalidasi; nama tool di luar daftar ditolak.
+- **`find_xrefs` hanya perkiraan**: pencarian teks atas nama simbol, bukan call graph (FR-3.12 belum dikerjakan). Hasilnya selalu diberi label PERKIRAAN.
+- **Redaksi secret sebelum kirim ke provider** memakai pola yang sama dengan analyzer (`AI_REDACT_SECRETS=1` bawaan). Berlaku untuk pesan pengguna, hasil tool, dan kueri yang dipantulkan. Nilai secret mentah tidak pernah diberikan ke model (`get_findings` tidak memuatnya).
+- **Kode APK = data**: prompt sistem menyatakannya, setiap hasil tool dibungkus `<hasil_tool>` + peringatan, dan tidak ada tool tulis/shell/jaringan.
+- **Sitasi** `path:baris` diverifikasi server (berkas dan baris harus ada); yang gagal tetap ditampilkan dengan label "tidak terverifikasi".
+- **Pengaman loop**: batas langkah (`AI_MAX_STEPS`), batas total data tool per giliran, panggilan identik berulang dihentikan, anggaran dicek sebelum tiap panggilan; bila model membandel di langkah final, pengguna tetap mendapat pesan jelas (bukan gelembung kosong).
+- **Skrip & `.md` dari AI**: hanya teks, dengan tombol Salin/Unduh (`text/plain`). Tidak ada penyimpanan di server dan tidak pernah dijalankan. Jawaban dirender lewat DOM (tanpa `innerHTML`); tautan dari model tidak pernah menjadi `<a>`.
+- **Pilihan model per pesan** hanya dari `AI_MODEL`/`AI_MODEL_PRO` di `.env` (browser tidak bisa menyuntikkan slug sembarang).
+
+## Batasan
+- Kualitas jawaban bergantung model; sitasi diverifikasi tetapi *kesimpulan* model tidak. Perlakukan sebagai petunjuk, bukan bukti.
+- Riwayat dibatasi (24 pesan / 60 ribu karakter); hasil tool dari giliran lama tidak dikirim ulang.
+- Belum ada: ekspor PDF, tombol "jelaskan kode ini" di penampil kode (FR-5.7), memori lintas sesi.
+
 ## Pertanyaan terbuka
 - [OPEN] Perlu tool `decompile_with_other_engine` (CFR/Fernflower) untuk method yang gagal di jadx?
 - [OPEN] Memori lintas sesi (catatan pengguna per APK) diinjeksikan ke konteks?
