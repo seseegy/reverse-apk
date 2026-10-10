@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import heapq
 import sqlite3
-import threading
 import time
 from collections import deque
 from contextlib import contextmanager
@@ -29,13 +28,8 @@ KIND_NAMES = {0: "virtual", 1: "interface", 2: "direct", 3: "static", 4: "super"
 CREF_NAMES = {0: "new-instance", 1: "const-class", 2: "check-cast", 3: "instance-of"}
 RELATION_RANK = {"langsung": 0, "lewat subclass": 1, "lewat supertype": 2}
 
-MAX_SUBTYPES = 400
-MAX_SUPERTYPES = 80
-MAX_DISPATCH_FANOUT = 8     # lebih banyak override dari ini = dispatch tidak informatif (mis. View.OnClickListener): dilewati
-MAX_PATH_NODES = 40_000
-PATH_TIME_BUDGET_S = 3.0
+MAX_DISPATCH_FANOUT = 8     # PENYARING KUALITAS (bukan batas hasil): dispatch ke >8 implementer (mis. View.OnClickListener) terlalu ambigu, dilewati
 IN_CHUNK = 400
-MAX_CALLBACK_METHODS = 12
 
 # Titik masuk yang dipanggil SISTEM, bukan kode aplikasi. `const-class X` pada class turunan komponen berarti X dijalankan lewat
 # Intent/WorkManager; method siklus hidupnya menjadi tujuan edge "intent".
@@ -91,15 +85,6 @@ def graph_state(work: Path, analysis_id: int) -> str | None:
         return row[0] if row else None
 
 
-def _run_with_deadline(conn: sqlite3.Connection, seconds: float, fn):  # noqa: ANN001
-    timer = threading.Timer(seconds, conn.interrupt)
-    timer.start()
-    try:
-        return fn()
-    finally:
-        timer.cancel()
-
-
 # ------------------------------------------------------------------------- format nama
 def parse_desc(desc: str) -> tuple[list[str], str]:
     """'(ILjava/lang/String;[B)V' -> (['int','String','byte[]'], 'void'). Tidak pernah melempar."""
@@ -143,13 +128,14 @@ def fmt_field_type(t: str) -> str:
 
 
 # ------------------------------------------------------------------------- class
-def find_classes(conn: sqlite3.Connection, name: str, limit: int = 8) -> list[sqlite3.Row]:
+def find_classes(conn: sqlite3.Connection, name: str, limit: int | None = None) -> list[sqlite3.Row]:
+    lim = -1 if limit is None else limit
     name = name.strip().replace("/", ".").removesuffix(".java").removesuffix(".smali")
     if name.startswith("L") and name.endswith(";") and "." in name:
         name = name[1:-1]
     if not name:
         return []
-    rows = conn.execute("SELECT * FROM cls WHERE name = ? LIMIT ?", (name, limit)).fetchall()
+    rows = conn.execute("SELECT * FROM cls WHERE name = ? LIMIT ?", (name, lim)).fetchall()
     if rows:
         return rows
     if "." in name:
@@ -157,14 +143,14 @@ def find_classes(conn: sqlite3.Connection, name: str, limit: int = 8) -> list[sq
         parts = name.split(".")
         for k in range(1, min(4, len(parts) - 1) + 1):
             cand = ".".join(parts[:-k]) + "$" + "$".join(parts[-k:])
-            rows = conn.execute("SELECT * FROM cls WHERE name = ? LIMIT ?", (cand, limit)).fetchall()
+            rows = conn.execute("SELECT * FROM cls WHERE name = ? LIMIT ?", (cand, lim)).fetchall()
             if rows:
                 return rows
         return []
     like = "%$" + name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return conn.execute(
         "SELECT * FROM cls WHERE (simple = ? COLLATE NOCASE OR simple LIKE ? ESCAPE '\\') "
-        "ORDER BY declared DESC, is_lib, name LIMIT ?", (name, like, limit)).fetchall()
+        "ORDER BY declared DESC, is_lib, name LIMIT ?", (name, like, lim)).fetchall()
 
 
 def resolve_class(conn: sqlite3.Connection, name: str) -> sqlite3.Row:
@@ -174,7 +160,7 @@ def resolve_class(conn: sqlite3.Connection, name: str) -> sqlite3.Row:
                          "aplikasi (kode pustaka tidak dianalisis; nama bisa juga sudah di-obfuscate). Gunakan nama lengkap "
                          "(com.x.Kelas); cari dulu dengan search_code atau list_classes.")
     if len(rows) > 1 and "." not in name:
-        opts = ", ".join(r["name"] for r in rows[:8])
+        opts = ", ".join(r["name"] for r in rows)
         raise GraphError("nama class ambigu; gunakan nama lengkap: " + opts)
     return rows[0]
 
@@ -184,11 +170,11 @@ def _chunks(items: list, n: int = IN_CHUNK) -> Iterator[list]:
         yield items[i:i + n]
 
 
-def supertypes(conn: sqlite3.Connection, cid: int, limit: int = MAX_SUPERTYPES) -> list[int]:
+def supertypes(conn: sqlite3.Connection, cid: int, limit: int | None = None) -> list[int]:
     """Semua super class & interface (transitif), terdekat dulu. Tanpa cid itu sendiri."""
     seen: dict[int, None] = {}
     queue = deque([cid])
-    while queue and len(seen) < limit:
+    while queue and (limit is None or len(seen) < limit):
         cur = queue.popleft()
         row = conn.execute("SELECT super FROM cls WHERE id = ?", (cur,)).fetchone()
         nxt = [row[0]] if row and row[0] else []
@@ -200,7 +186,7 @@ def supertypes(conn: sqlite3.Connection, cid: int, limit: int = MAX_SUPERTYPES) 
     return list(seen)
 
 
-def subtypes(conn: sqlite3.Connection, cid: int, limit: int = MAX_SUBTYPES) -> tuple[list[int], bool]:
+def subtypes(conn: sqlite3.Connection, cid: int, limit: int | None = None) -> tuple[list[int], bool]:
     """Semua subclass & implementer (transitif). Mengembalikan (daftar, dipotong)."""
     seen: dict[int, None] = {}
     queue = deque([cid])
@@ -209,7 +195,7 @@ def subtypes(conn: sqlite3.Connection, cid: int, limit: int = MAX_SUBTYPES) -> t
         cur = queue.popleft()
         for (n,) in conn.execute("SELECT id FROM cls WHERE super = ? UNION SELECT cls FROM impl WHERE iface = ?", (cur, cur)):
             if n not in seen and n != cid:
-                if len(seen) >= limit:
+                if limit is not None and len(seen) >= limit:
                     truncated = True
                     queue.clear()
                     break
@@ -271,7 +257,7 @@ def _methods_named(conn: sqlite3.Connection, cid: int, name: str) -> tuple[list[
     return rows, None
 
 
-def xrefs_for_member(conn: sqlite3.Connection, cls: sqlite3.Row, member: str, limit: int = 60) -> dict[str, Any]:
+def xrefs_for_member(conn: sqlite3.Connection, cls: sqlite3.Row, member: str, limit: int | None = None) -> dict[str, Any]:
     cid = cls["id"]
     methods, inherited_from = _methods_named(conn, cid, member)
     related, subs_cut = _related(conn, cid)
@@ -305,7 +291,7 @@ def xrefs_for_member(conn: sqlite3.Connection, cls: sqlite3.Row, member: str, li
         items.sort(key=lambda x: (RELATION_RANK[x["hubungan"]], not x["aplikasi"], x["pemanggil"]))
         out["method"] = {
             "dideklarasikan": sorted({fmt_method(cls["name"] if inherited_from is None else inherited_from, m["name"], m["desc"])
-                                      for m in methods})[:12],
+                                      for m in methods}),
             "diwarisi_dari": inherited_from,
             "total_pemanggil": len(items),
             "pemanggil": items[:limit],
@@ -331,12 +317,10 @@ def xrefs_for_member(conn: sqlite3.Connection, cls: sqlite3.Row, member: str, li
                  for s, v in readers.items() if s in rows]
         items.sort(key=lambda x: (RELATION_RANK[x["hubungan"]], not x["aplikasi"], x["method"]))
         out["field"] = {"tipe": fmt_field_type(fields[0]["type"]), "total": len(items), "pengakses": items[:limit]}
-    if subs_cut:
-        out["catatan_subclass"] = f"hierarki subclass dipotong pada {MAX_SUBTYPES}; hasil bisa kurang lengkap"
     return out
 
 
-def xrefs_for_class(conn: sqlite3.Connection, cls: sqlite3.Row, limit: int = 60) -> dict[str, Any]:
+def xrefs_for_class(conn: sqlite3.Connection, cls: sqlite3.Row, limit: int | None = None) -> dict[str, Any]:
     """Siapa yang memakai class ini: memanggil method-nya, mengakses field-nya, new-instance/const-class/cast."""
     cid = cls["id"]
     users: dict[int, dict[str, int]] = {}
@@ -346,12 +330,12 @@ def xrefs_for_class(conn: sqlite3.Connection, cls: sqlite3.Row, limit: int = 60)
         d[key] = d.get(key, 0) + n
 
     for r in conn.execute("SELECT k.src AS src, COUNT(*) AS n FROM call k JOIN msym m ON m.id = k.dst WHERE m.cls = ? "
-                          "GROUP BY k.src LIMIT 3000", (cid,)):
+                          "GROUP BY k.src", (cid,)):
         bump(r["src"], "memanggil method", r["n"])
     for r in conn.execute("SELECT f.src AS src, COUNT(*) AS n FROM fref f JOIN fsym s ON s.id = f.dst WHERE s.cls = ? "
-                          "GROUP BY f.src LIMIT 3000", (cid,)):
+                          "GROUP BY f.src", (cid,)):
         bump(r["src"], "mengakses field", r["n"])
-    for r in conn.execute("SELECT src, kind FROM cref WHERE cls = ? LIMIT 3000", (cid,)):
+    for r in conn.execute("SELECT src, kind FROM cref WHERE cls = ?", (cid,)):
         bump(r["src"], CREF_NAMES.get(r["kind"], "?"))
     rows = _method_rows(conn, list(users))
     items = [{"pengguna": _label(rows[s]), "cara": sorted(v), "aplikasi": _is_app(rows[s])} for s, v in users.items() if s in rows]
@@ -359,13 +343,10 @@ def xrefs_for_class(conn: sqlite3.Connection, cls: sqlite3.Row, limit: int = 60)
     return {"class": cls["name"], "total_pengguna": len(items), "pengguna": items[:limit]}
 
 
-def xrefs_for_string(conn: sqlite3.Connection, text: str, limit: int = 40) -> dict[str, Any]:
+def xrefs_for_string(conn: sqlite3.Connection, text: str, limit: int | None = None) -> dict[str, Any]:
     like = "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
-    def run():
-        return conn.execute("SELECT src, value FROM sref WHERE value LIKE ? ESCAPE '\\' LIMIT 400", (like,)).fetchall()
-
-    hits = _run_with_deadline(conn, 2.0, run)
+    hits = conn.execute("SELECT src, value FROM sref WHERE value LIKE ? ESCAPE '\\'", (like,)).fetchall()
     rows = _method_rows(conn, [h["src"] for h in hits])
     by_value: dict[str, list[dict]] = {}
     for h in hits:
@@ -373,17 +354,17 @@ def xrefs_for_string(conn: sqlite3.Connection, text: str, limit: int = 40) -> di
         if r is None:
             continue
         by_value.setdefault(h["value"], []).append({"method": _label(r), "aplikasi": _is_app(r)})
-    items = [{"string": v, "dipakai_di": sorted(m, key=lambda x: (not x["aplikasi"], x["method"]))[:8], "jumlah_method": len(m)}
+    items = [{"string": v, "dipakai_di": sorted(m, key=lambda x: (not x["aplikasi"], x["method"])), "jumlah_method": len(m)}
              for v, m in by_value.items()]
     items.sort(key=lambda x: (-x["jumlah_method"], x["string"]))
-    return {"kueri": text, "total_string_cocok": len(items), "hasil": items[:limit], "dipotong": len(hits) >= 400}
+    return {"kueri": text, "total_string_cocok": len(items), "hasil": items[:limit], "dipotong": False}
 
 
 # ------------------------------------------------------------------------- callees
 _HIDE_CLASSES = {"java.lang.StringBuilder", "java.lang.StringBuffer"}
 
 
-def callees_of(conn: sqlite3.Connection, cls: sqlite3.Row, method: str, limit: int = 70) -> dict[str, Any]:
+def callees_of(conn: sqlite3.Connection, cls: sqlite3.Row, method: str, limit: int | None = None) -> dict[str, Any]:
     cid = cls["id"]
     rows = conn.execute("SELECT id, cls, name, desc, flags, declared FROM msym WHERE cls = ? AND name = ? AND declared = 1",
                         (cid, method)).fetchall()
@@ -392,7 +373,7 @@ def callees_of(conn: sqlite3.Connection, cls: sqlite3.Row, method: str, limit: i
                          + (" (class framework/pustaka: isinya tidak dianalisis)" if not cls["declared"] or cls["is_lib"] else "")
                          + ". Gunakan class_info untuk daftar method.")
     out = []
-    for m in rows[:6]:
+    for m in rows:
         calls = conn.execute("SELECT dst, kind FROM call WHERE src = ?", (m["id"],)).fetchall()
         dmap = _method_rows(conn, [c["dst"] for c in calls])
         callee, hidden = [], 0
@@ -407,39 +388,39 @@ def callees_of(conn: sqlite3.Connection, cls: sqlite3.Row, method: str, limit: i
         callee.sort(key=lambda x: (not x["aplikasi"], x["method"]))
         fields = []
         for f in conn.execute("SELECT s.name AS name, s.type AS type, c.name AS cname, f.rw AS rw FROM fref f "
-                              "JOIN fsym s ON s.id = f.dst JOIN cls c ON c.id = s.cls WHERE f.src = ? LIMIT 80", (m["id"],)):
+                              "JOIN fsym s ON s.id = f.dst JOIN cls c ON c.id = s.cls WHERE f.src = ?", (m["id"],)):
             fields.append(f"{'tulis' if f['rw'] else 'baca'} {f['cname']}.{f['name']}: {fmt_field_type(f['type'])}")
-        strings = [r[0] for r in conn.execute("SELECT value FROM sref WHERE src = ? LIMIT 40", (m["id"],))]
-        creates = [r[0] for r in conn.execute("SELECT c.name FROM cref r JOIN cls c ON c.id = r.cls WHERE r.src = ? AND r.kind IN (0, 1) "
-                                              "LIMIT 40", (m["id"],))]
+        strings = [r[0] for r in conn.execute("SELECT value FROM sref WHERE src = ?", (m["id"],))]
+        creates = [r[0] for r in conn.execute("SELECT c.name FROM cref r JOIN cls c ON c.id = r.cls WHERE r.src = ? AND r.kind IN (0, 1)", (m["id"],))]
         out.append({"method": fmt_method(cls["name"], m["name"], m["desc"]), "bendera": m["flags"],
                     "memanggil": callee[:limit], "total_panggilan": len(callee), "disembunyikan": hidden,
-                    "field": fields[:30], "string": strings, "class_dipakai": creates})
-    return {"class": cls["name"], "hasil": out, "overload_lain": max(0, len(rows) - 6)}
+                    "field": fields, "string": strings, "class_dipakai": creates})
+    return {"class": cls["name"], "hasil": out}
 
 
 # ------------------------------------------------------------------------- class info
-def class_info(conn: sqlite3.Connection, cls: sqlite3.Row, method_limit: int = 150) -> dict[str, Any]:
+def class_info(conn: sqlite3.Connection, cls: sqlite3.Row) -> dict[str, Any]:
     cid = cls["id"]
-    chain, cur, guard = [], cls["super"], 0
-    while cur and guard < 14:
+    chain, cur, visited = [], cls["super"], {cls["id"]}
+    while cur and cur not in visited:             # `visited` = pengaman siklus pada indeks rusak, bukan batas kedalaman
+        visited.add(cur)
         r = conn.execute("SELECT id, name, super, declared, is_lib FROM cls WHERE id = ?", (cur,)).fetchone()
         if r is None:
             break
         chain.append({"class": r["name"], "ada_kode": bool(r["declared"]), "pustaka": bool(r["is_lib"])})
-        cur, guard = r["super"], guard + 1
+        cur = r["super"]
     ifaces = [r[0] for r in conn.execute("SELECT c.name FROM impl i JOIN cls c ON c.id = i.iface WHERE i.cls = ? ORDER BY c.name", (cid,))]
-    subs, cut = subtypes(conn, cid, 200)
+    subs, cut = subtypes(conn, cid)
     srows = _class_names(conn, subs)
     sub_items = sorted((srows[s]["name"] for s in subs if s in srows and srows[s]["declared"] and not srows[s]["is_lib"]))
-    mrows = conn.execute("SELECT name, desc, flags FROM msym WHERE cls = ? AND declared = 1 ORDER BY name, desc LIMIT ?",
-                         (cid, method_limit + 1)).fetchall()
-    methods = [{"method": fmt_method(cls["name"], m["name"], m["desc"]), "bendera": m["flags"]} for m in mrows[:method_limit]]
+    mrows = conn.execute("SELECT name, desc, flags FROM msym WHERE cls = ? AND declared = 1 ORDER BY name, desc",
+                         (cid,)).fetchall()
+    methods = [{"method": fmt_method(cls["name"], m["name"], m["desc"]), "bendera": m["flags"]} for m in mrows]
     natives = [m["method"] for m in methods if "native" in m["bendera"].split()]
     return {"class": cls["name"], "bendera": cls["flags"], "ada_kode_smali": bool(cls["declared"]), "pustaka": bool(cls["is_lib"]),
             "berkas_smali": cls["file"], "super_chain": chain, "interface": ifaces,
-            "turunan_aplikasi": sub_items[:40], "total_turunan_aplikasi": len(sub_items), "hierarki_dipotong": cut,
-            "method": methods, "method_dipotong": len(mrows) > method_limit, "method_native": natives}
+            "turunan_aplikasi": sub_items, "total_turunan_aplikasi": len(sub_items), "hierarki_dipotong": cut,
+            "method": methods, "method_native": natives}
 
 
 # ------------------------------------------------------------------------- jalur
@@ -466,7 +447,7 @@ class _PathSearch:
     def overrides_of(self, m: sqlite3.Row) -> list[int]:
         subs = self.sub_cache.get(m["cls"])
         if subs is None:
-            subs = self.sub_cache[m["cls"]] = subtypes(self.conn, m["cls"], 120)[0]
+            subs = self.sub_cache[m["cls"]] = subtypes(self.conn, m["cls"])[0]
         out: list[int] = []
         for ch in _chunks(subs):
             qq = ",".join("?" * len(ch))
@@ -482,7 +463,7 @@ class _PathSearch:
         key = (m["cls"], m["name"], m["desc"])
         if key not in self.inherit_cache:
             res = None
-            for sid in supertypes(self.conn, m["cls"], 30):
+            for sid in supertypes(self.conn, m["cls"]):
                 r = self.conn.execute("SELECT id FROM msym WHERE cls = ? AND name = ? AND desc = ? AND declared = 1",
                                       (sid, m["name"], m["desc"])).fetchone()
                 if r:
@@ -494,7 +475,7 @@ class _PathSearch:
     def is_component(self, cid: int) -> bool:
         v = self.component_cache.get(cid)
         if v is None:
-            names = _class_names(self.conn, [cid, *supertypes(self.conn, cid, 30)])
+            names = _class_names(self.conn, [cid, *supertypes(self.conn, cid)])
             v = self.component_cache[cid] = any(r["name"] in COMPONENT_BASES for r in names.values())
         return v
 
@@ -506,7 +487,7 @@ class _PathSearch:
             if lifecycle:
                 v = [r["id"] for r in rows if r["name"] in LIFECYCLE_METHODS]
             else:
-                v = [r["id"] for r in rows if r["name"] not in ("<init>", "<clinit>")][:MAX_CALLBACK_METHODS]
+                v = [r["id"] for r in rows if r["name"] not in ("<init>", "<clinit>")]
             self.declared_cache[key] = v
         return v
 
@@ -547,7 +528,8 @@ def _like_prefix(name: str) -> str:
 
 
 def find_paths(conn: sqlite3.Connection, src_cls: sqlite3.Row, src_method: str | None, dst_cls: sqlite3.Row,
-               dst_method: str | None, max_depth: int = 8, max_paths: int = 3, max_approx: int = 2) -> dict[str, Any]:
+               dst_method: str | None, max_depth: int | None = None, max_paths: int = 3, max_approx: int = 2,
+               time_budget: float | None = None) -> dict[str, Any]:
     """Jalur terpendek-terbobot dari titik awal ke target.
 
     max_approx = jumlah maksimum langkah PERKIRAAN (dispatch/intent/callback) per jalur; 0 = hanya invoke nyata.
@@ -559,7 +541,7 @@ def find_paths(conn: sqlite3.Connection, src_cls: sqlite3.Row, src_method: str |
     if src_method:
         q += " AND m.name = ?"
         params.append(src_method)
-    starts = [r[0] for r in conn.execute(q + " ORDER BY m.id LIMIT 400", params)]
+    starts = [r[0] for r in conn.execute(q + " ORDER BY m.id", params)]
     if not starts:
         raise GraphError(f"tidak ada method terdeklarasi untuk titik awal {src_cls['name']}"
                          + (f".{src_method}" if src_method else "") + " (class framework/pustaka tidak dianalisis).")
@@ -591,11 +573,8 @@ def find_paths(conn: sqlite3.Connection, src_cls: sqlite3.Row, src_method: str |
     tie = len(starts) + 1
 
     while heap and len(found) < max_paths:
-        if time.monotonic() - started > PATH_TIME_BUDGET_S:
-            stop_reason = "waktu"
-            break
-        if expanded >= MAX_PATH_NODES:
-            stop_reason = "jumlah node"
+        if time_budget and time.monotonic() - started > time_budget:
+            stop_reason = "waktu (AI_TOOL_TIMEOUT)"
             break
         cost, _t, node = heapq.heappop(heap)
         if node in done or best[node][0] != cost:
@@ -605,7 +584,7 @@ def find_paths(conn: sqlite3.Connection, src_cls: sqlite3.Row, src_method: str |
             found.append(node)
             continue                      # sampai target: jangan diperluas melewatinya
         _c, steps, approx, _p, _h = best[node]
-        if steps >= max_depth:
+        if max_depth is not None and steps >= max_depth:
             continue
         expanded += 1
         for nxt, how in ps.edges(node, not strict):
@@ -623,7 +602,7 @@ def find_paths(conn: sqlite3.Connection, src_cls: sqlite3.Row, src_method: str |
 
     def chain(node: int) -> list[tuple[int, str]]:
         out, cur = [], node
-        while cur is not None and len(out) < 40:
+        while cur is not None:
             _c, _s, _a, parent, how = best[cur]
             out.append((cur, how))
             cur = parent  # type: ignore[assignment]
@@ -659,17 +638,17 @@ def find_paths(conn: sqlite3.Connection, src_cls: sqlite3.Row, src_method: str |
                                        "tidak diikuti (terlalu ambigu)")
     if not paths:
         result["catatan"] = ("Tidak ditemukan jalur statis"
-                             + (f" (pencarian berhenti karena {stop_reason})" if stop_reason else f" dalam {max_depth} langkah")
+                             + (f" (pencarian berhenti karena {stop_reason})" if stop_reason else (f" dalam {max_depth} langkah" if max_depth is not None else " (seluruh graf sudah dijelajahi)"))
                              + ". Itu BUKAN bukti tidak terjangkau: refleksi, callback framework, dan JNI tidak tampak di call graph.")
     return result
 
 
 def _related_down(conn: sqlite3.Connection, cid: int) -> tuple[list[int], bool]:
-    subs, cut = subtypes(conn, cid, 200)
+    subs, cut = subtypes(conn, cid)
     return [cid, *subs], cut
 
 
-def smali_only_in_package(conn: sqlite3.Connection, package: str, java_names: set[str], limit: int = 100) -> list[str]:
+def smali_only_in_package(conn: sqlite3.Connection, package: str, java_names: set[str]) -> list[str]:
     """Class aplikasi di `package` yang ada di smali tetapi tidak dihasilkan jadx (nama sederhana tidak ada di `java_names`)."""
     pre = package.strip()
     if not pre:
@@ -677,7 +656,7 @@ def smali_only_in_package(conn: sqlite3.Connection, package: str, java_names: se
     like = pre.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + ".%"
     out: list[str] = []
     for r in conn.execute("SELECT name, simple FROM cls WHERE declared = 1 AND is_lib = 0 AND name LIKE ? ESCAPE '\\' "
-                          "ORDER BY name LIMIT 4000", (like,)):
+                          "ORDER BY name", (like,)):
         if "." in r["name"][len(pre) + 1:]:
             continue                                   # subpackage lain
         simple = r["simple"]
@@ -686,6 +665,4 @@ def smali_only_in_package(conn: sqlite3.Connection, package: str, java_names: se
         if simple in java_names or simple.split("$", 1)[0] in java_names:
             continue
         out.append(simple)
-        if len(out) >= limit:
-            break
     return out

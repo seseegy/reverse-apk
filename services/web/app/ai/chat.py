@@ -77,9 +77,9 @@ def run_in_thread(turn: Turn, *, cfg: AIConfig, prices: PriceTable, analysis_id:
     def work_fn() -> None:
         try:
             with closing(db()) as conn:
-                rows = store.get_chat_messages(conn, session_id, 60)
+                rows = store.get_chat_messages(conn, session_id)
                 history = [{"role": r["role"], "content": r["content"]} for r in rows]
-                store.add_chat_message(conn, session_id, "user", user_text[:agent.MAX_USER_CHARS])
+                store.add_chat_message(conn, session_id, "user", user_text)
             ctx = T.ToolContext(analysis_id, work, cfg, db, Redactor(cfg.redact_secrets))
             res = agent.run_turn(client=Client(cfg), cfg=cfg, prices=prices, ctx=ctx, history=history, user_text=user_text,
                                  model=model, session_id=session_id, emit=emit, cancel=turn.cancel)

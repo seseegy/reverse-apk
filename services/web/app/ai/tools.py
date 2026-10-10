@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,7 +45,7 @@ class ToolContext:
 
 
 # ---------------------------------------------------------------- validasi argumen
-def _str(args: dict, key: str, *, required: bool = True, maxlen: int = 300, default: str = "") -> str:
+def _str(args: dict, key: str, *, required: bool = True, default: str = "") -> str:
     v = args.get(key, default)
     if v is None:
         v = default
@@ -53,14 +54,13 @@ def _str(args: dict, key: str, *, required: bool = True, maxlen: int = 300, defa
     v = v.strip()
     if required and not v:
         raise ToolError(f"argumen '{key}' wajib diisi")
-    if len(v) > maxlen:
-        raise ToolError(f"argumen '{key}' terlalu panjang (maks {maxlen} karakter)")
     if "\x00" in v:
         raise ToolError(f"argumen '{key}' memuat karakter tidak valid")
     return v
 
 
-def _int(args: dict, key: str, default: int, lo: int, hi: int) -> int:
+def _int(args: dict, key: str, default: int, lo: int, hi: int | None = None) -> int:
+    """Angka dari model; hanya batas BAWAH yang dipaksakan (hi diabaikan: tidak ada batas atas buatan)."""
     v = args.get(key, default)
     if isinstance(v, bool) or not isinstance(v, (int, float, str)):
         raise ToolError(f"argumen '{key}' harus berupa angka")
@@ -68,7 +68,14 @@ def _int(args: dict, key: str, default: int, lo: int, hi: int) -> int:
         n = int(float(v))
     except (TypeError, ValueError):
         raise ToolError(f"argumen '{key}' harus berupa angka") from None
-    return max(lo, min(hi, n))
+    return max(lo, n)
+
+
+def _opt_limit(args: dict, key: str = "limit") -> int | None:
+    """`limit` opsional dari model: tidak diisi = SEMUA (dibatasi hanya oleh AI_MAX_TOOL_CHARS)."""
+    if args.get(key) in (None, "", 0):
+        return None
+    return _int(args, key, 1, 1)
 
 
 def _clip(text: str, limit: int) -> tuple[str, bool]:
@@ -151,26 +158,26 @@ def get_manifest(ctx: ToolContext, args: dict) -> dict:
     for kind, items in (m.get("components") or {}).items():
         comps[kind] = [{"nama": c.get("name"), "exported": c.get("exported"), "izin": c.get("permission"),
                         "launcher": c.get("launcher"),
-                        "intent": [" ".join((f.get("actions") or []) + (f.get("data") or [])) for f in (c.get("filters") or [])[:3]]}
-                       for c in items[:60]]
+                        "intent": [" ".join((f.get("actions") or []) + (f.get("data") or [])) for f in (c.get("filters") or [])]}
+                       for c in items]
     return {"paket": m.get("package"), "versi": m.get("version_name"), "min_sdk": m.get("min_sdk"),
             "target_sdk": m.get("target_sdk"), "flag": m.get("flags"), "launcher": m.get("launcher"),
-            "izin": [p["name"] for p in (m.get("permissions") or [])][:100], "komponen": comps}
+            "izin": [p["name"] for p in (m.get("permissions") or [])], "komponen": comps}
 
 
 def list_packages(ctx: ToolContext, args: dict) -> dict:
-    prefix = _str(args, "prefix", required=False, maxlen=200)
+    prefix = _str(args, "prefix", required=False)
     include_libs = bool(args.get("include_libraries", False))
-    r = codeindex.list_packages(ctx.work, ctx.analysis_id, prefix, include_libs, 200)
+    r = codeindex.list_packages(ctx.work, ctx.analysis_id, prefix, include_libs, None)
     if not r["available"]:
         raise ToolError("indeks kode belum tersedia (jalankan analisis statis)")
-    return {"paket": r["packages"], "dipotong": len(r["packages"]) >= 200,
+    return {"paket": r["packages"],
             "catatan": "Pustaka pihak ketiga disembunyikan kecuali include_libraries=true."}
 
 
 def list_classes(ctx: ToolContext, args: dict) -> dict:
-    package = _str(args, "package", maxlen=300)
-    r = codeindex.list_classes_in(ctx.work, ctx.analysis_id, package, _int(args, "limit", 100, 1, 200))
+    package = _str(args, "package")
+    r = codeindex.list_classes_in(ctx.work, ctx.analysis_id, package, _opt_limit(args))
     if not r["available"]:
         raise ToolError("indeks kode belum tersedia (jalankan analisis statis)")
     out: dict[str, Any] = {"class": [{"nama": c["name"], "baris": c["lines"]} for c in r["classes"]]}
@@ -187,42 +194,44 @@ def list_classes(ctx: ToolContext, args: dict) -> dict:
 
 
 def search_code(ctx: ToolContext, args: dict) -> dict:
-    query = _str(args, "query", maxlen=120)
-    r = codeindex.search_code(ctx.work, ctx.analysis_id, query, "app" if not args.get("include_libraries") else "all")
+    query = _str(args, "query")
+    r = codeindex.search_code(ctx.work, ctx.analysis_id, query, "app" if not args.get("include_libraries") else "all",
+                              limit=_opt_limit(args), class_limit=None, char_budget=ctx.cfg.max_tool_chars,
+                              timeout=ctx.cfg.tool_timeout_s)
     if not r["available"]:
         raise ToolError("indeks kode belum tersedia (jalankan analisis statis)")
     if r["error"]:
         raise ToolError(r["error"])
     hits = []
-    for h in r["hits"][:30]:
+    for h in r["hits"]:
         snippet = re.sub(r"[\x02\x03]", "", h["snip"])
         hits.append({"berkas": h["path"], "cuplikan": ctx.redactor.text(snippet), "pustaka": bool(h["is_lib"])})
     return {"kueri": ctx.redactor.text(query), "class_cocok": [{"class": f"{c['package']}.{c['name']}" if c["package"] else c["name"],
-                                              "berkas": c["path"]} for c in r["classes"][:15]],
+                                              "berkas": c["path"]} for c in r["classes"]],
             "hasil": hits, "dipotong": r["truncated"],
             "catatan": "Pencarian token (bukan regex). Gunakan get_class/get_method untuk membaca kode lengkap."}
 
 
 def _read_source(ctx: ToolContext, name: str, fmt: str) -> tuple[str, str, dict]:
     """(path_relatif_work, root, hasil read_file) untuk class `name`; format java|smali."""
-    found = codeindex.find_class(ctx.work, ctx.analysis_id, name)
+    found = codeindex.find_class(ctx.work, ctx.analysis_id, name, None)
     if not found["available"]:
         raise ToolError("indeks kode belum tersedia (jalankan analisis statis)")
     if not found["matches"]:
         raise NoJava(f"class '{name}' tidak ditemukan. Gunakan search_code atau list_classes untuk mencari nama yang benar.")
     if len(found["matches"]) > 1 and "." not in name:
-        opts = [f"{m['package']}.{m['name']}" if m["package"] else m["name"] for m in found["matches"][:8]]
+        opts = [f"{m['package']}.{m['name']}" if m["package"] else m["name"] for m in found["matches"]]
         raise ToolError("nama class ambigu; gunakan nama lengkap: " + ", ".join(opts))
     m = found["matches"][0]
     rel = m["path"]                                                   # jadx/sources/pkg/Name.java
     if fmt == "smali":
         inner = rel[len("jadx/sources/"):-len(".java")]
         for sub in ["smali"] + [f"smali_classes{i}" for i in range(2, 12)]:
-            data = codeindex.read_file(ctx.work, ctx.analysis_id, "smali", f"{sub}/{inner}.smali")
+            data = codeindex.read_file(ctx.work, ctx.analysis_id, "smali", f"{sub}/{inner}.smali", max_bytes=None)
             if data is not None:
                 return f"apktool/{sub}/{inner}.smali", "smali", data
         raise ToolError("berkas smali untuk class ini tidak ditemukan")
-    data = codeindex.read_file(ctx.work, ctx.analysis_id, "java", rel[len("jadx/sources/"):])
+    data = codeindex.read_file(ctx.work, ctx.analysis_id, "java", rel[len("jadx/sources/"):], max_bytes=None)
     if data is None or data.get("binary"):
         raise ToolError("berkas tidak dapat dibaca")
     return rel, "java", data
@@ -238,7 +247,7 @@ def _smali_of_class(ctx: ToolContext, name: str) -> tuple[str, dict]:
         raise ToolError(str(exc)) from None
     if not rel or not rel.startswith("apktool/"):
         raise ToolError(f"class '{name}' tidak punya smali (class framework/pustaka yang tidak ada di APK).")
-    data = codeindex.read_file(ctx.work, ctx.analysis_id, "smali", rel[len("apktool/"):])
+    data = codeindex.read_file(ctx.work, ctx.analysis_id, "smali", rel[len("apktool/"):], max_bytes=None)
     if data is None or data.get("binary"):
         raise ToolError("berkas smali tidak dapat dibaca")
     return rel, data
@@ -249,11 +258,11 @@ _NO_JAVA_NOTE = ("jadx TIDAK menghasilkan Java untuk class ini (gagal/melewati d
 
 
 def get_class(ctx: ToolContext, args: dict) -> dict:
-    name = _str(args, "name", maxlen=300)
-    fmt = _str(args, "format", required=False, maxlen=10, default="java").lower()
+    name = _str(args, "name")
+    fmt = _str(args, "format", required=False, default="java").lower()
     if fmt not in ("java", "smali"):
         raise ToolError("format harus 'java' atau 'smali'")
-    start = _int(args, "start_line", 1, 1, 10_000_000)
+    start = _int(args, "start_line", 1, 1)
     note = None
     try:
         rel, _root, data = _read_source(ctx, name, fmt)
@@ -280,8 +289,8 @@ _METHOD_DECL = r"(?:public|protected|private|static|final|abstract|synchronized|
 
 
 def get_method(ctx: ToolContext, args: dict) -> dict:
-    cls = _str(args, "class", maxlen=300)
-    meth = _str(args, "method", maxlen=100)
+    cls = _str(args, "class")
+    meth = _str(args, "method")
     if not re.fullmatch(r"[A-Za-z_$<][\w$<>]*", meth):
         raise ToolError("nama method tidak valid")
     try:
@@ -309,7 +318,7 @@ def get_method(ctx: ToolContext, args: dict) -> dict:
         raise ToolError("badan method tidak ditemukan (abstrak/interface)")
     depth, i, n = 0, brace, len(text)
     in_str, in_chr = False, False
-    while i < n and i - start_pos < 200_000:
+    while i < n:
         c = text[i]
         if in_str:
             if c == "\\":
@@ -357,7 +366,15 @@ def _graph_call(ctx: ToolContext, fn: Callable[..., dict]) -> dict:
     """Jalankan fn(conn, state) di call graph; GraphError -> ToolError (pesan aman untuk model)."""
     try:
         with callgraph.open_graph(ctx.work, ctx.analysis_id) as (conn, state):
-            out = fn(conn)
+            # Satu-satunya batas kueri graf: waktu dari .env (AI_TOOL_TIMEOUT; 0 = tanpa batas). interrupt() membatalkan kueri.
+            timer = threading.Timer(ctx.cfg.tool_timeout_s, conn.interrupt) if ctx.cfg.tool_timeout_s else None
+            if timer:
+                timer.start()
+            try:
+                out = fn(conn)
+            finally:
+                if timer:
+                    timer.cancel()
     except callgraph.GraphError as exc:
         raise ToolError(str(exc)) from None
     out["batas"] = _GRAPH_LIMITS
@@ -393,28 +410,28 @@ def _smali_method(ctx: ToolContext, rel: str, data: dict, meth: str, note: str) 
         used += len(piece)
     code, cut2 = _clip("\n\n".join(parts), ctx.cfg.max_tool_chars)
     return {"berkas": rel, "format": "smali", "method": meth, "overload_ditemukan": len(blocks),
-            "rentang_baris": [f"{b0}-{b1}" for b0, b1 in blocks[:10]], "dipotong": cut or cut2, "catatan": note,
+            "rentang_baris": [f"{b0}-{b1}" for b0, b1 in blocks], "dipotong": cut or cut2, "catatan": note,
             "kode": ctx.redactor.text(code)}
 
 
 def find_xrefs(ctx: ToolContext, args: dict) -> dict:
-    cls_name = _str(args, "class", required=False, maxlen=300)
-    member = _str(args, "member", required=False, maxlen=100)
-    text = _str(args, "string", required=False, maxlen=100)
+    cls_name = _str(args, "class", required=False)
+    member = _str(args, "member", required=False)
+    text = _str(args, "string", required=False)
     if bool(cls_name) == bool(text):
         raise ToolError("isi tepat satu: 'class' (opsional dengan 'member') ATAU 'string'")
     if member and not _MEMBER_RE.fullmatch(member):
         raise ToolError("nama member tidak valid")
     if text and len(text) < 3:
         raise ToolError("'string' minimal 3 karakter")
-    limit = _int(args, "limit", 40, 1, 80)
+    limit = _opt_limit(args)
 
     def run(conn):  # noqa: ANN001
         if text:
             r = callgraph.xrefs_for_string(conn, text, limit)
             r["kueri"] = ctx.redactor.text(r["kueri"])
             for item in r["hasil"]:
-                item["string"] = ctx.redactor.text(item["string"])[:200]
+                item["string"] = ctx.redactor.text(item["string"])
             return r
         cls = callgraph.resolve_class(conn, cls_name)
         if member:
@@ -425,22 +442,22 @@ def find_xrefs(ctx: ToolContext, args: dict) -> dict:
 
 
 def find_callees(ctx: ToolContext, args: dict) -> dict:
-    cls_name = _str(args, "class", maxlen=300)
-    method = _str(args, "method", maxlen=100)
+    cls_name = _str(args, "class")
+    method = _str(args, "method")
     if not _MEMBER_RE.fullmatch(method):
         raise ToolError("nama method tidak valid")
 
     def run(conn):  # noqa: ANN001
         r = callgraph.callees_of(conn, callgraph.resolve_class(conn, cls_name), method)
         for m in r["hasil"]:
-            m["string"] = [ctx.redactor.text(x)[:160] for x in m["string"]]
+            m["string"] = [ctx.redactor.text(x) for x in m["string"]]
         return r
 
     return _graph_call(ctx, run)
 
 
 def class_info(ctx: ToolContext, args: dict) -> dict:
-    cls_name = _str(args, "class", maxlen=300)
+    cls_name = _str(args, "class")
 
     def run(conn):  # noqa: ANN001
         cls = callgraph.resolve_class(conn, cls_name)
@@ -459,62 +476,63 @@ def class_info(ctx: ToolContext, args: dict) -> dict:
                         r["komponen_manifest"] = {
                             "jenis": kind, "exported": c.get("exported"), "izin": c.get("permission"),
                             "launcher": c.get("launcher"),
-                            "intent": [" ".join((f.get("actions") or []) + (f.get("data") or [])) for f in (c.get("filters") or [])[:4]]}
+                            "intent": [" ".join((f.get("actions") or []) + (f.get("data") or [])) for f in (c.get("filters") or [])]}
         return r
 
     return _graph_call(ctx, run)
 
 
 def find_paths(ctx: ToolContext, args: dict) -> dict:
-    src = _str(args, "from_class", maxlen=300)
-    src_m = _str(args, "from_method", required=False, maxlen=100)
-    dst = _str(args, "to_class", maxlen=300)
-    dst_m = _str(args, "to_method", required=False, maxlen=100)
+    src = _str(args, "from_class")
+    src_m = _str(args, "from_method", required=False)
+    dst = _str(args, "to_class")
+    dst_m = _str(args, "to_method", required=False)
     for m in (src_m, dst_m):
         if m and not _MEMBER_RE.fullmatch(m):
             raise ToolError("nama method tidak valid")
-    depth = _int(args, "max_depth", 8, 1, 12)
-    n_paths = _int(args, "max_paths", 3, 1, 5)
-    max_approx = _int(args, "max_approx", 2, 0, 4)
+    depth = _int(args, "max_depth", 0, 1) if args.get("max_depth") not in (None, "", 0) else None
+    n_paths = _int(args, "max_paths", 3, 1)
+    max_approx = _int(args, "max_approx", 2, 0)
 
     def run(conn):  # noqa: ANN001
         return callgraph.find_paths(conn, callgraph.resolve_class(conn, src), src_m or None,
-                                    callgraph.resolve_class(conn, dst), dst_m or None, depth, n_paths, max_approx)
+                                    callgraph.resolve_class(conn, dst), dst_m or None, depth, n_paths, max_approx,
+                                    ctx.cfg.tool_timeout_s * 0.8 or None)   # berhenti sedikit lebih awal dari interrupt SQL: hasil parsial + catatan
 
     return _graph_call(ctx, run)
 
 
 def list_strings(ctx: ToolContext, args: dict) -> dict:
-    kind = _str(args, "kind", required=False, maxlen=10) or None
+    kind = _str(args, "kind", required=False) or None
     if kind and kind not in codeindex.STRING_KINDS:
         raise ToolError("kind harus salah satu: " + ", ".join(codeindex.STRING_KINDS))
-    filt = _str(args, "filter", required=False, maxlen=100) or None
+    filt = _str(args, "filter", required=False) or None
     r = codeindex.list_strings(ctx.work, ctx.analysis_id, kind, filt, "app" if not args.get("include_libraries") else "all",
-                               _int(args, "limit", 60, 1, 100))
+                               _opt_limit(args), ctx.cfg.tool_timeout_s)
     if not r["available"]:
         raise ToolError("indeks kode belum tersedia (jalankan analisis statis)")
-    rows = [{"jenis": x["kind"], "nilai": ctx.redactor.text(x["value"])[:200], "muncul": x["count"],
+    rows = [{"jenis": x["kind"], "nilai": ctx.redactor.text(x["value"]), "muncul": x["count"],
              "lokasi": f"{x['file']}:{x['line']}" if x.get("file") and x.get("line") else x.get("file")} for x in r["rows"]]
     return {"string": rows, "jumlah_per_jenis": r["counts"]}
 
 
 def get_findings(ctx: ToolContext, args: dict) -> dict:
-    cat = _str(args, "category", required=False, maxlen=20) or None
+    cat = _str(args, "category", required=False) or None
     if cat and cat not in store.FINDING_CATEGORIES:
         raise ToolError("category harus salah satu: " + ", ".join(store.FINDING_CATEGORIES))
     with closing(ctx.db()) as conn:
         rows = store.list_findings(conn, ctx.analysis_id, cat, None, None)
     out = []
-    for r in rows[:60]:
+    for r in rows:
         try:
-            ev = json.loads(r["evidence"])[:3]
+            ev = json.loads(r["evidence"])
         except ValueError:
             ev = []
         out.append({"tingkat": r["severity"], "kategori": r["category"], "aturan": r["rule_id"], "judul": r["title"],
                     "jumlah": r["occurrences"],
                     "bukti": [f"{e.get('file')}:{e.get('line')}" if e.get("line") else e.get("file") for e in ev]})
         # Nilai secret MENTAH tidak pernah diberikan ke model.
-    return {"temuan": out, "dipotong": len(rows) > 60,
+    return {"temuan": out,
             "catatan": "Heuristik, bukan klaim kerentanan. Nilai secret tidak ditampilkan."}
 
 
@@ -526,15 +544,15 @@ def read_file(ctx: ToolContext, args: dict) -> dict:
 
     jadx/sources/...java, jadx/resources/..., apktool/smali*/...smali, apktool/res/..., apktool/AndroidManifest.xml.
     """
-    path = _str(args, "path", maxlen=500).replace("\\", "/")
-    start = _int(args, "start_line", 1, 1, 10_000_000)
-    end = _int(args, "end_line", 0, 0, 10_000_000)
+    path = _str(args, "path").replace("\\", "/")
+    start = _int(args, "start_line", 1, 1)
+    end = _int(args, "end_line", 0, 0)
     root, rel = "smali", path           # path tanpa awalan dianggap relatif terhadap apktool/ (kompatibel dengan get_resource lama)
     for prefix, r in _ROOT_PREFIXES:
         if path.startswith(prefix):
             root, rel = r, path[len(prefix):]
             break
-    data = codeindex.read_file(ctx.work, ctx.analysis_id, root, rel)
+    data = codeindex.read_file(ctx.work, ctx.analysis_id, root, rel, max_bytes=None)
     if data is None:
         raise ToolError("berkas tidak ditemukan. Pakai path persis dari hasil tool lain, mis. jadx/sources/pkg/Kelas.java, "
                         "apktool/smali_classes7/pkg/Kelas.smali, apktool/res/xml/network_security_config.xml, apktool/AndroidManifest.xml.")

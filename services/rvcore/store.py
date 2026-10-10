@@ -382,14 +382,16 @@ def add_chat_message(conn: sqlite3.Connection, session_id: int, role: str, conte
         cur = conn.execute(
             "INSERT INTO chat_message (session_id, role, content, tool_calls, citations, model, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (session_id, role, content[:200000], json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None,
+            (session_id, role, content, json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None,
              json.dumps(citations, ensure_ascii=False) if citations else None, _text(model, 120), ts))
         conn.execute("UPDATE chat_session SET updated_at = ? WHERE id = ?", (ts, session_id))
         return int(cur.lastrowid)
 
 
-def get_chat_messages(conn: sqlite3.Connection, session_id: int, limit: int = 200) -> list[sqlite3.Row]:
-    rows = conn.execute("SELECT * FROM chat_message WHERE session_id = ? ORDER BY id DESC LIMIT ?", (session_id, limit)).fetchall()
+def get_chat_messages(conn: sqlite3.Connection, session_id: int, limit: int | None = None) -> list[sqlite3.Row]:
+    """Semua pesan sesi (limit=None -> tanpa batas; SQLite: LIMIT -1)."""
+    rows = conn.execute("SELECT * FROM chat_message WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                        (session_id, -1 if limit is None else limit)).fetchall()
     return list(reversed(rows))
 
 

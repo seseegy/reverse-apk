@@ -567,7 +567,7 @@ def _suggestions(ctx: dict) -> list[str]:
     return out[:5]
 
 
-MAX_CHAT_BODY = 16 * 1024
+MAX_CHAT_BODY = 4 * 1024 * 1024   # pengaman HTTP (bukan batas pesan): menolak badan permintaan absurd sebelum dibaca ke memori
 
 
 @router.post("/analyses/{analysis_id}/chat/send", include_in_schema=False)

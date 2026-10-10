@@ -4,7 +4,6 @@ Pengaman (semuanya diuji):
   * batas langkah (AI_MAX_STEPS) -> agent berhenti dan merangkum yang sudah ditemukan, bukan menggantung;
   * batas total ukuran hasil tool per giliran (konteks tidak meledak);
   * anggaran harian/sesi dicek SEBELUM tiap panggilan; pemakaian dicatat SESUDAH tiap panggilan;
-  * panggilan tool identik berulang dihentikan (model tersangkut dalam loop);
   * tool call dengan nama di luar daftar ditolak (hasil galat, bukan eksekusi);
   * pembatalan (tombol Berhenti) diperiksa di setiap langkah dan di tengah streaming;
   * kode APK diperlakukan sebagai DATA (prompt sistem + delimiter di setiap hasil tool + redaksi secret).
@@ -56,9 +55,6 @@ Activity A ke fungsi B" pakai find_xrefs, class_info, find_callees, find_paths (
 sitasi. Bila hasil dipotong, lanjutkan dengan parameter lebih sempit."""
 
 CITATION_RE = re.compile(r"((?:jadx/sources|jadx/resources|apktool)/[\w$./\-]{1,300}?):(\d{1,7})")
-MAX_USER_CHARS = 4000
-MAX_HISTORY_MESSAGES = 24
-MAX_HISTORY_CHARS = 60000
 
 
 @dataclass
@@ -80,7 +76,7 @@ def verify_citations(ctx: T.ToolContext, text: str) -> list[dict[str, Any]]:
     out, seen = [], set()
     for m in CITATION_RE.finditer(text):
         path, line = m.group(1), int(m.group(2))
-        if (path, line) in seen or len(out) >= 40:
+        if (path, line) in seen:
             continue
         seen.add((path, line))
         if path.startswith("jadx/sources/"):
@@ -89,24 +85,17 @@ def verify_citations(ctx: T.ToolContext, text: str) -> list[dict[str, Any]]:
             root, rel = "jres", path[len("jadx/resources/"):]
         else:
             root, rel = "smali", path[len("apktool/"):]
-        data = codeindex.read_file(ctx.work, ctx.analysis_id, root, rel)
+        data = codeindex.read_file(ctx.work, ctx.analysis_id, root, rel, max_bytes=None)
         valid = bool(data and not data.get("binary") and 1 <= line <= data["lines"])
         out.append({"path": path, "line": line, "valid": valid})
     return out
 
 
 def _trim_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Riwayat percakapan (hanya teks user/assistant dari giliran lalu). Hasil tool lama tidak ikut, agar murah."""
-    msgs = [m for m in history if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str) and m["content"]]
-    msgs = msgs[-MAX_HISTORY_MESSAGES:]
-    total = 0
-    keep: list[dict[str, Any]] = []
-    for m in reversed(msgs):
-        total += len(m["content"])
-        if total > MAX_HISTORY_CHARS and keep:
-            break
-        keep.append({"role": m["role"], "content": m["content"]})
-    return list(reversed(keep))
+    """Riwayat percakapan: SEMUA teks user/assistant dari giliran lalu (tanpa batas jumlah/panjang; anggaran di .env yang menjaga
+    biaya). Hasil tool lama tidak ikut, karena hanya teks jawaban yang disimpan."""
+    return [{"role": m["role"], "content": m["content"]} for m in history
+            if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str) and m["content"]]
 
 
 def run_turn(*, client: Client, cfg: AIConfig, prices: PriceTable, ctx: T.ToolContext, history: list[dict[str, Any]],
@@ -117,12 +106,11 @@ def run_turn(*, client: Client, cfg: AIConfig, prices: PriceTable, ctx: T.ToolCo
     emit = emit or (lambda *_: None)
     res = TurnResult(model=model or cfg.model)
     model = model or cfg.model
-    user_text = user_text.strip()[:MAX_USER_CHARS]
+    user_text = user_text.strip()
     messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}, *_trim_history(history),
                                       {"role": "user", "content": ctx.redactor.text(user_text)}]
     schemas = T.schemas()
     tool_chars = 0
-    seen_calls: dict[str, int] = {}
     force_final = False
 
     def settle(result, error=None) -> None:  # noqa: ANN001
@@ -183,16 +171,10 @@ def run_turn(*, client: Client, cfg: AIConfig, prices: PriceTable, ctx: T.ToolCo
 
         # --- model meminta tool
         messages.append({"role": "assistant", "content": r.content or None, "tool_calls": [
-            {"id": c.id, "type": "function", "function": {"name": c.name, "arguments": c.arguments}} for c in r.tool_calls[:8]]})
-        for c in r.tool_calls[:8]:
-            key = f"{c.name}|{c.arguments.strip()}"
-            seen_calls[key] = seen_calls.get(key, 0) + 1
+            {"id": c.id, "type": "function", "function": {"name": c.name, "arguments": c.arguments}} for c in r.tool_calls]})
+        for c in r.tool_calls:
             emit("tool_start", {"id": c.id, "name": c.name, "args": c.arguments[:300]})
-            if seen_calls[key] > 2:
-                out, ok = (f"<hasil_tool nama=\"{c.name}\" galat=\"true\">panggilan identik sudah dilakukan {seen_calls[key] - 1}x; "
-                           "gunakan argumen berbeda atau berikan jawaban.</hasil_tool>"), False
-                res.stopped = "repeat"
-            elif tool_chars >= cfg.max_turn_tool_chars:
+            if tool_chars >= cfg.max_turn_tool_chars:
                 out, ok = ("<hasil_tool galat=\"true\">batas total data tool untuk giliran ini tercapai; berikan jawaban dari "
                            "yang sudah dibaca.</hasil_tool>"), False
                 force_final = True
@@ -203,13 +185,6 @@ def run_turn(*, client: Client, cfg: AIConfig, prices: PriceTable, ctx: T.ToolCo
             summary = _summarize(c.name, out, ok)
             res.tool_calls.append({"name": c.name, "args": c.arguments[:300], "ok": ok, "summary": summary})
             emit("tool_end", {"id": c.id, "name": c.name, "ok": ok, "summary": summary})
-        if len(r.tool_calls) > 8:                                   # sisa tool call tak dijalankan: jawab agar pesan konsisten
-            for c in r.tool_calls[8:]:
-                messages.append({"role": "tool", "tool_call_id": c.id, "content": "<hasil_tool galat=\"true\">terlalu banyak "
-                                 "tool call sekaligus; ulangi satu per satu.</hasil_tool>"})
-        if res.stopped == "repeat":
-            force_final = True
-            res.stopped = "done"
 
     res.citations = verify_citations(ctx, res.content) if res.content else []
     return res
