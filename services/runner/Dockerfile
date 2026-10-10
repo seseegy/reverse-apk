@@ -13,6 +13,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOME=/tmp/home \
     JADX_VERSION=${JADX_VERSION} \
     APKTOOL_VERSION=${APKTOOL_VERSION} \
+    ANALYZER_VERSION=1 \
     JADX_OPTS="-Xmx2g"
 
 RUN set -eux; \
@@ -39,6 +40,7 @@ RUN groupadd --system --gid 10001 runner \
 
 WORKDIR /app
 COPY rvcore ./rvcore
+COPY runner/analyzer ./analyzer
 COPY runner/runner-selftest runner/runner-daemon /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/runner-selftest /usr/local/bin/runner-daemon
 

@@ -1,0 +1,66 @@
+{#- Kepala halaman analisis + tab. Dipakai semua halaman analisis. Butuh: an, snap, csrf, tab, counts, title. -#}
+{% from "_icons.html" import icon %}
+{% from "_parts.html" import status_badge %}
+<section class="card head-card" aria-labelledby="an-title">
+  <div class="head-main">
+    <h1 id="an-title" class="break">{{ title }}</h1>
+    <p class="mono muted break">
+      {{ an.package or '(paket belum diketahui)' }}
+      {% if an.version_name %} · v{{ an.version_name }}{% endif %}
+      {% if an.version_code %} ({{ an.version_code }}){% endif %}
+    </p>
+  </div>
+  <div class="head-side">
+    <div id="status-badge" data-badge>{{ status_badge(snap.status) }}</div>
+    <div class="btn-row">
+      {% if snap.status in ('queued', 'running') %}
+      <form method="post" action="/analyses/{{ an.id }}/cancel" data-submit-lock>
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="btn btn-ghost btn-sm" {% if snap.cancel_requested %}disabled{% endif %}>
+          {{ icon('x', 16) }}<span>Batalkan</span>
+        </button>
+      </form>
+      {% else %}
+      <form method="post" action="/analyses/{{ an.id }}/retry"
+            data-confirm="{{ 'Jalankan ulang analisis? Hasil dekompilasi saat ini akan dihapus dan dibuat ulang.' if snap.status == 'done' else '' }}"
+            data-submit-lock>
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="btn btn-ghost btn-sm">
+          {{ icon('refresh', 16) }}<span>{{ 'Analisis ulang' if snap.status == 'done' else 'Coba lagi' }}</span>
+        </button>
+      </form>
+      <form method="post" action="/apks/{{ an.apk_id }}/delete"
+            data-confirm="Hapus APK ini beserta seluruh hasil analisisnya? Tindakan ini tidak bisa dibatalkan.">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="btn btn-danger btn-sm">
+          {{ icon('trash', 16) }}<span>Hapus</span>
+        </button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<nav class="tabs" aria-label="Bagian analisis">
+  <a href="/analyses/{{ an.id }}"{% if tab == 'summary' %} aria-current="page"{% endif %}>Ringkasan</a>
+  <a href="/analyses/{{ an.id }}/findings"{% if tab == 'findings' %} aria-current="page"{% endif %}>Temuan
+    {%- if counts.total %} <span class="tab-count">{{ counts.total }}</span>{% endif %}</a>
+  <a href="/analyses/{{ an.id }}/network"{% if tab == 'network' %} aria-current="page"{% endif %}>Jaringan</a>
+  <a href="/analyses/{{ an.id }}/code"{% if tab == 'code' %} aria-current="page"{% endif %}>Kode</a>
+  <a href="/analyses/{{ an.id }}/manifest"{% if tab == 'manifest' %} aria-current="page"{% endif %}>Manifest</a>
+</nav>
+
+{#- Analisis lama (M1) atau analisis statis gagal: tawarkan menjalankannya tanpa dekompilasi ulang. -#}
+{% if tab in ('findings', 'network', 'code') and not analysis_ready and snap.status not in ('queued', 'running') %}
+<div class="alert alert-info" role="status">
+  {{ icon('info') }}
+  <div class="dup-body">
+    <p><strong>Analisis statis belum tersedia untuk analisis ini.</strong></p>
+    <p class="muted">Hasil dekompilasi yang sudah ada dipakai ulang, jadi tidak perlu mendekompilasi lagi (biasanya hitungan detik hingga menit).</p>
+    <form method="post" action="/analyses/{{ an.id }}/static" data-submit-lock class="btn-row">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit" class="btn btn-primary btn-sm">{{ icon('activity', 16) }}<span>Jalankan analisis statis</span></button>
+    </form>
+  </div>
+</div>
+{% endif %}

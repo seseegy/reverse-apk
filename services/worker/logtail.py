@@ -28,7 +28,9 @@ _PROGRESS = re.compile(r"progress:\s*(\d+)\s+of\s+(\d+)")
 
 
 class LogTail:
-    def __init__(self, conn: sqlite3.Connection, work_root: Path, analysis_id: int, stage: str) -> None:
+    def __init__(self, conn: sqlite3.Connection, work_root: Path, analysis_id: int, stage: str,
+                 log_name: str | None = None) -> None:
+        self.log_name = log_name or stage
         self.conn = conn
         self.work_root = work_root
         self.analysis_id = analysis_id
@@ -42,7 +44,7 @@ class LogTail:
         self.dropped = 0
 
     def _read_new(self) -> str:
-        target = resolve_under(self.work_root, str(self.analysis_id), "logs", f"{self.stage}.log")
+        target = resolve_under(self.work_root, str(self.analysis_id), "logs", f"{self.log_name}.log")
         if target is None:
             return ""
         try:
@@ -67,7 +69,7 @@ class LogTail:
             if not self._truncated_noted:
                 self._truncated_noted = True
                 store.add_log(self.conn, self.analysis_id, self.stage, "warn",
-                              f"Log {self.stage} dipotong di sini; lihat logs/{self.stage}.log untuk selengkapnya.")
+                              f"Log {self.stage} dipotong di sini; lihat logs/{self.log_name}.log untuk selengkapnya.")
             return
         self._last_line = message
         self._emitted += 1
@@ -85,7 +87,7 @@ class LogTail:
                 self._last_pct = pct
                 # Progres tidak dihitung ke batas baris (tidak membanjiri), tetapi tetap dicatat.
                 store.add_log(self.conn, self.analysis_id, self.stage, "info",
-                              f"{self.stage}: {pct}% ({done}/{total} class)")
+                              f"{self.stage}: {pct}% ({done}/{total})")
             return
         if _ERROR.search(line):
             self._emit("error", line)

@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% set title = an.app_label or an.filename_display %}
+{% block title %}Kode · {{ title }} · reverse-apk{% endblock %}
+
+{% block header %}{% include "_header.html" %}{% endblock %}
+
+{% block content %}
+<div class="container page container-wide">
+  <a class="back-link" href="/">{{ icon('arrow-left', 16) }}<span>Semua APK</span></a>
+  {% include "_analysis_head.html" %}
+
+  <section class="code-app" aria-label="Penjelajah kode" data-code data-analysis-id="{{ an.id }}"
+           data-has-index="{{ 'true' if has_index else 'false' }}">
+    <aside class="code-side">
+      <form class="code-search" role="search" data-code-search>
+        <label for="cs-q" class="sr-only">Cari di kode</label>
+        <input id="cs-q" type="search" placeholder="Cari kode atau nama class…" maxlength="120" autocomplete="off"
+               spellcheck="false" {% if not has_index %}disabled aria-describedby="cs-note"{% endif %}>
+        <button type="submit" class="btn btn-ghost btn-sm" {% if not has_index %}disabled{% endif %}>
+          {{ icon('search', 16) }}<span>Cari</span></button>
+        <label class="check check-sm" for="cs-app">
+          <input id="cs-app" type="checkbox" {% if not has_index %}disabled{% endif %}>
+          <span>Sembunyikan pustaka</span>
+        </label>
+      </form>
+      {% if not has_index %}
+      <p id="cs-note" class="muted hint">Pencarian tersedia setelah analisis statis selesai. Penjelajah pohon tetap bisa dipakai.</p>
+      {% endif %}
+
+      <div class="code-root">
+        <label for="cs-root" class="sr-only">Jenis sumber</label>
+        <select id="cs-root" data-root>
+          {% for r in roots %}<option value="{{ r.id }}">{{ r.label }}</option>{% endfor %}
+        </select>
+      </div>
+
+      <div class="code-results" data-results hidden>
+        <div class="code-results-head">
+          <span class="hint muted" role="status" aria-atomic="true" data-results-status></span>
+          <button type="button" class="btn btn-ghost btn-sm" data-results-close>{{ icon('x', 14) }}<span>Tutup</span></button>
+        </div>
+        <ul class="results-list" data-results-list></ul>
+      </div>
+
+      <div class="code-tree" data-tree role="tree" aria-label="Pohon berkas"></div>
+    </aside>
+
+    <section class="code-main" aria-label="Penampil kode">
+      <div class="code-bar">
+        <span class="mono code-path break" data-viewer-path>Pilih berkas dari pohon di kiri.</span>
+        <span class="muted hint" data-meta></span>
+      </div>
+      <div class="code-view" data-view tabindex="0" aria-label="Isi berkas" hidden></div>
+      <p class="muted code-empty" data-empty>
+        Pilih sebuah class dari pohon, atau cari di kotak pencarian. Tautan dari tab Temuan membuka berkas langsung
+        pada baris yang relevan.
+      </p>
+    </section>
+  </section>
+</div>
+{% endblock %}

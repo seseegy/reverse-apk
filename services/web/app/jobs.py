@@ -10,7 +10,7 @@ from rq import Queue
 from .status import QUEUE_NAME
 
 
-def enqueue_analysis(conn: redis.Redis, analysis_id: int, job_timeout: int) -> str:
+def enqueue_analysis(conn: redis.Redis, analysis_id: int, job_timeout: int, only_stage: str | None = None) -> str:
     """Kirim `tasks.run_analysis(analysis_id)` ke worker.
 
     Worker mengklaim analisis lewat compare-and-set di DB (queued -> running), jadi pengiriman ganda
@@ -20,6 +20,7 @@ def enqueue_analysis(conn: redis.Redis, analysis_id: int, job_timeout: int) -> s
     job = queue.enqueue(
         "tasks.run_analysis",
         analysis_id,
+        only_stage,
         job_id=f"analysis-{int(analysis_id)}-{uuid.uuid4().hex[:8]}",
         job_timeout=job_timeout,
         result_ttl=300,

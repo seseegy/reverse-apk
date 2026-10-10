@@ -19,12 +19,11 @@ import os
 import shutil
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from rvcore import store
 from rvcore.db import connect, migrate
-from rvcore.fsutil import atomic_write_json, safe_rmtree, tree_stats
+from rvcore.fsutil import atomic_write_json, read_json_under, safe_rmtree, tree_stats
 from rvcore.paths import Layout
 from rvcore.spool import (
     RESULT_ABORTED,
@@ -37,6 +36,7 @@ from rvcore.spool import (
     new_job_id,
 )
 
+from findings_import import manifest_findings, read_findings
 from logtail import LogTail
 from manifest import ManifestError, parse_manifest
 
@@ -69,6 +69,7 @@ class Config:
             timeouts={
                 "apktool": _env_int("TIMEOUT_APKTOOL", 300),
                 "jadx": _env_int("TIMEOUT_JADX", 900),
+                "analyze": _env_int("TIMEOUT_ANALYZE", 300),
             },
             pickup_timeout=_env_int("RUNNER_PICKUP_TIMEOUT", 120),
             min_free_bytes=_env_int("JOB_MIN_FREE_GB", 5) * 1024**3,
@@ -108,7 +109,8 @@ def _fmt_bytes(n: int) -> str:
 class Run:
     """Konteks satu eksekusi analisis."""
 
-    def __init__(self, conn, cfg: Config, analysis: Any) -> None:  # noqa: ANN001
+    def __init__(self, conn, cfg: Config, analysis: Any, only_stage: str | None = None) -> None:  # noqa: ANN001
+        self.only_stage = only_stage
         self.conn = conn
         self.cfg = cfg
         self.id: int = analysis["id"]
@@ -117,7 +119,7 @@ class Run:
         self.size: int = analysis["size"]
         self.options: dict[str, Any] = _load_options(analysis["options"])
         self.work = cfg.layout.work_dir(self.id)
-        self.versions: dict[str, Any] = {}
+        self.versions: dict[str, Any] = _load_options(analysis["tool_versions"]) if only_stage else {}
         self.current_stage: str | None = None
 
     def log(self, level: str, message: str, stage: str | None = None) -> None:
@@ -139,7 +141,7 @@ def _load_options(raw: str | None) -> dict[str, Any]:
 # ====================================================================== titik masuk
 
 
-def run_analysis(analysis_id: int) -> None:
+def run_analysis(analysis_id: int, only_stage: str | None = None) -> None:
     cfg = Config.from_env()
     conn = connect(cfg.layout.db_path)
     try:
@@ -147,8 +149,9 @@ def run_analysis(analysis_id: int) -> None:
             log.info("analisis %s dilewati (sudah diambil/dibatalkan)", analysis_id)
             return
         analysis = store.get_analysis(conn, analysis_id)
-        run = Run(conn, cfg, analysis)
-        log.info("mulai analisis %s (apk=%s, percobaan %s)", run.id, run.apk_id, analysis["attempt"])
+        run = Run(conn, cfg, analysis, only_stage)
+        log.info("mulai analisis %s (apk=%s, percobaan %s%s)", run.id, run.apk_id, analysis["attempt"],
+                 f", hanya tahap {only_stage}" if only_stage else "")
         started = time.monotonic()
         try:
             _execute(run)
@@ -173,6 +176,8 @@ def run_analysis(analysis_id: int) -> None:
 def _execute(run: Run) -> None:
     cfg = run.cfg
     cfg.spool.ensure_dirs()
+    if run.only_stage == "analyzing":
+        return _execute_analysis_only(run)
 
     # Bersihkan sisa percobaan sebelumnya. Worker adalah satu-satunya penulis di sini.
     safe_rmtree(run.work)
@@ -184,7 +189,7 @@ def _execute(run: Run) -> None:
     outcomes: dict[str, str] = {}
     for stage in ("apktool", "jadx"):
         run.check_cancel()
-        outcomes[stage] = _stage_tool(run, stage)
+        outcomes[stage] = _stage_tool(run, stage, stage)
 
     usable = [s for s, o in outcomes.items() if o in (store.OK, store.WARN)]
     if not usable:
@@ -195,9 +200,16 @@ def _execute(run: Run) -> None:
 
     run.current_stage = None
     _summarize_manifest(run, outcomes)
+
+    run.check_cancel()
+    outcomes["analyzing"] = _stage_analyze(run)
+
     _record_artifacts(run, outcomes)
     store.set_tool_versions(run.conn, run.id, run.versions)
+    _finish_ok(run, outcomes)
 
+
+def _finish_ok(run: Run, outcomes: dict[str, str]) -> None:
     problems = [s for s, o in outcomes.items() if o in (store.WARN, store.FAILED)]
     if problems:
         run.log("warn", "Selesai dengan peringatan pada: " + ", ".join(problems) + ".")
@@ -206,6 +218,25 @@ def _execute(run: Run) -> None:
     if not store.finish_analysis(run.conn, run.id, store.DONE):
         # Status sudah berubah di luar kita (mis. dibatalkan persis di akhir). Hormati status itu.
         log.info("analisis %s: status akhir sudah ditetapkan di tempat lain", run.id)
+
+
+def _execute_analysis_only(run: Run) -> None:
+    """Jalankan ulang HANYA analisis statis memakai hasil apktool/jadx yang sudah ada (FR-2.9)."""
+    needs = [run.work / "jadx" / "sources", run.work / "apktool"]
+    missing = [p.relative_to(run.work).as_posix() for p in needs if not p.is_dir() or p.is_symlink()]
+    if missing:
+        raise PipelineFailure(store.E_VALIDATION, "Hasil dekompilasi tidak ditemukan (" + ", ".join(missing) +
+                                                  "). Jalankan analisis ulang penuh.")
+    run.log("info", "Menjalankan ulang analisis statis dari hasil dekompilasi yang ada…", "analyzing")
+    safe_rmtree(run.work / "index")
+    # Manifest diringkas ulang agar tahap ini tidak bergantung pada berkas lama yang mungkin rusak.
+    outcomes = {"apktool": store.OK, "jadx": store.OK}
+    _summarize_manifest(run, outcomes)
+    outcomes["analyzing"] = _stage_analyze(run)
+    _record_artifacts(run, {**outcomes})
+    store.set_tool_versions(run.conn, run.id, run.versions)
+    # Hanya tahap analisis yang diulang: tahap lain tetap seperti sebelumnya.
+    _finish_ok(run, {"analyzing": outcomes["analyzing"]})
 
 
 # ====================================================================== tahap: validasi
@@ -249,20 +280,25 @@ def _stage_validate(run: Run) -> None:
 # ====================================================================== tahap: tool
 
 
-def _stage_tool(run: Run, stage: str) -> str:
-    """Jalankan satu tool lewat runner. Mengembalikan status tahap akhir (ok/warn/failed)."""
+def _stage_tool(run: Run, stage: str, runner_stage: str, fatal: bool = True) -> str:
+    """Jalankan satu tahap lewat runner. Mengembalikan status tahap akhir (ok/warn/failed).
+
+    stage = nama tahap di DB ("analyzing"), runner_stage = nama job di runner ("analyze").
+    fatal=False: timeout / batas keluaran hanya menggagalkan TAHAP ini, bukan seluruh analisis
+    (dipakai analisis statis: hasil apktool/jadx sebelumnya tetap bernilai).
+    """
     run.current_stage = stage
-    timeout = run.cfg.timeouts[stage]
+    timeout = run.cfg.timeouts[runner_stage]
     store.set_stage(run.conn, run.id, stage, store.RUNNING)
     run.log("info", f"Menjalankan {stage} (batas waktu {_fmt_secs(timeout)})…")
 
-    result = _run_job(run, stage, timeout)
+    result = _run_job(run, stage, runner_stage, timeout)
     status = result.get("status")
     message = str(result.get("message") or "")
     code = str(result.get("error_code") or "")
 
     tool = result.get("tool") or {}
-    run.versions[stage] = {
+    run.versions[runner_stage] = {
         "version": tool.get("version"),
         "args": result.get("args"),
         "duration_s": result.get("duration"),
@@ -275,11 +311,17 @@ def _stage_tool(run: Run, stage: str) -> str:
         raise Cancelled()
     if status == RESULT_TIMEOUT:
         store.set_stage(run.conn, run.id, stage, store.FAILED, "timeout")
+        if not fatal:
+            run.log("error", f"Tahap {stage} melebihi batas waktu {_fmt_secs(timeout)} dan dihentikan.")
+            return store.FAILED
         raise PipelineFailure(
             store.E_TIMEOUT, f"Tahap {stage} melebihi batas waktu {_fmt_secs(timeout)} dan dihentikan."
         )
     if code == "output_limit":
         store.set_stage(run.conn, run.id, stage, store.FAILED, "keluaran terlalu besar")
+        if not fatal:
+            run.log("error", message or f"Keluaran {stage} melebihi batas dan dihentikan.")
+            return store.FAILED
         raise PipelineFailure(store.E_OUTPUT_LIMIT, message or f"Keluaran {stage} melebihi batas dan dihentikan.")
     if code in (store.E_RUNNER, "runner_lost") or status == RESULT_ABORTED:
         # Runner mati/berulang restart: tahap berikutnya pasti ikut gagal, jadi hentikan sekarang.
@@ -306,20 +348,20 @@ def _stage_tool(run: Run, stage: str) -> str:
     return store.FAILED
 
 
-def _run_job(run: Run, stage: str, timeout: int) -> dict[str, Any]:
+def _run_job(run: Run, stage: str, runner_stage: str, timeout: int) -> dict[str, Any]:
     """Kirim job ke runner dan tunggu hasilnya. Mengulang 1× bila runner dimulai ulang saat job berjalan (FR-2.7)."""
     for attempt in (1, 2):
-        job_id = new_job_id(run.id, stage)
+        job_id = new_job_id(run.id, runner_stage)
         run.cfg.spool.submit({
             "job_id": job_id,
             "analysis_id": run.id,
-            "stage": stage,
+            "stage": runner_stage,
             "sha256": run.sha256,
             "options": {"deobf": bool(run.options.get("deobf"))},
             "timeout": timeout,
             "created": time.time(),
         })
-        result = _wait_result(run, stage, job_id, timeout)
+        result = _wait_result(run, stage, runner_stage, job_id, timeout)
         if result.get("status") == RESULT_ABORTED and attempt == 1:
             run.log("warn", f"Runner dimulai ulang saat {stage} berjalan; mengulang tahap ini sekali.")
             continue
@@ -327,9 +369,9 @@ def _run_job(run: Run, stage: str, timeout: int) -> dict[str, Any]:
     return result  # pragma: no cover - loop selalu return
 
 
-def _wait_result(run: Run, stage: str, job_id: str, timeout: int) -> dict[str, Any]:
+def _wait_result(run: Run, stage: str, runner_stage: str, job_id: str, timeout: int) -> dict[str, Any]:
     spool = run.cfg.spool
-    tail = LogTail(run.conn, run.cfg.layout.work, run.id, stage)
+    tail = LogTail(run.conn, run.cfg.layout.work, run.id, stage, log_name=runner_stage)
     submitted = time.monotonic()
     claimed_at: float | None = None
     cancel_sent = False
@@ -381,6 +423,32 @@ def _wait_result(run: Run, stage: str, job_id: str, timeout: int) -> dict[str, A
         spool.forget(job_id)
 
 
+# ====================================================================== tahap: analisis statis
+
+
+def _stage_analyze(run: Run) -> str:
+    """Analisis statis di runner, lalu impor temuan (runner) + temuan manifest (worker) ke DB."""
+    outcome = _stage_tool(run, "analyzing", "analyze", fatal=False)
+    run.current_stage = "analyzing"
+
+    findings: list[dict[str, Any]] = []
+    manifest = read_json_under(run.cfg.layout.work, str(run.id), "manifest.json")
+    if isinstance(manifest, dict):
+        findings.extend(manifest_findings(manifest))
+    if outcome in (store.OK, store.WARN):
+        imported, rejected = read_findings(run.work)
+        findings.extend(imported)
+        if rejected:
+            run.log("warn", f"{rejected} temuan dari runner ditolak karena tidak valid.")
+    # Batas gabungan: temuan dari runner sudah dibatasi, manifest bernilai kecil.
+    count = store.replace_findings(run.conn, run.id, findings)
+    counts = store.finding_counts(run.conn, run.id)
+    hi = counts["by_severity"].get("high", 0)
+    run.log("info" if outcome != store.FAILED else "warn",
+            f"{count} temuan disimpan ({hi} tinggi)." if count else "Tidak ada temuan.")
+    return outcome
+
+
 # ====================================================================== pascaproses
 
 
@@ -419,6 +487,9 @@ def _record_artifacts(run: Run, outcomes: dict[str, str]) -> None:
         if outcomes.get(stage) in (store.OK, store.WARN):
             size, files, _ = tree_stats(run.work / stage)
             items.append((stage, stage, size, files))
+    if outcomes.get("analyzing") in (store.OK, store.WARN) and (run.work / "index").is_dir():
+        size, files, _ = tree_stats(run.work / "index")
+        items.append(("index", "index", size, files))
     store.replace_artifacts(run.conn, run.id, items)
 
 

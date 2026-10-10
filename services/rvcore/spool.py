@@ -26,8 +26,10 @@ from typing import Any
 
 from .fsutil import atomic_write_json
 
-TOOL_STAGES = ("apktool", "jadx")
-JOB_ID_RE = re.compile(r"^a(\d{1,9})-(apktool|jadx)-[0-9a-f]{8}$")
+TOOL_STAGES = ("apktool", "jadx", "analyze")
+JOB_ID_RE = re.compile(r"^a(\d{1,9})-(apktool|jadx|analyze)-[0-9a-f]{8}$")
+# Direktori keluaran per tahap di work/<analysis_id>/ (analyze menulis ke index/, bukan analyze/).
+STAGE_OUT_DIR = {"apktool": "apktool", "jadx": "jadx", "analyze": "index"}
 MAX_REQUEST_BYTES = 16 * 1024
 
 # Hasil akhir sebuah job di runner.

@@ -93,6 +93,7 @@ services:
       DATA_DIR: /data
       TIMEOUT_APKTOOL: ${TIMEOUT_APKTOOL:-300}
       TIMEOUT_JADX: ${TIMEOUT_JADX:-900}
+      TIMEOUT_ANALYZE: ${TIMEOUT_ANALYZE:-300}
       JOB_TIMEOUT: ${JOB_TIMEOUT:-2700}
     volumes:
       - uploads:/data/uploads:ro
