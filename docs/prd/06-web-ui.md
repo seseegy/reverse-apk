@@ -3,6 +3,17 @@
 ## Tujuan
 Antarmuka web cepat dan fokus untuk satu pengguna: unggah, pantau, jelajahi, tanya.
 
+## Design system
+Sumber kebenaran visual ada di [`design-system/reverse-apk/MASTER.md`](../../design-system/reverse-apk/MASTER.md), dibuat dengan skill UI/UX Pro Max lalu disesuaikan dan diverifikasi kontrasnya. Override per halaman ada di `design-system/reverse-apk/pages/` (saat ini: `login.md`, `analysis-detail.md`). Bila ada override, aturannya menang atas MASTER.
+
+Ringkasan keputusan:
+- **Arah visual:** gelap, minimal, padat (variance 3, motion 3, density 7). Aksen hijau `#22C55E`, latar `#0F172A`, kartu `#1B2336`.
+- **Tipografi:** JetBrains Mono untuk judul dan semua kode/path; IBM Plex Sans untuk isi teks.
+- **Kontras:** teks ≥ 4,5:1; batas kontrol input ≥ 3:1 (`--color-border-control #64748B`, bukan border dekoratif bawaan yang hanya ~2,1:1).
+- **Severity:** info / low / medium / high selalu berupa warna **+ label teks + ikon**.
+- **Gerak:** hanya transisi 150–250 ms; hormati `prefers-reduced-motion`; tanpa animasi scroll-reveal.
+- **Bukan landing page:** pola "FAQ/Documentation Landing" dari generator sengaja tidak dipakai.
+
 ## Halaman
 | Halaman | Isi | Prioritas |
 |---------|-----|-----------|
@@ -31,7 +42,10 @@ Antarmuka web cepat dan fokus untuk satu pengguna: unggah, pantau, jelajahi, tan
 | FR-6.6 | Ekspor laporan Markdown/PDF | P1 |
 | FR-6.7 | Peringatan eksplisit sebelum mengirim ke AI: "potongan kode akan dikirim ke DeepSeek" | P0 |
 | FR-6.8 | Responsif untuk tablet; ponsel cukup bisa dibaca | P1 |
-| FR-6.9 | Aksesibilitas dasar: kontras, navigasi keyboard, label ARIA | P1 |
+| FR-6.9 | Aksesibilitas: kontras sesuai design system, fokus terlihat (`focus-visible`), navigasi keyboard penuh, label ARIA, hitungan dinamis memakai `role="status"` | P0 |
+| FR-6.10 | Upload tidak bergantung pada drag: selalu ada tombol "Pilih berkas" | P0 |
+| FR-6.11 | Login mengizinkan password manager dan paste, ada tombol tampilkan password | P0 |
+| FR-6.12 | Tahap pipeline tampil sebagai stepper dengan teks status, bukan spinner polos | P0 |
 
 ## Alur utama
 1. Upload → centang otorisasi → (opsional) lihat estimasi biaya → mulai.

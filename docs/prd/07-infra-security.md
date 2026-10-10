@@ -4,6 +4,9 @@
 - VPS UpCloud SG-SIN1, 4 vCPU / 8 GB RAM / 100 GB, Ubuntu, user `deploy` sudah dibuat dan SSH aktif.
 - Deploy dengan Docker Compose. Domain opsional.
 
+## Keputusan akses
+Web diakses lewat browser pada domain publik **`revers3.my.id`** (disarankan subdomain `apk.revers3.my.id`) menuju VPS `94.237.78.162`. Karena terbuka ke internet, lapisan perlindungan berikut **wajib**: HTTPS (Caddy/Let's Encrypt), login aplikasi dengan rate limit, tidak ada endpoint tanpa auth (selain `/healthz` minimal), dan sebaiknya Cloudflare Access (login email/Google) di depan Caddy. Tailscale tetap opsional untuk SSH/administrasi.
+
 ## Komponen & jaringan
 ```
 Internet ──(tidak ada port analisis publik)
@@ -65,6 +68,6 @@ Worker perlu memulai container job. Jangan mount `/var/run/docker.sock` mentah k
 - Mencoba login 10× salah memicu rate limit.
 
 ## Pertanyaan terbuka
-- [OPEN] Tailscale-only atau domain publik?
+- [DIPUTUSKAN] Domain publik revers3.my.id (lihat "Keputusan akses").
 - [OPEN] Lokasi backup (UpCloud Object Storage, rsync ke mesin lain)?
 - [OPEN] Ukuran VPS: €52/bln cukup besar; resize ke 2 vCPU/4 GB setelah beban nyata terukur?

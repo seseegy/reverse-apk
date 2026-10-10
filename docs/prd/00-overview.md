@@ -56,6 +56,6 @@ Aplikasi ini ditujukan untuk analisis APK yang **milik pengguna atau yang penggu
 | Kebocoran APK sensitif ke pihak ketiga | Privasi | Pengguna sadar potongan kode dikirim ke DeepSeek; opsi "tanpa AI" per analisis; redaksi secret sebelum kirim |
 
 ## 10. Pertanyaan terbuka
-- [OPEN] Akses: Tailscale saja, atau domain + Cloudflare Access?
+- [DIPUTUSKAN] Akses lewat browser dengan domain publik `revers3.my.id` (subdomain mis. `apk.revers3.my.id`) + HTTPS Caddy + login aplikasi. Tailscale/Cloudflare Access tetap bisa ditambahkan sebagai lapisan ekstra.
 - [OPEN] Batas ukuran APK/XAPK yang didukung (usul awal 200 MB).
 - [OPEN] Perlu opsi model lokal sebagai cadangan?
