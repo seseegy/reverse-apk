@@ -39,9 +39,9 @@ def _int(name: str, default: int, lo: int = 1, hi: int = 10**6) -> int:
     return value
 
 
-# Total hasil tool per giliran ≈ 65 ribu token. Tiap langkah mengirim ulang SEMUA hasil sebelumnya, tetapi pada tarif murah + floor
-# per request biayanya kecil (≈0,017 kredit/request di batas ini); 240 ribu karakter + riwayat + prompt masih muat di konteks 128 ribu.
-DEFAULT_TURN_TOOL_CHARS = 240_000
+# Batas TOTAL hasil tool per giliran. 0 = TANPA BATAS (bawaan). Isi AI_MAX_TURN_TOOL_CHARS bila ingin membatasi: tiap langkah agent
+# mengirim ulang SEMUA hasil sebelumnya, jadi total yang besar membuat permintaan makin besar dan bisa melewati konteks model.
+DEFAULT_TURN_TOOL_CHARS = 0
 
 
 @dataclass(frozen=True)
@@ -62,7 +62,7 @@ class AIConfig:
     day_offset_hours: int        # batas "hari" untuk anggaran harian (7 = WIB)
     redact_secrets: bool = True  # redaksi secret SEBELUM data APK dikirim ke provider (FR-4.9)
     max_tool_chars: int = 14000  # batas ukuran satu hasil tool (karakter)
-    max_turn_tool_chars: int = DEFAULT_TURN_TOOL_CHARS  # batas total hasil tool dalam satu giliran
+    max_turn_tool_chars: int = DEFAULT_TURN_TOOL_CHARS  # batas total hasil tool dalam satu giliran (0 = tanpa batas)
     tool_timeout_s: float = 60.0  # batas WAKTU satu kueri/pencarian tool (detik; 0 = tanpa batas)
 
     @property
@@ -117,6 +117,6 @@ def load_ai_config() -> AIConfig:
         day_offset_hours=_int("AI_DAY_OFFSET_HOURS", 7, -12, 14),
         redact_secrets=os.environ.get("AI_REDACT_SECRETS", "1").strip().lower() not in {"0", "false", "no", "off"},
         max_tool_chars=_int("AI_MAX_TOOL_CHARS", 14000, 1000, 100_000_000),
-        max_turn_tool_chars=_int("AI_MAX_TURN_TOOL_CHARS", DEFAULT_TURN_TOOL_CHARS, 5000, 1_000_000_000),
+        max_turn_tool_chars=_int("AI_MAX_TURN_TOOL_CHARS", DEFAULT_TURN_TOOL_CHARS, 0, 1_000_000_000),
         tool_timeout_s=_float("AI_TOOL_TIMEOUT", 60.0),
     )
