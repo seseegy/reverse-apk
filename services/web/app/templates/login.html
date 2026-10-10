@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}Masuk · reverse-apk{% endblock %}
+
+{% block content %}
+<div class="auth">
+  <section class="card auth-card" aria-labelledby="login-title">
+    <h1 id="login-title" class="brand brand-lg">reverse-apk</h1>
+    <p class="muted">Masuk untuk melanjutkan.</p>
+
+    {% if error %}
+    <div class="alert alert-error" role="alert" id="login-error">
+      {{ icon('x-circle') }}
+      <span>{{ error }}</span>
+    </div>
+    {% endif %}
+
+    <form method="post" action="/login" class="stack" data-submit-lock>
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+
+      <div class="field">
+        <label for="username">Username</label>
+        <input id="username" name="username" type="text" value="{{ username }}"
+               autocomplete="username" autocapitalize="none" spellcheck="false"
+               maxlength="128" required autofocus
+               {% if error %}aria-describedby="login-error"{% endif %}>
+      </div>
+
+      <div class="field">
+        <label for="password">Password</label>
+        <div class="input-group">
+          <input id="password" name="password" type="password"
+                 autocomplete="current-password" maxlength="1024" required
+                 {% if error %}aria-describedby="login-error"{% endif %}>
+          <button type="button" class="btn-toggle" data-toggle-password
+                  aria-controls="password" aria-pressed="false">
+            Tampilkan<span class="sr-only"> password</span>
+          </button>
+        </div>
+      </div>
+
+      <button class="btn btn-primary btn-block" type="submit">Masuk</button>
+    </form>
+  </section>
+</div>
+{% endblock %}

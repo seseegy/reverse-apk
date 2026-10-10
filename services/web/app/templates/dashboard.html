@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}Dashboard · reverse-apk{% endblock %}
+
+{% block header %}
+<header class="site-header">
+  <div class="container header-row">
+    <a class="brand" href="/">reverse-apk</a>
+    <nav aria-label="Navigasi utama">
+      <a href="/" aria-current="page">Dashboard</a>
+    </nav>
+    <form method="post" action="/logout" class="header-user">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <span class="muted" title="Masuk sebagai">{{ user }}</span>
+      <button type="submit" class="btn btn-ghost btn-sm">
+        {{ icon('log-out', 16) }}<span>Keluar</span>
+      </button>
+    </form>
+  </div>
+</header>
+{% endblock %}
+
+{% block content %}
+<div class="container page">
+  <div class="page-head">
+    <h1>APK</h1>
+    <div class="page-actions">
+      <button type="button" class="btn btn-primary" disabled aria-describedby="upload-note">
+        {{ icon('upload', 16) }}<span>Upload APK</span>
+      </button>
+    </div>
+  </div>
+
+  <section class="card empty" aria-labelledby="empty-title">
+    <div class="empty-icon">{{ icon('upload', 28) }}</div>
+    <h2 id="empty-title">Belum ada APK</h2>
+    <p class="muted" id="upload-note">
+      Upload dan analisis tersedia di tahap berikutnya (M1).
+      Untuk sekarang, pastikan semua layanan di bawah ini normal.
+    </p>
+  </section>
+
+  <section class="card" aria-labelledby="status-title" {% if status.selftest_pending %}data-poll{% endif %}>
+    <div class="card-head">
+      <h2 id="status-title">Status sistem</h2>
+      <a class="link-quiet" href="/">Perbarui</a>
+    </div>
+
+    <p class="summary summary-{{ 'error' if status.problems else 'ok' }}" role="status">
+      {{ icon('alert-triangle' if status.problems else 'check-circle') }}
+      <span>{{ status.summary }}</span>
+    </p>
+
+    <ul class="status-list">
+      {% for c in status.checks %}
+      <li class="status-row status-{{ c.state }}">
+        <span class="status-icon">
+          {{ icon({'ok': 'check-circle', 'error': 'x-circle', 'warn': 'alert-triangle', 'pending': 'clock'}[c.state]) }}
+        </span>
+        <span class="status-main">
+          <span class="status-label">{{ c.label }}</span>
+          <span class="status-detail muted">{{ c.detail }}</span>
+        </span>
+        <span class="status-word">
+          {{ {'ok': 'Normal', 'error': 'Masalah', 'warn': 'Perhatian', 'pending': 'Menunggu'}[c.state] }}
+        </span>
+      </li>
+      {% endfor %}
+    </ul>
+
+    <form method="post" action="/selftest" class="card-foot" data-submit-lock>
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit" class="btn btn-ghost">
+        {{ icon('activity', 16) }}<span>Uji antrean</span>
+      </button>
+      <span class="muted hint">Mengirim tugas uji ke worker dan menunggu jawabannya.</span>
+    </form>
+  </section>
+</div>
+{% endblock %}
