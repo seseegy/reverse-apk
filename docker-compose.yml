@@ -1,0 +1,153 @@
+name: reverse-apk
+
+# Pengerasan umum untuk semua layanan.
+x-hardening: &hardening
+  restart: unless-stopped
+  init: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+services:
+  # ------------------------------------------------------------------ TLS + reverse proxy
+  caddy:
+    image: caddy:2.11-alpine
+    <<: *hardening
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    tmpfs:
+      - /tmp
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?isi APP_DOMAIN di .env}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [edge]
+    depends_on:
+      web:
+        condition: service_healthy
+    mem_limit: 256m
+
+  # ------------------------------------------------------------------ Aplikasi web
+  web:
+    build: ./services/web
+    <<: *hardening
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      SECRET_KEY: ${SECRET_KEY:?jalankan `make init`}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD_HASH_FILE: /run/secrets/admin_password_hash
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?jalankan `make init`}
+      DATA_DIR: /data
+    secrets:
+      - admin_password_hash
+    volumes:
+      - appdata:/data
+    networks: [edge, backend]
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    mem_limit: 512m
+    pids_limit: 256
+
+  # ------------------------------------------------------------------ Worker antrean
+  # Hanya di jaringan `backend` (internal, tanpa akses internet). Akses ke DeepSeek
+  # ditambahkan di M3 lewat jaringan terpisah. Alat dekompilasi TIDAK ada di sini.
+  worker:
+    build: ./services/worker
+    <<: *hardening
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?jalankan `make init`}
+    networks: [backend]
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "healthcheck.py"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    mem_limit: 512m
+    pids_limit: 256
+
+  # ------------------------------------------------------------------ Redis (antrean)
+  redis:
+    image: redis:8.8-alpine
+    <<: *hardening
+    # Jalankan langsung sebagai user `redis`: dengan cap_drop ALL, entrypoint tidak bisa
+    # chown/setuid bila dimulai sebagai root.
+    user: redis
+    command:
+      - sh
+      - -c
+      - exec redis-server --requirepass "$$REDIS_PASSWORD" --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?jalankan `make init`}
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    volumes:
+      - redisdata:/data
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    mem_limit: 320m
+
+  # ------------------------------------------------------------------ Runner (alat dekompilasi)
+  # Tidak ikut `up`. Dipakai untuk uji isolasi: `make runner-selftest`.
+  # Opsi di bawah adalah opsi isolasi yang sama untuk job dekompilasi di M1.
+  runner:
+    build: ./services/runner
+    profiles: ["tools"]
+    init: true
+    network_mode: none
+    read_only: true
+    user: "10002:10002"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,size=256m,nosuid
+    mem_limit: 3g
+    cpus: 2
+    pids_limit: 512
+
+networks:
+  # Caddy <-> web. Berjaringan keluar (web akan memanggil DeepSeek untuk chat di M3).
+  edge: {}
+  # Web <-> worker <-> redis. `internal`: tidak ada rute ke internet.
+  backend:
+    internal: true
+
+volumes:
+  appdata:
+  redisdata:
+  caddy_data:
+  caddy_config:
+
+secrets:
+  admin_password_hash:
+    file: ./secrets/admin_password_hash

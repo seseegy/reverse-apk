@@ -1,0 +1,33 @@
+{
+	# Matikan admin API (tidak dipakai). Konsekuensi: ubah Caddyfile -> `docker compose restart caddy`.
+	admin off
+}
+
+{$APP_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+
+	# Hanya satu tujuan: aplikasi web. Caddy menimpa X-Forwarded-* dari klien,
+	# jadi IP klien yang diteruskan ke aplikasi tidak bisa dipalsukan.
+	reverse_proxy web:8000 {
+		health_uri /healthz
+		health_interval 5s
+		# Saat web restart, tahan request sebentar dan coba ulang alih-alih langsung 503.
+		lb_try_duration 15s
+		lb_try_interval 250ms
+	}
+
+	# Batasi ukuran body request (upload APK diatur di M1; naikkan di sana).
+	request_body {
+		max_size 1MB
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

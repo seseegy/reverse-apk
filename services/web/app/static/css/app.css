@@ -1,0 +1,253 @@
+/* reverse-apk — gaya dasar. Token mengikuti design-system/reverse-apk/MASTER.md */
+
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("/static/fonts/IBMPlexSans-var.woff2") format("woff2");
+  font-weight: 100 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/static/fonts/JetBrainsMono-var.woff2") format("woff2");
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark;
+
+  /* Warna (MASTER.md) */
+  --color-background: #0f172a;
+  --color-foreground: #f8fafc;
+  --color-card: #1b2336;
+  --color-muted: #272f42;
+  --color-muted-foreground: #94a3b8;
+  --color-border: #475569;            /* hanya garis dekoratif (~2.1:1) */
+  --color-border-control: #64748b;    /* batas kontrol input/tombol (>= 3:1) */
+  --color-accent: #22c55e;
+  --color-accent-hover: #4ade80;
+  --color-on-accent: #0f172a;
+  --color-ring: #ffffff;
+  --code-bg: #0b1220;
+
+  /* Teks status (kontras >= 4.5:1 di atas card) */
+  --text-danger: #f87171;
+  --text-warn: #f59e0b;
+  --text-ok: #22c55e;
+
+  /* Tipografi */
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  /* Spasi (density 7) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  --radius: 8px;
+  --control-h: 40px;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+h1, h2, h3 {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 0;
+}
+h1 { font-size: 1.5rem; }
+h2 { font-size: 1.05rem; }
+p { margin: 0; }
+
+a { color: var(--color-accent); text-underline-offset: 3px; }
+a:hover { color: var(--color-accent-hover); }
+
+.muted { color: var(--color-muted-foreground); }
+
+/* Fokus keyboard terlihat di semua kontrol */
+:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+main:focus { outline: none; }
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
+.skip-link {
+  position: absolute; left: var(--space-3); top: -100px; z-index: 10;
+  background: var(--color-accent); color: var(--color-on-accent);
+  padding: var(--space-2) var(--space-4); border-radius: var(--radius);
+  font-weight: 600; text-decoration: none;
+}
+.skip-link:focus { top: var(--space-3); }
+
+.icon { flex: none; vertical-align: middle; }
+
+/* ---------- Layout ---------- */
+.container { width: 100%; max-width: 1120px; margin-inline: auto; padding-inline: var(--space-5); }
+.page { padding-block: var(--space-5) var(--space-6); display: grid; gap: var(--space-5); }
+.page-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
+.stack { display: grid; gap: var(--space-4); }
+
+.site-header { border-bottom: 1px solid var(--color-border); background: var(--color-background); }
+.header-row { display: flex; align-items: center; gap: var(--space-5); min-height: 56px; }
+.header-row nav { flex: 1; display: flex; gap: var(--space-4); }
+.header-row nav a {
+  color: var(--color-muted-foreground); text-decoration: none;
+  padding-block: var(--space-2); border-bottom: 2px solid transparent;
+}
+.header-row nav a:hover { color: var(--color-foreground); }
+/* Halaman aktif: garis bawah + teks lebih terang (bukan hanya warna) */
+.header-row nav a[aria-current="page"] {
+  color: var(--color-foreground); font-weight: 600; border-bottom-color: var(--color-accent);
+}
+.header-user { display: flex; align-items: center; gap: var(--space-3); margin: 0; }
+
+.brand {
+  font-family: var(--font-mono); font-weight: 700; font-size: 1.05rem;
+  color: var(--color-foreground); text-decoration: none; letter-spacing: -0.01em;
+}
+.brand::before { content: "> "; color: var(--color-accent); }
+.brand-lg { font-size: 1.5rem; }
+
+/* ---------- Kartu ---------- */
+.card {
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-5);
+  display: grid;
+  gap: var(--space-4);
+}
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.card-foot {
+  display: flex; align-items: center; gap: var(--space-4); flex-wrap: wrap;
+  margin: 0; padding-top: var(--space-4); border-top: 1px solid var(--color-border);
+}
+.hint { font-size: 0.875rem; }
+.link-quiet { color: var(--color-muted-foreground); font-size: 0.875rem; }
+.link-quiet:hover { color: var(--color-foreground); }
+
+.empty { justify-items: center; text-align: center; padding-block: var(--space-6); }
+.empty p { max-width: 52ch; }
+.empty-icon {
+  display: grid; place-items: center; width: 56px; height: 56px; border-radius: 50%;
+  background: var(--color-muted); color: var(--color-muted-foreground);
+}
+
+/* ---------- Form ---------- */
+.field { display: grid; gap: var(--space-2); }
+label { font-weight: 500; font-size: 0.9rem; }
+
+input[type="text"], input[type="password"] {
+  width: 100%; min-height: var(--control-h);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-background); color: var(--color-foreground);
+  border: 1px solid var(--color-border-control); border-radius: var(--radius);
+  font: inherit;
+  transition: border-color 150ms ease;
+}
+input:hover { border-color: var(--color-muted-foreground); }
+
+.input-group { display: flex; gap: var(--space-2); }
+.input-group input { flex: 1; min-width: 0; }
+
+/* ---------- Tombol ---------- */
+.btn, .btn-toggle {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2);
+  min-height: var(--control-h); padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius); border: 1px solid transparent;
+  font: inherit; font-weight: 600; cursor: pointer; text-decoration: none;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+.btn-primary { background: var(--color-accent); color: var(--color-on-accent); }
+.btn-primary:hover:not(:disabled) { background: var(--color-accent-hover); }
+.btn-ghost { background: transparent; color: var(--color-foreground); border-color: var(--color-border-control); }
+.btn-ghost:hover:not(:disabled) { background: var(--color-muted); }
+.btn-sm { min-height: 32px; padding: var(--space-1) var(--space-3); font-size: 0.875rem; }
+.btn-block { width: 100%; }
+.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.btn-toggle {
+  background: transparent; color: var(--color-foreground);
+  border-color: var(--color-border-control); font-weight: 500; font-size: 0.875rem;
+}
+.btn-toggle:hover { background: var(--color-muted); }
+/* Status "ditekan" dibedakan lewat isi + garis tepi, tidak hanya warna */
+.btn-toggle[aria-pressed="true"] {
+  background: var(--color-muted); border-color: var(--color-foreground);
+}
+
+/* ---------- Auth ---------- */
+.auth { min-height: 100vh; display: grid; place-items: center; padding: var(--space-5); }
+.auth-card { width: 100%; max-width: 400px; }
+
+/* ---------- Alert ---------- */
+.alert {
+  display: flex; gap: var(--space-3); align-items: flex-start;
+  padding: var(--space-3) var(--space-4); border-radius: var(--radius);
+  border: 1px solid; font-size: 0.925rem;
+}
+.alert .icon { margin-top: 2px; }
+.alert-error { background: rgba(239, 68, 68, 0.12); border-color: var(--text-danger); }
+.alert-error .icon { color: var(--text-danger); }
+
+/* ---------- Status sistem ---------- */
+.summary { display: flex; align-items: center; gap: var(--space-2); font-weight: 600; }
+.summary-ok .icon { color: var(--text-ok); }
+.summary-error .icon { color: var(--text-warn); }
+
+.status-list { list-style: none; margin: 0; padding: 0; display: grid; }
+.status-row {
+  display: grid; grid-template-columns: 24px 1fr auto; gap: var(--space-3);
+  align-items: center; padding-block: var(--space-3);
+  border-top: 1px solid var(--color-border);
+}
+.status-main { display: grid; min-width: 0; }
+.status-label { font-weight: 600; }
+.status-detail { font-size: 0.875rem; overflow-wrap: anywhere; }
+.status-word { font-family: var(--font-mono); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.status-ok .status-icon, .status-ok .status-word { color: var(--text-ok); }
+.status-error .status-icon, .status-error .status-word { color: var(--text-danger); }
+.status-warn .status-icon, .status-warn .status-word { color: var(--text-warn); }
+.status-pending .status-icon, .status-pending .status-word { color: var(--color-muted-foreground); }
+
+/* ---------- Responsif & preferensi pengguna ---------- */
+@media (max-width: 640px) {
+  .container { padding-inline: var(--space-4); }
+  .header-row { gap: var(--space-3); }
+  .header-user .muted { display: none; }
+  .page-head { flex-wrap: wrap; }
+}
+
+/* Target sentuh >= 44px pada layar sentuh DAN layar sempit (deteksi pointer tidak selalu andal) */
+@media (pointer: coarse), (max-width: 640px) {
+  .btn, .btn-toggle, input[type="text"], input[type="password"] { min-height: 44px; }
+  .btn-sm { min-height: 44px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
+}
