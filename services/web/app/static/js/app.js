@@ -905,7 +905,7 @@
             var text = d.content || ""; raw = text;
             renderMarkdown(text, bodyEl, { analysisId: aid, citations: citeMap(d.citations) });
             if (toolsBox) { toolsBox.open = false; toolsBox.firstChild.textContent = d.tools + " langkah tool"; }
-            var notes = { max_steps: "Berhenti di batas langkah.", budget: "Anggaran habis.", cancelled: "Dihentikan.", error: "Terjadi galat.", tool_budget: "Batas data tool tercapai." };
+            var notes = { max_steps: "Berhenti di batas langkah.", budget: "Anggaran habis.", cancelled: "Dihentikan.", error: "Terjadi galat.", tool_budget: "Batas total data tool giliran ini tercapai; jawaban disusun dari yang sudah dibaca. Kirim \"lanjutkan\" atau pertanyaan yang lebih sempit untuk menggali bagian berikutnya." };
             if (d.stopped !== "done" && notes[d.stopped]) {
               var n = document.createElement("div"); n.className = "msg-note"; n.textContent = notes[d.stopped] + (d.error ? " " + d.error : ""); asst.appendChild(n);
             }
