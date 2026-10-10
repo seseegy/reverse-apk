@@ -39,6 +39,11 @@ def _int(name: str, default: int, lo: int = 1, hi: int = 10**6) -> int:
     return value
 
 
+# Total hasil tool per giliran ≈ 65 ribu token. Tiap langkah mengirim ulang SEMUA hasil sebelumnya, tetapi pada tarif murah + floor
+# per request biayanya kecil (≈0,017 kredit/request di batas ini); 240 ribu karakter + riwayat + prompt masih muat di konteks 128 ribu.
+DEFAULT_TURN_TOOL_CHARS = 240_000
+
+
 @dataclass(frozen=True)
 class AIConfig:
     base_url: str
@@ -57,7 +62,7 @@ class AIConfig:
     day_offset_hours: int        # batas "hari" untuk anggaran harian (7 = WIB)
     redact_secrets: bool = True  # redaksi secret SEBELUM data APK dikirim ke provider (FR-4.9)
     max_tool_chars: int = 14000  # batas ukuran satu hasil tool (karakter)
-    max_turn_tool_chars: int = 90000  # batas total hasil tool dalam satu giliran
+    max_turn_tool_chars: int = DEFAULT_TURN_TOOL_CHARS  # batas total hasil tool dalam satu giliran
 
     @property
     def enabled(self) -> bool:
@@ -111,5 +116,5 @@ def load_ai_config() -> AIConfig:
         day_offset_hours=_int("AI_DAY_OFFSET_HOURS", 7, -12, 14),
         redact_secrets=os.environ.get("AI_REDACT_SECRETS", "1").strip().lower() not in {"0", "false", "no", "off"},
         max_tool_chars=_int("AI_MAX_TOOL_CHARS", 14000, 1000, 200000),
-        max_turn_tool_chars=_int("AI_MAX_TURN_TOOL_CHARS", 90000, 5000, 1000000),
+        max_turn_tool_chars=_int("AI_MAX_TURN_TOOL_CHARS", DEFAULT_TURN_TOOL_CHARS, 5000, 1000000),
     )
