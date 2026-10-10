@@ -109,7 +109,7 @@ def load_ai_config() -> AIConfig:
         credit_idr=_float("AI_CREDIT_IDR", 300.0),
         daily_budget=_float("AI_DAILY_BUDGET_CREDITS", 5.0),
         session_budget=_float("AI_SESSION_BUDGET_CREDITS", 1.0),
-        max_steps=_int("AI_MAX_STEPS", 12, 1, 100_000),
+        max_steps=_int("AI_MAX_STEPS", 100, 1, 100_000),
         max_output_tokens=_int("AI_MAX_OUTPUT_TOKENS", 4096, 64, 10_000_000),
         connect_timeout=_float("AI_CONNECT_TIMEOUT", 10.0),
         read_timeout=_float("AI_READ_TIMEOUT", 120.0),
