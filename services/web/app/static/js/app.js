@@ -456,9 +456,6 @@
 
   // ------------------------------------------------------------------ penjelajah kode
 
-  var codeRoot = $("[data-code]");
-  if (codeRoot) initCode(codeRoot);
-
   var JAVA_KW = new Set(("abstract assert boolean break byte case catch char class const continue default do double else enum extends " +
     "final finally float for goto if implements import instanceof int interface long native new package private protected public " +
     "return short static strictfp super switch synchronized this throw throws transient try void volatile while true false null var record").split(" "));
@@ -701,10 +698,11 @@
     loadRoot().then(function () { if (p0) { openFile(p0, l0, []); return revealPath(p0); } });
   }
 
-  // ------------------------------------------------------------------ chat agent
+  // Dipanggil SETELAH JAVA_KW/TOKEN_RE terisi (var ter-hoist sebagai undefined; lihat catatan di initChat).
+  var codeRoot = $("[data-code]");
+  if (codeRoot) initCode(codeRoot);
 
-  var chatRoot = $("[data-chat]");
-  if (chatRoot) initChat(chatRoot);
+  // ------------------------------------------------------------------ chat agent
 
   var CITE_RE = /((?:jadx\/sources|jadx\/resources|apktool)\/[\w$.\/\-]{1,300}?):(\d{1,7})/g;
   var FILE_EXT = { python: "py", py: "py", javascript: "js", js: "js", java: "java", kotlin: "kt", bash: "sh", sh: "sh", shell: "sh",
@@ -806,6 +804,11 @@
   }
   window.__rvRenderMarkdown = renderMarkdown;    // dipakai pengujian
 
+  // HARUS setelah semua `var` di atas (CITE_RE, FILE_EXT) terisi: `var` ter-hoist sebagai undefined, jadi memanggil initChat
+  // lebih awal membuat render riwayat melempar galat dan listener form tidak pernah terpasang (Kirim = GET biasa ke /chat?).
+  var chatRoot = $("[data-chat]");
+  if (chatRoot) initChat(chatRoot);
+
   function initChat(root) {
     var aid = root.getAttribute("data-analysis-id"), csrf = root.getAttribute("data-csrf");
     var sessionId = root.getAttribute("data-session-id") || null;
@@ -826,8 +829,14 @@
       if (!body) return;
       var raw = body.textContent, cites = {};
       try { cites = citeMap(JSON.parse(body.getAttribute("data-citations") || "[]")); } catch (_) { /* abaikan */ }
-      if (art.getAttribute("data-role") === "assistant") renderMarkdown(raw, body, { analysisId: aid, citations: cites });
-      else body.classList.add("msg-plain");
+      // Satu pesan yang gagal dirender tidak boleh mematikan seluruh halaman: tampilkan teks apa adanya.
+      try {
+        if (art.getAttribute("data-role") === "assistant") renderMarkdown(raw, body, { analysisId: aid, citations: cites });
+        else body.classList.add("msg-plain");
+      } catch (err) {
+        body.textContent = raw; body.classList.add("msg-plain");
+        if (window.console) console.error("render pesan gagal:", err);
+      }
     });
     scrollDown(true);
 
