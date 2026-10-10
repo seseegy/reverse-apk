@@ -19,7 +19,10 @@ Memberi pengguna antarmuka tanya-jawab ke kode APK. Model menelusuri kode sendir
 | `search_code` | `query`, `regex?`, `path?` | lokasi cocok + konteks | 50 hasil |
 | `get_class` | `name`, `format=java|smali` | kode | dipotong ke N token, ada penanda lanjut |
 | `get_method` | `class`, `method` | kode method | – |
-| `find_xrefs` | `symbol` | pemanggil / pengguna | 100 hasil |
+| `find_xrefs` | `class` + `member?` ATAU `string` | pemanggil/pengakses NYATA dari call graph bytecode; atau method pemakai string konstanta | 80 hasil |
+| `find_callees` | `class`, `method` | method dipanggil, field, string, class yang dibuat | 70 hasil |
+| `class_info` | `class` | super chain, interface, turunan, method (native ditandai), status komponen manifest | 150 method |
+| `find_paths` | `from_class`, `from_method?`, `to_class`, `to_method?`, `max_depth?`, `max_paths?`, `max_approx?` | jalur panggilan statis terbobot | 5 jalur |
 | `list_strings` | `filter?`, `kind?` | string dan lokasi | 100 hasil |
 | `get_findings` | `category?` | temuan statis | – |
 | `get_resource` | `path` | isi resource teks | ukuran dibatasi |
@@ -62,8 +65,12 @@ Permintaan untuk menyerang layanan pihak ketiga (mis. mengeksploitasi endpoint y
 
 ## Keputusan M4 (chat agent)
 - **Tab Chat** per analisis; sesi, riwayat, dan biaya tersimpan (`chat_session`, `chat_message`, `ai_call`). Satu giliran aktif per sesi; tombol **Berhenti** membatalkan di tengah streaming.
-- **11 tool baca-saja** (`services/web/app/ai/tools.py`): `get_overview`, `get_manifest`, `list_packages`, `list_classes`, `search_code`, `get_class`, `get_method`, `find_xrefs`, `list_strings`, `get_findings`, `get_resource`. `analysis_id` terikat pada sesi (model tidak bisa menyebutnya); argumen divalidasi; nama tool di luar daftar ditolak.
-- **`find_xrefs` hanya perkiraan**: pencarian teks atas nama simbol, bukan call graph (FR-3.12 belum dikerjakan). Hasilnya selalu diberi label PERKIRAAN.
+- **14 tool baca-saja** (`services/web/app/ai/tools.py`): `get_overview`, `get_manifest`, `list_packages`, `list_classes`, `search_code`, `get_class`, `get_method`, `find_xrefs`, `find_callees`, `class_info`, `find_paths`, `list_strings`, `get_findings`, `get_resource`. `analysis_id` terikat pada sesi (model tidak bisa menyebutnya); argumen divalidasi; nama tool di luar daftar ditolak.
+- **Call graph nyata (FR-3.12)**: `find_xrefs` bukan lagi pencarian teks. Analyzer membaca smali (`analyzer/callgraph.py`) dan menyimpan hierarki class, method, field, panggilan, akses field, `new-instance`/`const-class`, dan string konstanta ke `index.sqlite` (tabel `cls`, `impl`, `msym`, `fsym`, `call`, `fref`, `cref`, `sref`; `meta.callgraph` = complete|partial|failed). Isi `invoke` hanya dibaca untuk class aplikasi; pustaka cukup kepala class-nya. Pemanggil dilaporkan dengan hubungan `langsung` / `lewat subclass` / `lewat supertype`.
+- **`find_paths` jujur soal tebakan**: edge `langsung` (invoke nyata) berbobot 1; `dispatch` (override), `intent` (const-class ke komponen), dan `callback` (instance lambda/listener dibuat di method itu) adalah PERKIRAAN, berbobot lebih mahal dan dibatasi `max_approx` (bawaan 2; 0 = hanya invoke nyata). Dispatch ke >8 implementer dilewati (terlalu ambigu). Tidak ada jalur ≠ tidak terjangkau.
+- **Tidak terlihat dari call graph**: refleksi, JNI, callback yang dipanggil framework, kode dinamis, dan isi pustaka pihak ketiga. Batas ini ikut dikirim di setiap hasil tool dan ada di prompt sistem. Analisis lama (indeks sebelum v2) perlu "Jalankan ulang analisis statis".
+- **Pembungkus hasil tool tak bisa ditutup dari dalam APK**: `</hasil_tool` pada isi diganti escape JSON `<\/hasil_tool`.
+- **Floor price router**: biaya satu request = `max(biaya token, floor_per_request)`; floor bawaan 0,01 kredit (`config/ai_models.json`), setara ±33 ribu token pada tarif 0,3/juta. Satu pertanyaan ke agent = banyak request (tiap selesai tool, model dipanggil lagi), jadi satu giliran 12 langkah minimal 0,12 kredit (Rp36). Anggaran sesi bawaan 1 kredit ≈ 8 giliran terpanjang; naikkan `AI_SESSION_BUDGET_CREDITS` bila perlu.
 - **Redaksi secret sebelum kirim ke provider** memakai pola yang sama dengan analyzer (`AI_REDACT_SECRETS=1` bawaan). Berlaku untuk pesan pengguna, hasil tool, dan kueri yang dipantulkan. Nilai secret mentah tidak pernah diberikan ke model (`get_findings` tidak memuatnya).
 - **Kode APK = data**: prompt sistem menyatakannya, setiap hasil tool dibungkus `<hasil_tool>` + peringatan, dan tidak ada tool tulis/shell/jaringan.
 - **Sitasi** `path:baris` diverifikasi server (berkas dan baris harus ada); yang gagal tetap ditampilkan dengan label "tidak terverifikasi".

@@ -5,4 +5,4 @@ Keluaran di work/<id>/index/: index.sqlite, findings.jsonl, summary.json, done.j
 Semua isi yang dibaca berasal dari APK yang TIDAK TEPERCAYA: tidak dieksekusi, tidak di-eval, regex dibatasi.
 """
 
-VERSION = 1
+VERSION = 2

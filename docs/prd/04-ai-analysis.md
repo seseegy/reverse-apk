@@ -5,7 +5,7 @@ Memakai DeepSeek API untuk mengubah fakta statis + potongan kode menjadi ringkas
 
 ## Keputusan M4 (provider generik + kredit)
 - **Satu penghubung generik** untuk API kompatibel OpenAI (`services/web/app/ai/provider.py`); DeepSeek resmi, router pihak ketiga, dan lainnya hanya beda `AI_BASE_URL` + `AI_MODEL` di `.env`. Hanya pustaka standar (tanpa dependensi baru).
-- **Anggaran dalam kredit**, bukan USD, mengikuti router yang dipakai (1 kredit = Rp300 pada router saat ini). Harga per model ada di `config/ai_models.json` (bisa diedit; bukan hard-code). Model tak dikenal dihitung dengan tarif default yang sengaja mahal.
+- **Anggaran dalam kredit**, bukan USD, mengikuti router yang dipakai (1 kredit = Rp300 pada router saat ini). Harga per model ada di `config/ai_models.json` (bisa diedit; bukan hard-code). Model tak dikenal dihitung dengan tarif default yang sengaja mahal. Router menerapkan **floor price** (minimum 0,01 kredit per request): biaya = max(biaya token, floor), dikonfigurasi lewat `floor_per_request` di berkas yang sama.
 - **Tool calling wajib** untuk chat agent dan diuji lewat `make ai-check`. Pemakaian token dari provider dipakai bila ada; bila tidak, diperkirakan (≈3,5 karakter/token) dan ditandai.
 - **Retry hanya sebelum ada keluaran** yang sampai ke pemanggil (hindari jawaban ganda); timeout diulang sekali, 429/5xx/jaringan maks 3×.
 - `http://` ke host publik ditolak (kunci dan kode APK tidak boleh melintas tanpa enkripsi).

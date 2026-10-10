@@ -17,7 +17,7 @@ Menghasilkan fakta deterministik (tanpa LLM) dari APK, plus indeks kode yang bis
 | FR-3.9 | **Sinyal obfuscation**: rasio nama 1–2 huruf, ProGuard/R8 mapping, packer/native loader dikenal | P0 |
 | FR-3.10 | **Komponen berisiko**: WebView + `addJavascriptInterface`, `rawQuery` dengan konkatenasi, ContentProvider `openFile`, intent implisit | P1 |
 | FR-3.11 | **Native libs**: daftar `.so`, ABI, export JNI (`Java_*`), string menarik | P1 |
-| FR-3.12 | **Call graph ringan**: siapa memanggil method X (untuk tool `find_xrefs`) | P1 |
+| FR-3.12 | **Call graph ringan**: siapa memanggil method X (untuk tool `find_xrefs`) | P1 — **selesai** (smali → SQLite, lihat PRD 05) |
 | FR-3.13 | **Diff antar versi APK** (manifest, permission, endpoint, class baru/hilang) | P1 |
 
 ## Format output
