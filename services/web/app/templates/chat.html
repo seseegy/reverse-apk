@@ -27,22 +27,31 @@
 
     <aside class="chat-side">
       <a class="btn btn-primary btn-sm" href="/analyses/{{ an.id }}/chat">{{ icon('refresh', 16) }}<span>Sesi baru</span></a>
-      <h2 class="chat-side-title">Sesi</h2>
-      {% if sessions %}
-      <ul class="plain-list chat-sessions">
-        {% for ss in sessions %}
-        <li{% if ss.id == session_id %} class="is-current"{% endif %}>
-          <a href="/analyses/{{ an.id }}/chat?s={{ ss.id }}"{% if ss.id == session_id %} aria-current="page"{% endif %}>{{ ss.title or ('Sesi ' ~ ss.id) }}</a>
-          <span class="muted hint">{{ (ss.cost_credits * cfg.credit_idr)|round(1) }} Rp</span>
-        </li>
-        {% endfor %}
-      </ul>
-      {% else %}<p class="muted hint">Belum ada sesi.</p>{% endif %}
 
-      <div class="budget" role="status" aria-atomic="true" data-budget>
+      <details class="side-fold" data-sidefold open>
+        <summary><span class="chat-side-title">Sesi</span> <span class="count-pill">{{ sessions|length }}</span></summary>
+        {% if sessions %}
+        <ul class="plain-list chat-sessions">
+          {% for ss in sessions %}
+          <li{% if ss.id == session_id %} class="is-current"{% endif %}>
+            <a href="/analyses/{{ an.id }}/chat?s={{ ss.id }}"{% if ss.id == session_id %} aria-current="page"{% endif %}>{{ ss.title or ('Sesi ' ~ ss.id) }}</a>
+            <span class="muted hint mono">Rp{{ (ss.cost_credits * cfg.credit_idr)|round(1) }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}<p class="muted hint">Belum ada sesi.</p>{% endif %}
+      </details>
+
+      <div class="budget" data-budget>
         {% if budget %}
-        <div>Hari ini: <strong class="mono">{{ '%.3f'|format(budget.today) }}</strong> / {{ '%g'|format(budget.today_limit) if budget.today_limit else '∞' }} kredit
-          <span class="muted">(≈ Rp{{ '{:,.0f}'.format(budget.today_idr) }})</span></div>
+        {% set pct = ((budget.today / budget.today_limit * 100) if budget.today_limit else 0) %}
+        <div class="budget-line">Anggaran hari ini
+          <span class="muted">≈ Rp<span data-b-idr>{{ '{:,.0f}'.format(budget.today_idr) }}</span></span></div>
+        <div class="budget-nums"><strong class="mono" data-b-today>{{ '%.3f'|format(budget.today) }}</strong>
+          <span class="muted">/ <span data-b-limit>{{ '%g'|format(budget.today_limit) if budget.today_limit else '∞' }}</span> kredit</span></div>
+        {% if budget.today_limit %}
+        <div class="meter{% if pct >= 90 %} is-bad{% elif pct >= 70 %} is-warn{% endif %}" data-b-meter aria-hidden="true"><span data-b-bar style="width: {{ [pct, 100]|min|round(1) }}%"></span></div>
+        {% endif %}
         {% endif %}
       </div>
       <p class="muted hint">Potongan kode yang Anda tanyakan dikirim ke provider AI. Secret diredaksi lebih dulu
@@ -65,6 +74,7 @@
         <span>Indeks kode belum ada, jadi pencarian tidak tersedia bagi asisten. Jalankan analisis statis dulu (tab Temuan).</span></div>
       {% endif %}
 
+      <div class="chat-log-wrap">
       <div class="chat-log" data-log tabindex="0" role="log" aria-live="polite" aria-label="Riwayat percakapan">
         {% for m in messages %}
         <article class="msg msg-{{ m.role }}" data-role="{{ m.role }}">
@@ -72,7 +82,7 @@
           {% if m.tool_calls %}
           <details class="msg-tools"><summary>{{ m.tool_calls|length }} langkah tool</summary>
             <ul class="plain-list">
-              {% for t in m.tool_calls %}<li><span class="mono">{{ t.name }}</span> <span class="muted mono break">{{ t.args }}</span>
+              {% for t in m.tool_calls %}<li data-tool="{{ t.name }}" data-args="{{ t.args }}" data-ok="{{ 1 if t.ok else 0 }}" data-summary="{{ t.summary }}"><span class="mono">{{ t.name }}</span> <span class="muted mono break">{{ t.args }}</span>
                 <span class="{{ 'ok' if t.ok else 'bad' }} hint">{{ t.summary }}</span></li>{% endfor %}
             </ul></details>
           {% endif %}
@@ -80,10 +90,12 @@
         </article>
         {% endfor %}
       </div>
+      <button type="button" class="jump" data-jump hidden>{{ icon('arrow-down', 16) }}<span>Ke pesan terbaru</span></button>
+      </div>
 
       {% if not messages %}
       <div class="suggestions" data-suggestions>
-        <p class="muted">Coba tanyakan:</p>
+        <p class="muted">Asisten membaca kode hasil dekompilasi (Java dan smali), call graph, manifest, dan temuan statis, lalu menjawab dengan sitasi yang bisa diklik. Coba tanyakan:</p>
         <div class="btn-row">
           {% for q in suggestions %}<button type="button" class="btn btn-ghost btn-sm" data-suggest="{{ q }}">{{ q }}</button>{% endfor %}
         </div>
@@ -92,8 +104,8 @@
 
       <form class="chat-form" data-form novalidate>
         <label for="chat-text" class="sr-only">Pesan</label>
-        <textarea id="chat-text" rows="2" placeholder="Tanya tentang kode APK ini… (Enter kirim, Shift+Enter baris baru)"
-                  data-input></textarea>
+        <textarea id="chat-text" rows="1" placeholder="Tanya tentang kode APK ini…" data-input aria-describedby="chat-keys"></textarea>
+        <p class="keys hint muted" id="chat-keys"><kbd>Enter</kbd> kirim · <kbd>Shift</kbd>+<kbd>Enter</kbd> baris baru · <kbd>Esc</kbd> berhenti</p>
         <div class="chat-controls">
           {% if models|length > 1 %}
           <label for="chat-model" class="sr-only">Model</label>
@@ -107,6 +119,16 @@
         </div>
       </form>
     </section>
+
+    <aside class="peek" data-peek hidden role="dialog" aria-modal="false" aria-labelledby="peek-title" tabindex="-1">
+      <header class="peek-head">
+        <h2 id="peek-title" class="peek-title mono" data-peek-title></h2>
+        <a class="btn btn-ghost btn-sm" data-peek-open target="_blank" rel="noopener" href="#">{{ icon('file', 16) }}<span>Buka di Kode</span></a>
+        <button type="button" class="btn btn-ghost btn-sm" data-peek-close aria-label="Tutup pratinjau">{{ icon('x', 16) }}<span>Tutup</span></button>
+      </header>
+      <p class="peek-note hint muted" data-peek-note></p>
+      <div class="peek-code" data-peek-code tabindex="0" role="region" aria-label="Cuplikan kode"></div>
+    </aside>
   </section>
   {% endif %}
 </div>
