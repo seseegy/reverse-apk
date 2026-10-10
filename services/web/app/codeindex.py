@@ -114,8 +114,8 @@ def list_dir(work: Path, analysis_id: int, root: str, rel: str) -> dict[str, Any
 
 
 # ------------------------------------------------------------------------- berkas
-def read_file(work: Path, analysis_id: int, root: str, rel: str) -> dict[str, Any] | None:
-    """Isi berkas teks (dipotong MAX_VIEW_BYTES). `binary=True` untuk berkas biner (tanpa isi)."""
+def read_file(work: Path, analysis_id: int, root: str, rel: str, max_bytes: int | None = MAX_VIEW_BYTES) -> dict[str, Any] | None:
+    """Isi berkas teks (dipotong `max_bytes`; None = baca seluruhnya, dipakai tool AI). `binary=True` untuk berkas biner."""
     target = _resolve(work, analysis_id, root, rel)
     if target is None:
         return None
@@ -128,14 +128,18 @@ def read_file(work: Path, analysis_id: int, root: str, rel: str) -> dict[str, An
             st = os.fstat(fh.fileno())
             if not stat.S_ISREG(st.st_mode):
                 return None
-            data = fh.read(MAX_VIEW_BYTES + 1)
+            head = fh.read(8192)
+            if b"\x00" in head:                    # biner: putuskan dari kepala berkas, jangan baca sisanya ke memori
+                data = head
+            else:
+                data = head + (fh.read() if max_bytes is None else fh.read(max(0, max_bytes + 1 - len(head))))
     except OSError:
         return None
     size = st.st_size
     if b"\x00" in data[:8192]:
         return {"path": rel, "size": size, "binary": True, "truncated": False, "text": "", "lines": 0}
-    truncated = len(data) > MAX_VIEW_BYTES
-    text = data[:MAX_VIEW_BYTES].decode("utf-8", errors="replace")
+    truncated = max_bytes is not None and len(data) > max_bytes
+    text = (data if max_bytes is None else data[:max_bytes]).decode("utf-8", errors="replace")
     return {"path": rel, "size": size, "binary": False, "truncated": truncated, "text": text,
             "lines": text.count("\n") + 1}
 
@@ -146,7 +150,7 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
 
 def to_fts_query(q: str) -> str | None:
     """Ubah masukan pengguna menjadi kueri FTS5 yang aman: tiap token dikutip, AND, token terakhir prefiks."""
-    tokens = _TOKEN_RE.findall(q)[:8]
+    tokens = _TOKEN_RE.findall(q)
     if not tokens:
         return None
     parts = [f'"{t}"' for t in tokens]
@@ -175,9 +179,11 @@ def open_index(work: Path, analysis_id: int) -> Iterator[sqlite3.Connection | No
             conn.close()
 
 
-def _with_deadline(conn: sqlite3.Connection, fn):  # noqa: ANN001
-    """Jalankan fn() dengan batas waktu: kueri yang terlalu lama dibatalkan lewat interrupt()."""
-    timer = threading.Timer(QUERY_TIMEOUT_S, conn.interrupt)
+def _with_deadline(conn: sqlite3.Connection, fn, seconds: float | None = QUERY_TIMEOUT_S):  # noqa: ANN001
+    """Jalankan fn() dengan batas waktu: kueri yang terlalu lama dibatalkan lewat interrupt(). seconds 0/None = tanpa batas."""
+    if not seconds:
+        return fn()
+    timer = threading.Timer(seconds, conn.interrupt)
     timer.start()
     try:
         return fn()
@@ -185,8 +191,29 @@ def _with_deadline(conn: sqlite3.Connection, fn):  # noqa: ANN001
         timer.cancel()
 
 
-def search_code(work: Path, analysis_id: int, q: str, scope: str = "all") -> dict[str, Any]:
-    """Cari di isi kode (FTS5) dan nama class. scope: all | app (sembunyikan pustaka)."""
+def _take(cur, limit: int | None, char_budget: int | None) -> tuple[list[sqlite3.Row], bool]:  # noqa: ANN001
+    """Ambil baris dari kursor secara malas. Berhenti di `limit` baris ATAU saat jumlah karakter melewati `char_budget`
+    (keduanya opsional). Mengembalikan (baris, masih_ada_sisa)."""
+    rows: list[sqlite3.Row] = []
+    used = 0
+    for r in cur:
+        if limit is not None and len(rows) >= limit:
+            return rows, True
+        rows.append(r)
+        if char_budget is not None:
+            used += len(r["snip"] or "") + len(r["path"]) + 40
+            if used >= char_budget:
+                return rows, next(cur, None) is not None
+    return rows, False
+
+
+def search_code(work: Path, analysis_id: int, q: str, scope: str = "all", *, limit: int | None = SEARCH_LIMIT,
+                class_limit: int | None = 30, char_budget: int | None = None,
+                timeout: float | None = QUERY_TIMEOUT_S) -> dict[str, Any]:
+    """Cari di isi kode (FTS5) dan nama class. scope: all | app (sembunyikan pustaka).
+
+    UI memakai bawaan (100 hit). Tool AI memanggil dengan limit=None: hasil dibatasi HANYA oleh `char_budget` (AI_MAX_TOOL_CHARS)
+    dan `timeout` (AI_TOOL_TIMEOUT) dari .env."""
     started = time.perf_counter()
     fts = to_fts_query(q)
     result: dict[str, Any] = {"query": q, "hits": [], "classes": [], "available": False, "ms": 0, "error": None,
@@ -205,20 +232,22 @@ def search_code(work: Path, analysis_id: int, q: str, scope: str = "all") -> dic
                         "WHERE code MATCH ? " + lib_filter)
                 # Pengurutan relevansi (rank) memaksa FTS5 menilai SEMUA kecocokan: kata umum seperti "public" yang cocok
                 # di ribuan berkas bisa memakan detik. Maka ambil kandidat tanpa rank dulu. Bila kecocokan sedikit
-                # (kata langka), barulah diurutkan; bila banyak, urutan relevansi tidak bermakna -> dipotong.
+                # (kata langka), barulah diurutkan; bila banyak, urutan relevansi tidak bermakna -> tanpa urutan.
                 probe = conn.execute(base + "LIMIT ?", (fts, PROBE_LIMIT)).fetchall()
                 if len(probe) <= PROBE_LIMIT - 1:
-                    hits = conn.execute(base + "ORDER BY rank LIMIT ?", (fts, SEARCH_LIMIT)).fetchall()
-                    truncated = False
+                    cur = conn.execute(base + "ORDER BY rank LIMIT ?", (fts, -1 if limit is None else limit))
+                    hits, truncated = _take(cur, limit, char_budget)
+                elif limit is None:
+                    hits, truncated = _take(conn.execute(base + "LIMIT -1", (fts,)), None, char_budget)
                 else:
-                    hits, truncated = probe[:SEARCH_LIMIT], True
+                    hits, truncated = probe[:limit], True
                 like = "%" + q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
                 classes = conn.execute(
                     "SELECT path, name, package, is_lib FROM classes WHERE name LIKE ? ESCAPE '\\' "
-                    + ("AND is_lib = 0 " if scope == "app" else "") + "ORDER BY is_lib, length(name), name LIMIT 30",
-                    (like,)).fetchall()
+                    + ("AND is_lib = 0 " if scope == "app" else "") + "ORDER BY is_lib, length(name), name LIMIT ?",
+                    (like, -1 if class_limit is None else class_limit)).fetchall()
                 return hits, classes, truncated
-            hits, classes, truncated = _with_deadline(conn, run)
+            hits, classes, truncated = _with_deadline(conn, run, timeout)
             result["truncated"] = truncated
             result["hits"] = [dict(h) for h in hits]
             result["classes"] = [dict(c) for c in classes]
@@ -232,7 +261,7 @@ def search_code(work: Path, analysis_id: int, q: str, scope: str = "all") -> dic
 
 
 # ------------------------------------------------------------------------- paket & class (untuk tool agent)
-def list_packages(work: Path, analysis_id: int, prefix: str = "", include_libs: bool = False, limit: int = 200) -> dict[str, Any]:
+def list_packages(work: Path, analysis_id: int, prefix: str = "", include_libs: bool = False, limit: int | None = 200) -> dict[str, Any]:
     out: dict[str, Any] = {"available": False, "packages": []}
     with open_index(work, analysis_id) as conn:
         if conn is None:
@@ -241,24 +270,24 @@ def list_packages(work: Path, analysis_id: int, prefix: str = "", include_libs: 
         like = prefix.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         rows = conn.execute(
             "SELECT package, COUNT(*) AS n, MIN(is_lib) AS is_lib FROM classes WHERE package LIKE ? ESCAPE '\\' "
-            + ("" if include_libs else "AND is_lib = 0 ") + "GROUP BY package ORDER BY package LIMIT ?", (like, limit)).fetchall()
+            + ("" if include_libs else "AND is_lib = 0 ") + "GROUP BY package ORDER BY package LIMIT ?", (like, -1 if limit is None else limit)).fetchall()
         out["packages"] = [{"package": r["package"] or "(default)", "classes": r["n"], "library": bool(r["is_lib"])} for r in rows]
     return out
 
 
-def list_classes_in(work: Path, analysis_id: int, package: str, limit: int = 200) -> dict[str, Any]:
+def list_classes_in(work: Path, analysis_id: int, package: str, limit: int | None = 200) -> dict[str, Any]:
     out: dict[str, Any] = {"available": False, "classes": []}
     with open_index(work, analysis_id) as conn:
         if conn is None:
             return out
         out["available"] = True
         rows = conn.execute("SELECT path, name, lines, size FROM classes WHERE package = ? ORDER BY name LIMIT ?",
-                            (package.strip(), limit)).fetchall()
+                            (package.strip(), -1 if limit is None else limit)).fetchall()
         out["classes"] = [dict(r) for r in rows]
     return out
 
 
-def find_class(work: Path, analysis_id: int, name: str, limit: int = 10) -> dict[str, Any]:
+def find_class(work: Path, analysis_id: int, name: str, limit: int | None = 10) -> dict[str, Any]:
     """Cari class berdasarkan nama lengkap (com.x.A / com/x/A) atau nama sederhana (A, tidak peka huruf besar-kecil)."""
     out: dict[str, Any] = {"available": False, "matches": []}
     name = name.strip().replace("/", ".").removesuffix(".java")
@@ -271,10 +300,10 @@ def find_class(work: Path, analysis_id: int, name: str, limit: int = 10) -> dict
         if "." in name:
             pkg, _, simple = name.rpartition(".")
             rows = conn.execute("SELECT path, name, package, lines, is_lib FROM classes WHERE package = ? AND name = ? LIMIT ?",
-                                (pkg, simple, limit)).fetchall()
+                                (pkg, simple, -1 if limit is None else limit)).fetchall()
         else:
             rows = conn.execute("SELECT path, name, package, lines, is_lib FROM classes WHERE name = ? COLLATE NOCASE "
-                                "ORDER BY is_lib, package LIMIT ?", (name, limit)).fetchall()
+                                "ORDER BY is_lib, package LIMIT ?", (name, -1 if limit is None else limit)).fetchall()
         out["matches"] = [dict(r) for r in rows]
     return out
 
@@ -284,7 +313,7 @@ STRING_KINDS = ("url", "domain", "ip", "path", "base64", "hex")
 
 
 def list_strings(work: Path, analysis_id: int, kind: str | None, q: str | None, scope: str = "app",
-                 limit: int = 300) -> dict[str, Any]:
+                 limit: int | None = 300, timeout: float | None = QUERY_TIMEOUT_S) -> dict[str, Any]:
     out: dict[str, Any] = {"rows": [], "counts": {}, "available": False}
     with open_index(work, analysis_id) as conn:
         if conn is None:
@@ -306,7 +335,7 @@ def list_strings(work: Path, analysis_id: int, kind: str | None, q: str | None, 
             if where:
                 sql += " WHERE " + " AND ".join(where)
             sql += " ORDER BY is_lib, count DESC, value LIMIT ?"
-            out["rows"] = [dict(r) for r in _with_deadline(conn, lambda: conn.execute(sql, [*params, limit]).fetchall())]
+            out["rows"] = [dict(r) for r in _with_deadline(conn, lambda: conn.execute(sql, [*params, -1 if limit is None else limit]).fetchall(), timeout)]
         except sqlite3.DatabaseError:
             out["error"] = "Indeks tidak dapat dibaca."
     return out

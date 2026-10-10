@@ -19,10 +19,10 @@ Memberi pengguna antarmuka tanya-jawab ke kode APK. Model menelusuri kode sendir
 | `search_code` | `query`, `regex?`, `path?` | lokasi cocok + konteks | 50 hasil |
 | `get_class` | `name`, `format=java|smali` | kode | dipotong ke N token, ada penanda lanjut |
 | `get_method` | `class`, `method` | kode method | – |
-| `find_xrefs` | `class` + `member?` ATAU `string` | pemanggil/pengakses NYATA dari call graph bytecode; atau method pemakai string konstanta | 80 hasil |
-| `find_callees` | `class`, `method` | method dipanggil, field, string, class yang dibuat | 70 hasil |
-| `class_info` | `class` | super chain, interface, turunan, method (native ditandai), status komponen manifest | 150 method |
-| `find_paths` | `from_class`, `from_method?`, `to_class`, `to_method?`, `max_depth?`, `max_paths?`, `max_approx?` | jalur panggilan statis terbobot | 5 jalur |
+| `find_xrefs` | `class` + `member?` ATAU `string`, `limit?` | pemanggil/pengakses NYATA dari call graph bytecode; atau method pemakai string konstanta | tanpa batas jumlah |
+| `find_callees` | `class`, `method` | method dipanggil, field, string, class yang dibuat | tanpa batas jumlah |
+| `class_info` | `class` | super chain, interface, turunan, method (native ditandai), status komponen manifest | tanpa batas jumlah |
+| `find_paths` | `from_class`, `from_method?`, `to_class`, `to_method?`, `max_depth?`, `max_paths?`, `max_approx?` | jalur panggilan statis terbobot | tanpa batas kedalaman/node |
 | `list_strings` | `filter?`, `kind?` | string dan lokasi | 100 hasil |
 | `get_findings` | `category?` | temuan statis | – |
 | `read_file` | `path`, `start_line?`, `end_line?` | berkas teks apa pun (Java, **smali semua class**, resource, manifest) dengan nomor baris; path sama persis dengan format sitasi | ukuran dibatasi, ada penanda lanjut |
@@ -80,6 +80,14 @@ Permintaan untuk menyerang layanan pihak ketiga (mis. mengeksploitasi endpoint y
 
 - **Class yang tidak dihasilkan jadx** (mis. satu dex gagal didekompilasi, `smali_classes7`): `get_class`/`get_method` otomatis jatuh ke smali dan mengatakannya (`format: smali`, nomor baris = baris berkas smali, bisa disitir `apktool/smali_classes7/pkg/A.smali:123`); `read_file` membaca path apa pun persis seperti sitasi; `list_classes` memuat `hanya_smali`. Analyzer memindai smali class-class itu (secret, URL, string) dan mengindeksnya ke `search_code`, serta menambah temuan `coverage.jadx_missing_classes`. Artefak desugar (`$$ExternalSyntheticLambda`) dan stub `android/`/`java/` tidak dihitung sebagai hilang.
 - **Pembacaan terhadap hasil kerja model sendiri**: bila `get_method` menemukan `Method not decompiled`, smali method itu diberikan sebagai gantinya.
+
+## Batas yang dikenakan pada AI
+**Prinsip: hanya batas dari `.env` yang berlaku.** Tidak ada lagi batas jumlah/panjang yang ditulis di kode untuk apa yang boleh dilihat atau dilakukan AI:
+- Pesan pengguna, riwayat percakapan, jumlah tool call per respons, dan panggilan identik berulang: **tanpa batas** (loop dibatasi `AI_MAX_STEPS`).
+- Hasil tool (daftar paket/class/string/temuan/xref/callees/method/turunan, hit pencarian, kedalaman & node pencarian jalur, ukuran berkas yang dibaca, panjang argumen): **tanpa batas jumlah**. `limit` opsional dari model dihormati bila diisi.
+- Satu-satunya pembatas ukuran: `AI_MAX_TOOL_CHARS` (per hasil, JSON tetap valid) dan `AI_MAX_TURN_TOOL_CHARS` (total per giliran). Satu-satunya pembatas waktu: `AI_TOOL_TIMEOUT` (detik, 0 = tanpa batas). Lalu `AI_MAX_STEPS`, `AI_MAX_OUTPUT_TOKENS`, anggaran harian/sesi.
+- **Sengaja TIDAK dihapus** (bukan batas untuk AI, melainkan pengaman server dan penyaring kualitas): batas badan HTTP `chat/send` 4 MiB; batas jawaban provider 16 MiB (non-stream) / 32 MiB (stream) dan 3x retry; antrean peristiwa SSE; batas pembangunan indeks saat analisis (waktu 150 dtk, jumlah edge/string, ukuran smali; lihat `analyzer/callgraph.py`, `scan.py`); heuristik performa pencarian (`PROBE_LIMIT`: kata yang cocok di >300 berkas tidak diurutkan relevansi); penyaring dispatch `MAX_DISPATCH_FANOUT=8` pada `find_paths` (dispatch ke >8 implementer terlalu ambigu dan menghasilkan jalur palsu); rentang validasi nilai `.env` dilonggarkan jauh.
+- Ukuran berkas yang dibaca AI tidak dibatasi (dibaca utuh ke memori; berkas biner ditolak dari 8 KB pertama tanpa dibaca penuh). Penjelajah kode di UI tetap memakai batas 2 MiB.
 
 ## Batasan
 - Kualitas jawaban bergantung model; sitasi diverifikasi tetapi *kesimpulan* model tidak. Perlakukan sebagai petunjuk, bukan bukti.

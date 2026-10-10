@@ -63,6 +63,7 @@ class AIConfig:
     redact_secrets: bool = True  # redaksi secret SEBELUM data APK dikirim ke provider (FR-4.9)
     max_tool_chars: int = 14000  # batas ukuran satu hasil tool (karakter)
     max_turn_tool_chars: int = DEFAULT_TURN_TOOL_CHARS  # batas total hasil tool dalam satu giliran
+    tool_timeout_s: float = 60.0  # batas WAKTU satu kueri/pencarian tool (detik; 0 = tanpa batas)
 
     @property
     def enabled(self) -> bool:
@@ -108,13 +109,14 @@ def load_ai_config() -> AIConfig:
         credit_idr=_float("AI_CREDIT_IDR", 300.0),
         daily_budget=_float("AI_DAILY_BUDGET_CREDITS", 5.0),
         session_budget=_float("AI_SESSION_BUDGET_CREDITS", 1.0),
-        max_steps=_int("AI_MAX_STEPS", 12, 1, 40),
-        max_output_tokens=_int("AI_MAX_OUTPUT_TOKENS", 4096, 64, 65536),
+        max_steps=_int("AI_MAX_STEPS", 12, 1, 100_000),
+        max_output_tokens=_int("AI_MAX_OUTPUT_TOKENS", 4096, 64, 10_000_000),
         connect_timeout=_float("AI_CONNECT_TIMEOUT", 10.0),
         read_timeout=_float("AI_READ_TIMEOUT", 120.0),
         models_file=os.environ.get("AI_MODELS_FILE", "/config/ai_models.json"),
         day_offset_hours=_int("AI_DAY_OFFSET_HOURS", 7, -12, 14),
         redact_secrets=os.environ.get("AI_REDACT_SECRETS", "1").strip().lower() not in {"0", "false", "no", "off"},
-        max_tool_chars=_int("AI_MAX_TOOL_CHARS", 14000, 1000, 200000),
-        max_turn_tool_chars=_int("AI_MAX_TURN_TOOL_CHARS", DEFAULT_TURN_TOOL_CHARS, 5000, 1000000),
+        max_tool_chars=_int("AI_MAX_TOOL_CHARS", 14000, 1000, 100_000_000),
+        max_turn_tool_chars=_int("AI_MAX_TURN_TOOL_CHARS", DEFAULT_TURN_TOOL_CHARS, 5000, 1_000_000_000),
+        tool_timeout_s=_float("AI_TOOL_TIMEOUT", 60.0),
     )
