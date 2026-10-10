@@ -83,7 +83,9 @@ def build_command(stage: str, apk: Path, out: Path, deobf: bool) -> tuple[list[s
     if stage == "apktool":
         args = ["d", "-f", "-j", "2"]
         return (["apktool", *args, "-o", str(out), str(apk)], ["apktool", *args, "-o", "<out>", "<apk>"])
-    args = ["-j", "2", "--show-bad-code"] + (["--deobf"] if deobf else [])
+    # --log-level error: bawaan jadx ("progress") hanya mencetak bilah progres dan "count: N"; rincian method yang gagal baru keluar
+    # di level error. Progres tetap tercetak. Stack trace dibuang saat penulisan log (FrameFilter).
+    args = ["-j", "2", "--show-bad-code", "--log-level", "error"] + (["--deobf"] if deobf else [])
     return (["jadx", *args, "-d", str(out), str(apk)], ["jadx", *args, "-d", "<out>", "<apk>"])
 
 
@@ -135,14 +137,71 @@ def sweep_group(proc: subprocess.Popen) -> None:
         pass
 
 
-def pump_output(proc: subprocess.Popen, log_fd: int, state: dict[str, Any]) -> None:
+class FrameFilter:
+    """Membuang baris stack trace Java ("\tat ..." dan "\t... N more") dari keluaran jadx saat ditulis ke log.
+
+    Stack trace rata-rata ~1,3 KB per error dan tidak berguna bagi pembaca; tanpa ini log 5 MiB bisa penuh oleh ribuan error dan ringkasan
+    di AKHIR log (yang paling penting) terpotong. Pesan pokok error dan "Caused by:" tetap disimpan. Bekerja per potongan: keputusan
+    dibuat di awal tiap baris (butuh 4 byte), dan baris yang sudah diputuskan dilanjutkan di potongan berikutnya. Bilah progres jadx
+    (dipisah \\r, tanpa \\n) langsung diteruskan agar progres tetap terlihat waktu-nyata.
+    """
+
+    PREFIXES = (b"\tat ", b"\t...", b"\tSup")      # baris bingkai / "... N more" / "Suppressed:"
+
+    def __init__(self) -> None:
+        self.mid_keep = False
+        self.mid_drop = False
+        self.pend = b""
+
+    def feed(self, data: bytes) -> bytes:
+        data = self.pend + data
+        self.pend = b""
+        out = bytearray()
+        pos, n = 0, len(data)
+        while pos < n:
+            if self.mid_keep or self.mid_drop:
+                nl = data.find(b"\n", pos)
+                if nl < 0:
+                    if self.mid_keep:
+                        out += data[pos:]
+                    return bytes(out)
+                if self.mid_keep:
+                    out += data[pos:nl + 1]
+                self.mid_keep = self.mid_drop = False
+                pos = nl + 1
+                continue
+            head = data[pos:pos + 4]
+            if len(head) < 4 and b"\n" not in head:
+                self.pend = data[pos:]                 # awal baris terlalu pendek untuk diputuskan: tunggu potongan berikutnya
+                break
+            if head[:1] == b"\t" and any(head.startswith(pf[:4]) for pf in self.PREFIXES):
+                self.mid_drop = True
+            else:
+                self.mid_keep = True
+        return bytes(out)
+
+    def flush(self) -> bytes:
+        rest, self.pend = self.pend, b""
+        return rest if not self.mid_drop else b""
+
+
+def pump_output(proc: subprocess.Popen, log_fd: int, state: dict[str, Any], strip_frames: bool = False) -> None:
     """Salin stdout+stderr tool ke berkas log (dibatasi), tetap menguras pipa agar tool tak macet."""
     written = 0
+    filt = FrameFilter() if strip_frames else None
     try:
         while True:
             chunk = os.read(proc.stdout.fileno(), 65536)
             if not chunk:
+                if filt is not None:
+                    tail = filt.flush()
+                    if tail and written < MAX_LOG_BYTES:
+                        os.write(log_fd, tail[:MAX_LOG_BYTES - written])
                 return
+            if filt is not None:
+                chunk = filt.feed(chunk)
+                if not chunk:
+                    continue
             if written < MAX_LOG_BYTES:
                 room = MAX_LOG_BYTES - written
                 os.write(log_fd, chunk[:room])
@@ -167,6 +226,19 @@ def last_error_line(log_path: Path) -> str | None:
         if line and _ERROR_LINE.search(line) and not line.startswith("at "):
             return line[:300]
     return None
+
+
+def jadx_error_count(log_path: Path) -> int | None:
+    """Angka N dari baris penutup jadx 'finished with errors, count: N' (ada di ujung log)."""
+    try:
+        with log_path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 64 * 1024))
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    hit = re.findall(r"finished with errors, count: (\d+)", tail)
+    return int(hit[-1]) if hit else None
 
 
 def has_java_sources(out: Path) -> bool:
@@ -243,7 +315,7 @@ def run_job(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
             cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             cwd=home, env=env, start_new_session=True, close_fds=True,
         )
-        reader = threading.Thread(target=pump_output, args=(proc, log_fd, state), daemon=True)
+        reader = threading.Thread(target=pump_output, args=(proc, log_fd, state, stage == "jadx"), daemon=True)
         reader.start()
 
         deadline = time.monotonic() + timeout
@@ -332,8 +404,11 @@ def run_job(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
                 "message": reason or f"jadx (kode {rc}) tidak menghasilkan source Java"}
     if rc == 0:
         return {**result, "status": RESULT_OK, "message": ""}
+    n_err = jadx_error_count(log_path)
+    what = (f"{n_err:,} method gagal didekompilasi" if n_err else "sebagian method gagal didekompilasi")
     return {**result, "status": RESULT_WARN,
-            "message": f"jadx melaporkan error parsial (kode {rc}); sebagian class mungkin tidak ter-dekompilasi"}
+            "message": f"{what} (kode {rc}). Wajar untuk APK Kotlin/ber-obfuscate; bagian itu tetap bisa dibaca sebagai "
+                       f"smali. Rincian ada di kartu Hasil dekompilasi."}
 
 
 # ------------------------------------------------------------------ siklus daemon

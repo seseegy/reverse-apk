@@ -12,6 +12,7 @@ from . import rules as R
 from .common import LIB_PREFIXES as LIB_SLASH
 from .common import Findings, Lines, is_library, iter_files, mask_secret, read_text, shannon_entropy
 from .index import IndexWriter
+from .jadxlog import marker_severity
 
 URL_RE = re.compile(r"\b(?:https?|wss?|ftp)://[^\s\"'<>\\)\]}|]{3,300}", re.I)
 IP_RE = re.compile(r"(?<![\d.])(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?![\d.])")
@@ -30,6 +31,9 @@ HEX_RE = re.compile(r"^[0-9a-fA-F]{32,128}$")
 UNSUPPORTED_RE = re.compile(r'throw new UnsupportedOperationException\("Method not decompiled: ([^"]{1,300})"\)')
 R8_RE = re.compile(r"r8-map-id-|compiled from: r8-map-id")
 JADX_RENAMED_RE = re.compile(r"JADX INFO: renamed from")
+# Teks penanda dipotong di titik pertama yang bukan bagian nama jenis (": ...", ", block: ...", " for: rN", "(...)"), tanda kutip tunggal ikut.
+JADX_WARN_RE = re.compile(r"/\* JADX (?:WARN|ERROR): ([A-Za-z'][A-Za-z' \-]{3,60}?)(?=[:,(]| for\b| in\b| at\b|\s*\*/|\s*$)", re.M)
+MAX_WARN_KINDS = 60
 
 TEXT_RES_SUFFIXES = (".xml", ".json", ".txt", ".properties", ".html", ".js", ".yml", ".yaml", ".cfg", ".conf", ".ini", ".pem", ".config")
 MAX_RES_BYTES = 512 * 1024
@@ -50,6 +54,9 @@ class ScanStats:
     smali_fallback_files: int = 0
     smali_only_files: int = 0          # class aplikasi yang ADA di smali tetapi tidak dihasilkan jadx
     smali_only_samples: list[str] = field(default_factory=list)
+    warn_markers: dict[str, int] = field(default_factory=dict)         # "Code duplicated" -> jumlah, dari komentar /* JADX WARN: ... */
+    files_with_warn: int = 0
+    warn_files_by_sev: dict[str, int] = field(default_factory=dict)    # tingkat -> jumlah BERKAS unik yang memuat penanda tingkat itu
     per_dex: dict[str, dict[str, int]] = field(default_factory=dict)   # smali, smali_classes2.. -> {app, tanpa_java}
     r8_marker: bool = False
     renamed_markers: int = 0
@@ -289,6 +296,17 @@ class Scanner:
             s.r8_marker = True
         if JADX_RENAMED_RE.search(text[:2000]):
             s.renamed_markers += 1
+
+        if "JADX WARN" in text or "JADX ERROR" in text:
+            s.files_with_warn += 1
+            sevs: set[str] = set()
+            for kind in set(JADX_WARN_RE.findall(text)):
+                kind = " ".join(kind.split())
+                sevs.add(marker_severity(kind))
+                if kind in s.warn_markers or len(s.warn_markers) < MAX_WARN_KINDS:
+                    s.warn_markers[kind] = s.warn_markers.get(kind, 0) + 1     # jumlah BERKAS yang memuat penanda ini
+            for sev in sevs:                                                    # satu berkas dihitung SEKALI per tingkat
+                s.warn_files_by_sev[sev] = s.warn_files_by_sev.get(sev, 0) + 1
 
         failed = UNSUPPORTED_RE.findall(text) if "Method not decompiled" in text else []
         if failed:

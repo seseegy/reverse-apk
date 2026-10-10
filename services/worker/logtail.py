@@ -25,6 +25,14 @@ _WARN = re.compile(r"(?i)\b(warn|warning|invalid|unsupported|dropping)\b|^W: |^W
 _APKTOOL_INFO = re.compile(r"^I: ")
 _JADX_INFO = re.compile(r"INFO\s+-\s+(loading|processing|done)\b")
 _PROGRESS = re.compile(r"progress:\s*(\d+)\s+of\s+(\d+)")
+# jadx (--log-level error) mencetak satu baris per method yang gagal + pesan lanjutan. Itu rincian untuk kartu "Hasil dekompilasi",
+# bukan untuk log pipeline: dicatat sebagai hitungan saja. Kegagalan jadx lain (zip rusak, OOM, dst.) TIDAK cocok pola ini sehingga tetap tampil.
+_JADX_DETAIL = re.compile(
+    r"^ERROR - (?:[\w$.]+(?:Exception|Error)(?: in pass: \w+)? in method: |"
+    r"(?:Type inference failed|Types fix failed|Code restructure failed|Failed to [\w ]+|[A-Za-z]+Visitor error)(?: in method: |\s*$)|"
+    r"\d+ errors occurred in following nodes:|\s{2,}(?:Method|Class): )")
+_JADX_FINISHED = re.compile(r"^ERROR - finished with errors, count: (\d+)")
+_LEVEL_LINE = re.compile(r"^(?:INFO|WARN|ERROR|DEBUG)\s+- ")
 
 
 class LogTail:
@@ -42,6 +50,8 @@ class LogTail:
         self._last_pct = -PROGRESS_STEP
         self._truncated_noted = False
         self.dropped = 0
+        self._in_jadx_detail = False       # sedang di baris pesan lanjutan dari error method jadx
+        self.jadx_detail_lines = 0
 
     def _read_new(self) -> str:
         target = resolve_under(self.work_root, str(self.analysis_id), "logs", f"{self.log_name}.log")
@@ -89,6 +99,24 @@ class LogTail:
                 store.add_log(self.conn, self.analysis_id, self.stage, "info",
                               f"{self.stage}: {pct}% ({done}/{total})")
             return
+        if self.stage == "jadx":
+            m = _JADX_FINISHED.match(line)
+            if m:
+                self._in_jadx_detail = False
+                n = int(m.group(1))
+                # info, bukan warn: peringatan penjelasnya satu saja, dari ringkasan akhir tahap (pipeline).
+                self._emit("info", f"jadx: {n:,} method gagal didekompilasi; rincian disusun ke kartu Hasil dekompilasi.")
+                return
+            if _JADX_DETAIL.match(line):
+                self._in_jadx_detail = True
+                self.jadx_detail_lines += 1
+                return
+            if self._in_jadx_detail:
+                if _LEVEL_LINE.match(line):
+                    self._in_jadx_detail = False       # baris berawalan level baru = bukan lanjutan
+                else:
+                    self.jadx_detail_lines += 1        # pesan lanjutan (nama pengecualian, "Caused by", dst.)
+                    return
         if _ERROR.search(line):
             self._emit("error", line)
         elif _WARN.search(line):

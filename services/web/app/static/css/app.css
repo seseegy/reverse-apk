@@ -798,3 +798,47 @@ select:hover { border-color: var(--color-muted-foreground); }
   .peek { top: auto; height: 78dvh; width: 100vw; border-left: 0; border-top: 1px solid var(--color-border-control); border-radius: 14px 14px 0 0; box-shadow: 0 -12px 32px rgba(0, 0, 0, 0.5); }
   .chat-form .keys { display: none; }
 }
+
+
+/* =====================================================================
+   Hasil dekompilasi (kartu laporan jadx). Semua kelas berawalan dq- agar tak bertabrakan dengan komponen lain.
+   ===================================================================== */
+.dq { display: grid; gap: var(--space-3); min-width: 0; }
+.dq > * { min-width: 0; }
+.dq-badge { display: inline-flex; align-items: center; gap: var(--space-2); padding: 2px var(--space-3); border-radius: 999px; font-family: var(--font-mono);
+  font-size: 0.8rem; font-weight: 600; border: 1px solid currentColor; }
+.dq-badge.dq-ok { color: var(--text-ok); } .dq-badge.dq-warn { color: var(--text-warn); } .dq-badge.dq-bad { color: var(--text-danger); }
+.dq-lead { margin: 0; line-height: 1.65; max-width: 80ch; }
+.dq .hint { margin: 0; max-width: 80ch; }
+.dq-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(10.5rem, 1fr)); gap: var(--space-2); margin: 0; }
+.dq-stats > div { padding: var(--space-2) var(--space-3); background: var(--code-bg); border: 1px solid var(--color-border); border-radius: var(--radius); }
+.dq-stats dt { font-size: 0.75rem; color: var(--color-muted-foreground); }
+.dq-stats dd { margin: 0; font-size: 1.15rem; font-weight: 600; }
+.dq-stats dd.dq-cap { font-size: 0.72rem; font-weight: 400; color: var(--color-muted-foreground); line-height: 1.35; margin-top: 2px; }
+.dq-h { font-size: 0.95rem; margin: var(--space-2) 0 0; }
+.dq-cats { display: grid; gap: var(--space-3); }
+.dq-cat { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius); background: var(--code-bg); display: grid; gap: var(--space-2); }
+.dq-cat-head { display: flex; justify-content: space-between; gap: var(--space-3); align-items: baseline; }
+.dq-bar { height: 6px; border-radius: 3px; background: var(--color-muted); overflow: hidden; }
+.dq-bar > span { display: block; height: 100%; background: var(--text-warn); }
+.dq-cat-body, .dq-cat-fix, .dq-ex { margin: 0; max-width: 78ch; }
+.dq-tag { display: inline-block; padding: 0 8px; border-radius: 4px; background: var(--color-muted); font-size: 0.75rem; font-weight: 600; margin-right: var(--space-2); }
+.dq-markers { display: grid; gap: var(--space-2); }
+.dq-marker { display: grid; grid-template-columns: 11rem 8rem minmax(0, 1fr); gap: var(--space-3); align-items: baseline; padding: var(--space-2) var(--space-3);
+  border-left: 3px solid var(--color-border-control); background: var(--code-bg); border-radius: 0 var(--radius) var(--radius) 0; }
+.dq-marker.dq-ok { border-left-color: var(--text-ok); } .dq-marker.dq-warn { border-left-color: var(--text-warn); } .dq-marker.dq-bad { border-left-color: var(--text-danger); }
+.dq-marker-body { color: var(--color-muted-foreground); font-size: 0.88rem; }
+.dq-more > summary { cursor: pointer; color: var(--color-muted-foreground); width: fit-content; padding: var(--space-1) 0; }
+.dq-more > ul { margin-top: var(--space-2); display: grid; gap: var(--space-1); font-size: 0.88rem; }
+.dq-tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
+.dq-tools input[type="search"] { flex: 1; min-width: 14rem; padding: var(--space-2) var(--space-3); font: inherit; background: var(--color-card); color: var(--color-foreground);
+  border: 1px solid var(--color-border-control); border-radius: var(--radius); }
+.dq-tools input[type="search"]:focus-visible { outline: 2px solid var(--color-ring); outline-offset: 1px; }
+.dq-tablewrap { overflow: auto; max-height: 26rem; border: 1px solid var(--color-border); border-radius: var(--radius); }
+.dq-tablewrap:focus-visible { outline: 2px solid var(--color-ring); outline-offset: 2px; }
+.dq-table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+.dq-table th, .dq-table td { padding: var(--space-2) var(--space-3); text-align: left; vertical-align: top; border-bottom: 1px solid var(--color-border); }
+.dq-table th { position: sticky; top: 0; background: var(--color-muted); z-index: 1; font-weight: 600; }
+.dq-table td:nth-child(1) { min-width: 18rem; } .dq-table td:nth-child(2) { white-space: nowrap; } .dq-table td:nth-child(3) { min-width: 14rem; }
+.dq-table tr[hidden] { display: none; }
+@media (max-width: 760px) { .dq-marker { grid-template-columns: 1fr; gap: var(--space-1); } }

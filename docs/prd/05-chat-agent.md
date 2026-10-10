@@ -12,7 +12,7 @@ Memberi pengguna antarmuka tanya-jawab ke kode APK. Model menelusuri kode sendir
 ## Daftar tool
 | Tool | Parameter | Hasil | Batas |
 |------|-----------|-------|-------|
-| `get_overview` | – | ringkasan manifest, temuan statis, ringkasan AI aplikasi | – |
+| `get_overview` | – | ringkasan manifest, temuan statis, ringkasan AI aplikasi, hasil dekompilasi (method yang gagal di jadx) | – |
 | `get_manifest` | – | manifest ter-parse | – |
 | `list_packages` | `prefix?` | package dan jumlah class | 200 baris |
 | `list_classes` | `package`, `limit` | class + ukuran | 200 baris |
