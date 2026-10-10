@@ -442,8 +442,9 @@ progress::-moz-progress-bar { background: var(--color-accent); }
   font-family: var(--font-mono); font-size: 13px; line-height: 1.55;
   max-height: 340px; overflow: auto;
 }
-.log-line { display: grid; grid-template-columns: 4.5rem 3.5rem 1fr; gap: var(--space-3); }
-.log-time, .log-level { color: var(--color-muted-foreground); }
+/* Kolom waktu harus muat jam 12-jam terpanjang ("12:34:39 PM" = 11 karakter mono ~ 86px) agar tidak membungkus. */
+.log-line { display: grid; grid-template-columns: 6.5rem 3.5rem 1fr; gap: var(--space-3); }
+.log-time, .log-level { color: var(--color-muted-foreground); white-space: nowrap; }
 .log-msg { overflow-wrap: anywhere; white-space: pre-wrap; }
 .log-warn .log-level { color: var(--text-warn); font-weight: 700; }
 .log-error .log-level, .log-error .log-msg { color: var(--text-danger); }
