@@ -658,8 +658,10 @@ select:hover { border-color: var(--color-muted-foreground); }
   display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-4); align-content: start; min-height: 20rem;
   max-height: calc(100vh - 31rem); max-height: calc(100dvh - 31rem);   /* cadangan; JS (fitLog) menghitung tinggi sebenarnya */
   overflow: auto; overscroll-behavior: contain;
-  padding: var(--space-4); background: var(--color-card); border: 1px solid var(--color-border); border-radius: var(--radius);
+  padding: 0 var(--space-4) var(--space-4); background: var(--color-card); border: 1px solid var(--color-border); border-radius: var(--radius);
 }
+/* Tanpa padding atas: judul pesan yang menempel harus rapat dengan tepi atas log, kalau tidak isi pesan terlihat di celahnya. */
+.chat-log > :first-child { margin-top: var(--space-4); }
 .chat-log:focus-visible { outline: 2px solid var(--color-ring); outline-offset: 2px; }
 .jump { position: absolute; left: 50%; bottom: var(--space-3); transform: translateX(-50%); display: inline-flex; align-items: center; gap: var(--space-2);
   padding: var(--space-1) var(--space-3); min-height: 32px; border-radius: 999px; border: 1px solid var(--color-accent);
@@ -672,12 +674,18 @@ select:hover { border-color: var(--color-muted-foreground); }
 .msg { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-2); max-width: 100%; min-width: 0; position: relative; }
 .msg-user { background: var(--color-muted); justify-self: end; max-width: min(46rem, 92%); padding: var(--space-2) var(--space-4);
   border: 1px solid var(--color-border); border-radius: 14px 14px 4px 14px; }
-.msg-assistant { padding: var(--space-1) 0 var(--space-1) var(--space-4); border-left: 3px solid var(--color-accent); }
+/* Blok (bukan grid): sticky pada anak grid hanya menempel di dalam baris grid miliknya, bukan sepanjang pesan. */
+.msg-assistant { display: block; padding: var(--space-1) 0 var(--space-1) var(--space-4); border-left: 3px solid var(--color-accent); }
+.msg-assistant > * + * { margin-top: var(--space-2); }
 .msg-error { padding: var(--space-3) var(--space-4); border: 1px solid var(--text-danger); border-radius: var(--radius); background: rgba(239, 68, 68, 0.1); }
 .msg-head { display: flex; align-items: center; gap: var(--space-2); min-height: 28px; font-family: var(--font-mono); font-size: 0.75rem; font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.04em; color: var(--color-muted-foreground); }
 .msg-user .msg-head { display: none; }
 .msg-head .msg-actions { margin-left: auto; display: inline-flex; gap: var(--space-1); }
+/* Judul jawaban asisten menempel di atas selama jawabannya digulir, sehingga tombol Salin selalu terjangkau pada jawaban panjang. */
+.msg-assistant .msg-head { position: sticky; top: 0; z-index: 1; background: var(--color-card); padding-block: var(--space-1); margin-block: calc(-1 * var(--space-1)); }
+.msg-foot { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-top: var(--space-1); }
+.msg-foot .btn { min-height: 28px; padding: 2px var(--space-3); font-size: 0.8rem; }
 .msg-actions .btn { min-height: 28px; padding: 2px var(--space-2); font-size: 0.78rem; text-transform: none; letter-spacing: 0; font-family: var(--font-sans); font-weight: 500; }
 .msg-body { overflow-wrap: anywhere; max-width: 78ch; line-height: 1.65; }
 .msg-body.msg-plain { white-space: pre-wrap; }
@@ -784,7 +792,8 @@ select:hover { border-color: var(--color-muted-foreground); }
 @media (max-width: 900px) {
   .chat-app { grid-template-columns: minmax(0, 1fr); }
   .chat-side { position: static; }
-  .chat-log { padding: var(--space-3); }
+  .chat-log { padding: 0 var(--space-3) var(--space-3); }
+  .chat-log > :first-child { margin-top: var(--space-3); }
   .msg-assistant { padding-left: var(--space-3); }
   .peek { top: auto; height: 78dvh; width: 100vw; border-left: 0; border-top: 1px solid var(--color-border-control); border-radius: 14px 14px 0 0; box-shadow: 0 -12px 32px rgba(0, 0, 0, 0.5); }
   .chat-form .keys { display: none; }
