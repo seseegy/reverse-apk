@@ -1,0 +1,35 @@
+{
+  "_catatan": [
+    "Harga dalam KREDIT per 1 juta token (sumber: portal router, dibaca dari screenshot). Ubah sesuai portal; harga bisa berubah.",
+    "'in' = token input, 'out' = token output. Bila portal hanya menyebut satu angka, isi 'in' dan 'out' sama (anggaran jadi konservatif).",
+    "SLUG harus persis seperti di portal: salin lewat tombol 'Salin'. Slug di bawah adalah tebakan dari screenshot, VERIFIKASI.",
+    "Model yang tidak tercantum di sini dihitung dengan 'default' (sengaja mahal) dan ditandai perkiraan.",
+    "'chat': true = tampil di pilihan model chat. Model gambar (gpt-image) tidak dipakai."
+  ],
+  "default": { "in": 4, "out": 4 },
+  "models": {
+    "deepseek-v4-flash":   { "label": "DeepSeek V4 Flash",   "in": 0.3, "out": 0.3, "chat": true },
+    "deepseek-v4-pro":     { "label": "DeepSeek V4 Pro",     "in": 1,   "out": 1,   "chat": true },
+    "deepseek-v4.1-flash": { "label": "DeepSeek V4.1 Flash", "in": 0.3, "out": 0.3, "chat": true },
+    "deepseek-v4.1-flash-sg": { "label": "DeepSeek V4.1 Flash SG", "in": 0.4, "out": 0.4, "chat": true },
+    "claude-haiku-4.5":    { "label": "Claude Haiku 4.5",    "in": 1,   "out": 1,   "chat": true },
+    "claude-haiku-5.5":    { "label": "Claude Haiku 5.5",    "in": 1,   "out": 1,   "chat": true },
+    "claude-sonnet-4.6":   { "label": "Claude Sonnet 4.6",   "in": 2.5, "out": 2.5, "chat": true },
+    "claude-sonnet-5":     { "label": "Claude Sonnet 5",     "in": 2.5, "out": 2.5, "chat": true },
+    "claude-sonnet-5.5":   { "label": "Claude Sonnet 5.5",   "in": 2.5, "out": 2.5, "chat": true },
+    "claude-opus-4.6":     { "label": "Claude Opus 4.6",     "in": 4,   "out": 4,   "chat": true },
+    "claude-opus-4.7":     { "label": "Claude Opus 4.7",     "in": 4,   "out": 4,   "chat": true },
+    "claude-opus-4.8":     { "label": "Claude Opus 4.8",     "in": 4,   "out": 4,   "chat": true },
+    "claude-opus-5":       { "label": "Claude Opus 5",       "in": 4,   "out": 4,   "chat": true },
+    "claude-opus-5.5":     { "label": "Claude Opus 5.5",     "in": 4,   "out": 4,   "chat": true },
+    "claude-fable-5":      { "label": "Claude Fable 5",      "in": 8,   "out": 8,   "chat": true },
+    "claude-fable-5.1":    { "label": "Claude Fable 5.1",    "in": 8,   "out": 8,   "chat": true },
+    "gpt-6-luna":          { "label": "GPT 6 Luna",          "in": 0.3, "out": 0.3, "chat": true },
+    "gpt-6-luna-fast":     { "label": "GPT 6 Luna (Fast)",   "in": 0.6, "out": 0.6, "chat": true },
+    "gpt-6-sol":           { "label": "GPT 6 Sol",           "in": 2,   "out": 2,   "chat": true },
+    "gpt-6-sol-fast":      { "label": "GPT 6 Sol (Fast)",    "in": 7,   "out": 7,   "chat": true },
+    "gpt-6.1-sol":         { "label": "GPT 6.1 Sol",         "in": 2,   "out": 2,   "chat": true },
+    "gpt-6.1-sol-fast":    { "label": "GPT 6.1 Sol (Fast)",  "in": 7,   "out": 7,   "chat": true },
+    "grok-4.5":            { "label": "Grok 4.5",            "in": 1,   "out": 1,   "chat": true }
+  }
+}

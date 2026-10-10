@@ -326,6 +326,38 @@ def get_finding(conn: sqlite3.Connection, analysis_id: int, finding_id: int) -> 
     ).fetchone()
 
 
+# ------------------------------------------------------------------ pencatatan panggilan AI
+def record_ai_call(conn: sqlite3.Connection, *, purpose: str, model: str, prompt_tokens: int = 0,
+                   completion_tokens: int = 0, cached_tokens: int = 0, cost_credits: float = 0.0,
+                   estimated: bool = False, ok: bool = True, error: str | None = None,
+                   analysis_id: int | None = None, session_id: int | None = None) -> int:
+    with tx(conn):
+        cur = conn.execute(
+            "INSERT INTO ai_call (analysis_id, session_id, purpose, model, prompt_tokens, completion_tokens, "
+            "                     cached_tokens, cost_credits, estimated, ok, error, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (analysis_id, session_id, _text(purpose, 40), _text(model, 120), int(prompt_tokens), int(completion_tokens),
+             int(cached_tokens), float(cost_credits), int(estimated), int(ok), _text(error, 300), now()),
+        )
+        if session_id is not None and cost_credits:
+            conn.execute("UPDATE chat_session SET cost_credits = cost_credits + ?, updated_at = ? WHERE id = ?",
+                         (float(cost_credits), now(), session_id))
+        return int(cur.lastrowid)
+
+
+def ai_spent(conn: sqlite3.Connection, since: float | None = None, session_id: int | None = None) -> float:
+    """Total kredit terpakai (sejak `since`, atau untuk satu sesi chat)."""
+    where, params = [], []
+    if since is not None:
+        where.append("created_at >= ?")
+        params.append(since)
+    if session_id is not None:
+        where.append("session_id = ?")
+        params.append(session_id)
+    sql = "SELECT COALESCE(SUM(cost_credits), 0) FROM ai_call" + (" WHERE " + " AND ".join(where) if where else "")
+    return float(conn.execute(sql, params).fetchone()[0])
+
+
 # ------------------------------------------------------------------ aksi pengguna (web)
 def request_cancel(conn: sqlite3.Connection, analysis_id: int) -> str:
     """'cancelled' (antre, langsung batal) | 'requested' (sedang jalan) | 'noop'."""

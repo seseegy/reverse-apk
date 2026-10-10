@@ -108,6 +108,48 @@ _MIGRATIONS: list[str] = [
         SELECT id, 'analyzing', 3, 'skipped', 'dibuat sebelum M2 - jalankan analisis statis untuk mengisinya'
         FROM analysis
     """,
+    # --- v3 (M4): pencatatan panggilan AI + sesi chat
+    """
+    CREATE TABLE ai_call (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        analysis_id       INTEGER REFERENCES analysis(id) ON DELETE SET NULL,
+        session_id        INTEGER,
+        purpose           TEXT    NOT NULL,
+        model             TEXT    NOT NULL,
+        prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+        completion_tokens INTEGER NOT NULL DEFAULT 0,
+        cached_tokens     INTEGER NOT NULL DEFAULT 0,
+        cost_credits      REAL    NOT NULL DEFAULT 0,
+        estimated         INTEGER NOT NULL DEFAULT 0,
+        ok                INTEGER NOT NULL DEFAULT 1,
+        error             TEXT,
+        created_at        REAL    NOT NULL
+    );
+    CREATE INDEX ai_call_created ON ai_call(created_at);
+    CREATE INDEX ai_call_session ON ai_call(session_id);
+
+    CREATE TABLE chat_session (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        analysis_id  INTEGER NOT NULL REFERENCES analysis(id) ON DELETE CASCADE,
+        title        TEXT,
+        cost_credits REAL    NOT NULL DEFAULT 0,
+        created_at   REAL    NOT NULL,
+        updated_at   REAL    NOT NULL
+    );
+    CREATE INDEX chat_session_analysis ON chat_session(analysis_id);
+
+    CREATE TABLE chat_message (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL REFERENCES chat_session(id) ON DELETE CASCADE,
+        role       TEXT    NOT NULL,
+        content    TEXT    NOT NULL DEFAULT '',
+        tool_calls TEXT,
+        citations  TEXT,
+        model      TEXT,
+        created_at REAL    NOT NULL
+    );
+    CREATE INDEX chat_message_session ON chat_message(session_id, id)
+    """,
 ]
 
 SCHEMA_VERSION = len(_MIGRATIONS)

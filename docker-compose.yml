@@ -56,12 +56,26 @@ services:
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-200}
       MIN_FREE_GB: ${MIN_FREE_GB:-15}
       JOB_TIMEOUT: ${JOB_TIMEOUT:-2700}
+      # --- AI (M4). Kunci hanya masuk ke service web; tidak pernah ke browser, worker, atau runner.
+      AI_BASE_URL: ${AI_BASE_URL:-}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-}
+      AI_MODEL_PRO: ${AI_MODEL_PRO:-}
+      AI_FALLBACK_MODEL: ${AI_FALLBACK_MODEL:-}
+      AI_CREDIT_IDR: ${AI_CREDIT_IDR:-300}
+      AI_DAILY_BUDGET_CREDITS: ${AI_DAILY_BUDGET_CREDITS:-5}
+      AI_SESSION_BUDGET_CREDITS: ${AI_SESSION_BUDGET_CREDITS:-1}
+      AI_MAX_STEPS: ${AI_MAX_STEPS:-12}
+      AI_MAX_OUTPUT_TOKENS: ${AI_MAX_OUTPUT_TOKENS:-4096}
+      AI_DAY_OFFSET_HOURS: ${AI_DAY_OFFSET_HOURS:-7}
+      AI_MODELS_FILE: /config/ai_models.json
     secrets:
       - admin_password_hash
     volumes:
       - uploads:/data/uploads
       - work:/data/work
       - db:/data/db
+      - ./config:/config:ro
     networks: [edge, backend]
     depends_on:
       redis:
