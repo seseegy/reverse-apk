@@ -16,7 +16,7 @@ from pathlib import Path
 
 from rvcore.fsutil import atomic_write_json
 
-from . import VERSION
+from . import VERSION, callgraph
 from .common import Findings
 from .index import IndexWriter
 from .scan import Scanner
@@ -64,6 +64,18 @@ def main() -> int:
         log(f"E: pemindaian kode gagal: {type(exc).__name__}: {exc}")
         traceback.print_exc()
 
+    # --- 1b. call graph & hierarki class dari smali (tidak fatal: tanpa ini tool xref/jalur dimatikan, sisanya jalan)
+    cg_state = "failed"
+    try:
+        log("I: Membangun call graph dari smali…")
+        cg = callgraph.build(work, index.conn, log)
+        summary["callgraph"] = cg
+        cg_state = "complete" if cg["complete"] else "partial"
+    except Exception as exc:  # noqa: BLE001
+        failures.append("callgraph")
+        log(f"E: call graph gagal: {type(exc).__name__}: {exc}")
+        traceback.print_exc()
+
     # --- 2. sertifikat penanda tangan
     try:
         log("I: Membaca tanda tangan & sertifikat…")
@@ -108,7 +120,7 @@ def main() -> int:
     summary["findings_total"] = len(findings)
 
     try:
-        index_size = index.finish({"analyzer_version": str(VERSION), "created": str(int(time.time()))})
+        index_size = index.finish({"analyzer_version": str(VERSION), "created": str(int(time.time())), "callgraph": cg_state})
         summary["index_bytes"] = index_size
     except Exception as exc:  # noqa: BLE001
         failures.append("index")

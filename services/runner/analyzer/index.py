@@ -4,6 +4,8 @@ Tabel:
   code(path UNINDEXED, content)  FTS5 unicode61 — isi kode/resource teks (path relatif terhadap work/)
   classes(path, name, package, lines, size, is_lib)  — satu baris per berkas Java (pencarian nama class)
   strings(kind, value, host, scheme, file, line, count, is_lib)  — URL/domain/IP/path/base64/hex, dedup per (kind, value)
+  cls/impl/msym/fsym/call/fref/cref/sref  — hierarki class & call graph dari smali (callgraph.py); valid hanya bila
+                                            meta.callgraph = complete|partial
   meta(key, value)
 
 Ditulis ke index.sqlite.tmp lalu di-rename atomik setelah selesai, jadi web tidak pernah melihat berkas setengah jadi.
@@ -15,7 +17,9 @@ import os
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+from . import callgraph
+
+SCHEMA_VERSION = 2   # 2: + tabel call graph (cls, impl, msym, fsym, call, fref, cref, sref); lihat callgraph.py
 MAX_STRINGS_PER_KIND = 20000
 MAX_INDEX_CONTENT = 1024 * 1024  # potong isi per berkas pada 1 MiB agar satu berkas raksasa tak menggelembungkan indeks
 
@@ -41,6 +45,7 @@ class IndexWriter:
                   "file TEXT, line INTEGER, count INTEGER NOT NULL DEFAULT 1, is_lib INTEGER NOT NULL DEFAULT 0, "
                   "PRIMARY KEY (kind, value))")
         c.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        callgraph.create_tables(c)
         c.execute("BEGIN")
         self._kind_counts: dict[str, int] = {}
         self.code_rows = 0

@@ -4,8 +4,10 @@
     "'in' = token input, 'out' = token output. Bila portal hanya menyebut satu angka, isi 'in' dan 'out' sama (anggaran jadi konservatif).",
     "SLUG harus persis seperti di portal: salin lewat tombol 'Salin'. Slug di bawah adalah tebakan dari screenshot, VERIFIKASI.",
     "Model yang tidak tercantum di sini dihitung dengan 'default' (sengaja mahal) dan ditandai perkiraan.",
+    "'floor_per_request' = tarif minimum per request (kredit). Biaya satu request = max(biaya token, floor); 0,01 kredit setara ~33 ribu token pada tarif 0,3/juta. Satu pertanyaan ke agent = banyak request.",
     "'chat': true = tampil di pilihan model chat. Model gambar (gpt-image) tidak dipakai."
   ],
+  "floor_per_request": 0.01,
   "default": { "in": 4, "out": 4 },
   "models": {
     "deepseek-v4-flash":   { "label": "DeepSeek V4 Flash",   "in": 0.3, "out": 0.3, "chat": true },
