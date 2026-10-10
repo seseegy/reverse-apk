@@ -2,7 +2,7 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 COMPOSE ?= docker compose
 
-.PHONY: help init password up down restart logs ps update runner-selftest doctor
+.PHONY: help init password up down restart logs ps update runner-selftest ai-check doctor
 
 help: ## Tampilkan daftar perintah
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[32m%-16s\033[0m %s\n", $$1, $$2}'
@@ -44,6 +44,9 @@ update: ## Ambil kode terbaru lalu build ulang
 runner-selftest: ## Uji runner: alat benar-benar bisa bekerja + bukti isolasi (jaringan, rootfs, non-root)
 	$(COMPOSE) build runner
 	$(COMPOSE) run --rm --no-deps runner runner-selftest
+
+ai-check: ## Uji provider AI (koneksi, streaming, tool calling, pemakaian token) memakai kunci di .env
+	$(COMPOSE) run --rm --no-deps web python -m app.ai.check
 
 doctor: ## Periksa konfigurasi dan kesehatan layanan
 	@test -f .env || { echo "✗ .env belum ada (make init)"; exit 1; }

@@ -82,6 +82,21 @@ lalu tekan **Jalankan analisis statis**: hasil dekompilasi yang ada dipakai ulan
 Indeks pencarian memakan ruang tambahan (terukur: 69 MiB untuk NewPipe dengan 7.095 class / 50 MiB kode, 152 MiB untuk VLC dengan 15.256 class). Secret yang ditemukan di-*mask*
 secara bawaan; tombol **Tampilkan nilai** dicatat di audit log (`secret_reveal`).
 
+## AI / chat agent (M4)
+AI bersifat **opsional** dan mati secara bawaan (tidak ada data yang keluar). Untuk mengaktifkan, isi di `.env` (bukan di chat):
+`AI_BASE_URL`, `AI_API_KEY`, `AI_MODEL`, lalu jalankan:
+```bash
+docker compose up -d web     # muat ulang .env
+make ai-check                # uji koneksi, streaming, tool calling, dan pelaporan token
+```
+Semua baris harus `[OK ]`. **Tool calling wajib** untuk chat agent; bila `[GAGAL]`, pilih model lain di portal router.
+Anggaran dalam *kredit* (`AI_DAILY_BUDGET_CREDITS`, `AI_SESSION_BUDGET_CREDITS`); chat berhenti rapi saat habis.
+Harga per model ada di `config/ai_models.json` (kredit per 1 juta token): sesuaikan dengan portal, lalu `docker compose restart web`.
+Bandingkan angka token dari `make ai-check` dengan selisih saldo di portal untuk memastikan harga input/output.
+
+**Privasi:** potongan kode APK yang Anda tanyakan dikirim ke provider (dan model di belakangnya). Secret diredaksi lebih dulu.
+Kunci hanya dibaca service `web`; tidak pernah dikirim ke browser, worker, atau runner, dan tidak dicatat di log.
+
 ## Upload besar dan Cloudflare
 Batas ukuran APK diatur `MAX_UPLOAD_MB` di `.env` (bawaan 200). Nilai yang sama dipakai aplikasi dan Caddy.
 Jika proxy Cloudflare (awan oranye) dinyalakan, paket gratis membatasi body request ~100 MB sehingga APK yang
