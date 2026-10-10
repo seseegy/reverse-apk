@@ -174,7 +174,7 @@ def run_turn(*, client: Client, cfg: AIConfig, prices: PriceTable, ctx: T.ToolCo
             {"id": c.id, "type": "function", "function": {"name": c.name, "arguments": c.arguments}} for c in r.tool_calls]})
         for c in r.tool_calls:
             emit("tool_start", {"id": c.id, "name": c.name, "args": c.arguments[:300]})
-            if tool_chars >= cfg.max_turn_tool_chars:
+            if cfg.max_turn_tool_chars and tool_chars >= cfg.max_turn_tool_chars:
                 out, ok = ("<hasil_tool galat=\"true\">batas total data tool untuk giliran ini tercapai; berikan jawaban dari "
                            "yang sudah dibaca.</hasil_tool>"), False
                 force_final = True
