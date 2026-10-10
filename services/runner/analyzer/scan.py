@@ -50,6 +50,7 @@ class ScanStats:
     smali_fallback_files: int = 0
     smali_only_files: int = 0          # class aplikasi yang ADA di smali tetapi tidak dihasilkan jadx
     smali_only_samples: list[str] = field(default_factory=list)
+    per_dex: dict[str, dict[str, int]] = field(default_factory=dict)   # smali, smali_classes2.. -> {app, tanpa_java}
     r8_marker: bool = False
     renamed_markers: int = 0
     short_names: int = 0
@@ -337,6 +338,7 @@ class Scanner:
         except OSError:
             return
         for root in roots:
+            dex = self.stats.per_dex.setdefault(root.name, {"app": 0, "tanpa_java": 0})
             for path in iter_files(root, (".smali",)):
                 inner = path.relative_to(root).as_posix()
                 if inner.startswith(LIB_SLASH):
@@ -346,8 +348,10 @@ class Scanner:
                 if "$$ExternalSynthetic" in full or "$$Lambda" in full or full.startswith(("android/", "java/")):
                     continue
                 # jadx menulis class dalam di berkas luar ATAU di berkasnya sendiri (Luar$Dalam.java): cek keduanya.
+                dex["app"] += 1
                 if f"jadx/sources/{full}.java" in self._java_rels or f"jadx/sources/{full.split('$', 1)[0]}.java" in self._java_rels:
                     continue
+                dex["tanpa_java"] += 1
                 if self._smali_only_bytes > MAX_SMALI_ONLY_BYTES:
                     self.log("W: batas ukuran smali-saja tercapai; sisa class tanpa Java tidak dipindai")
                     return
