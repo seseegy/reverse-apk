@@ -105,11 +105,21 @@ def main() -> int:
             "resource_files": stats.resource_files, "decompile_failures": stats.decompile_failures,
             "methods_not_decompiled": stats.methods_not_decompiled, "failed_samples": stats.failed_samples,
             "smali_fallback_files": stats.smali_fallback_files, "skipped_large": stats.skipped_large,
+            "smali_only_files": stats.smali_only_files, "smali_only_samples": stats.smali_only_samples,
         }
         summary["network"] = {
             "stack": stats.stack, "retrofit": stats.retrofit, "base_urls": stats.base_urls, "pins": stats.pins,
             "string_counts": stats.string_counts,
         }
+        if stats.smali_only_files:
+            findings.add(category="obfuscation", severity="low" if stats.smali_only_files > max(50, stats.app_classes // 20) else "info",
+                         rule_id="coverage.jadx_missing_classes",
+                         title=f"{stats.smali_only_files} class aplikasi tidak dihasilkan jadx (hanya ada sebagai smali)",
+                         key="missing",
+                         description="Class ini ada di bytecode (smali) tetapi tidak muncul di Java hasil jadx, biasanya karena jadx "
+                                     "gagal atau melewati sebagian dex. String, secret, dan URL di dalamnya tetap dipindai dari smali "
+                                     "dan bisa dicari, tetapi kodenya hanya bisa dibaca sebagai smali (tab Kode > Smali). Contoh: "
+                                     + ", ".join(stats.smali_only_samples[:5]))
         if stats.decompile_failures:
             findings.add(category="obfuscation", severity="info", rule_id="coverage.decompile_gaps",
                          title=f"{stats.methods_not_decompiled} method di {stats.decompile_failures} class gagal didekompilasi jadx",

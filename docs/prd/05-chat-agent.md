@@ -25,7 +25,7 @@ Memberi pengguna antarmuka tanya-jawab ke kode APK. Model menelusuri kode sendir
 | `find_paths` | `from_class`, `from_method?`, `to_class`, `to_method?`, `max_depth?`, `max_paths?`, `max_approx?` | jalur panggilan statis terbobot | 5 jalur |
 | `list_strings` | `filter?`, `kind?` | string dan lokasi | 100 hasil |
 | `get_findings` | `category?` | temuan statis | – |
-| `get_resource` | `path` | isi resource teks | ukuran dibatasi |
+| `read_file` | `path`, `start_line?`, `end_line?` | berkas teks apa pun (Java, **smali semua class**, resource, manifest) dengan nomor baris; path sama persis dengan format sitasi | ukuran dibatasi, ada penanda lanjut |
 
 Validasi: semua path dinormalisasi dan harus berada di bawah `work/<analysis_id>/`; tolak `..`, symlink keluar, dan berkas biner besar.
 
@@ -65,7 +65,7 @@ Permintaan untuk menyerang layanan pihak ketiga (mis. mengeksploitasi endpoint y
 
 ## Keputusan M4 (chat agent)
 - **Tab Chat** per analisis; sesi, riwayat, dan biaya tersimpan (`chat_session`, `chat_message`, `ai_call`). Satu giliran aktif per sesi; tombol **Berhenti** membatalkan di tengah streaming.
-- **14 tool baca-saja** (`services/web/app/ai/tools.py`): `get_overview`, `get_manifest`, `list_packages`, `list_classes`, `search_code`, `get_class`, `get_method`, `find_xrefs`, `find_callees`, `class_info`, `find_paths`, `list_strings`, `get_findings`, `get_resource`. `analysis_id` terikat pada sesi (model tidak bisa menyebutnya); argumen divalidasi; nama tool di luar daftar ditolak.
+- **14 tool baca-saja** (`services/web/app/ai/tools.py`): `get_overview`, `get_manifest`, `list_packages`, `list_classes`, `search_code`, `get_class`, `get_method`, `find_xrefs`, `find_callees`, `class_info`, `find_paths`, `list_strings`, `get_findings`, `read_file`. `analysis_id` terikat pada sesi (model tidak bisa menyebutnya); argumen divalidasi; nama tool di luar daftar ditolak.
 - **Call graph nyata (FR-3.12)**: `find_xrefs` bukan lagi pencarian teks. Analyzer membaca smali (`analyzer/callgraph.py`) dan menyimpan hierarki class, method, field, panggilan, akses field, `new-instance`/`const-class`, dan string konstanta ke `index.sqlite` (tabel `cls`, `impl`, `msym`, `fsym`, `call`, `fref`, `cref`, `sref`; `meta.callgraph` = complete|partial|failed). Isi `invoke` hanya dibaca untuk class aplikasi; pustaka cukup kepala class-nya. Pemanggil dilaporkan dengan hubungan `langsung` / `lewat subclass` / `lewat supertype`.
 - **`find_paths` jujur soal tebakan**: edge `langsung` (invoke nyata) berbobot 1; `dispatch` (override), `intent` (const-class ke komponen), dan `callback` (instance lambda/listener dibuat di method itu) adalah PERKIRAAN, berbobot lebih mahal dan dibatasi `max_approx` (bawaan 2; 0 = hanya invoke nyata). Dispatch ke >8 implementer dilewati (terlalu ambigu). Tidak ada jalur ≠ tidak terjangkau.
 - **Tidak terlihat dari call graph**: refleksi, JNI, callback yang dipanggil framework, kode dinamis, dan isi pustaka pihak ketiga. Batas ini ikut dikirim di setiap hasil tool dan ada di prompt sistem. Analisis lama (indeks sebelum v2) perlu "Jalankan ulang analisis statis".
@@ -77,6 +77,9 @@ Permintaan untuk menyerang layanan pihak ketiga (mis. mengeksploitasi endpoint y
 - **Pengaman loop**: batas langkah (`AI_MAX_STEPS`), batas total data tool per giliran, panggilan identik berulang dihentikan, anggaran dicek sebelum tiap panggilan; bila model membandel di langkah final, pengguna tetap mendapat pesan jelas (bukan gelembung kosong).
 - **Skrip & `.md` dari AI**: hanya teks, dengan tombol Salin/Unduh (`text/plain`). Tidak ada penyimpanan di server dan tidak pernah dijalankan. Jawaban dirender lewat DOM (tanpa `innerHTML`); tautan dari model tidak pernah menjadi `<a>`.
 - **Pilihan model per pesan** hanya dari `AI_MODEL`/`AI_MODEL_PRO` di `.env` (browser tidak bisa menyuntikkan slug sembarang).
+
+- **Class yang tidak dihasilkan jadx** (mis. satu dex gagal didekompilasi, `smali_classes7`): `get_class`/`get_method` otomatis jatuh ke smali dan mengatakannya (`format: smali`, nomor baris = baris berkas smali, bisa disitir `apktool/smali_classes7/pkg/A.smali:123`); `read_file` membaca path apa pun persis seperti sitasi; `list_classes` memuat `hanya_smali`. Analyzer memindai smali class-class itu (secret, URL, string) dan mengindeksnya ke `search_code`, serta menambah temuan `coverage.jadx_missing_classes`. Artefak desugar (`$$ExternalSyntheticLambda`) dan stub `android/`/`java/` tidak dihitung sebagai hilang.
+- **Pembacaan terhadap hasil kerja model sendiri**: bila `get_method` menemukan `Method not decompiled`, smali method itu diberikan sebagai gantinya.
 
 ## Batasan
 - Kualitas jawaban bergantung model; sitasi diverifikasi tetapi *kesimpulan* model tidak. Perlakukan sebagai petunjuk, bukan bukti.

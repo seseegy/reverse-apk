@@ -667,3 +667,25 @@ def find_paths(conn: sqlite3.Connection, src_cls: sqlite3.Row, src_method: str |
 def _related_down(conn: sqlite3.Connection, cid: int) -> tuple[list[int], bool]:
     subs, cut = subtypes(conn, cid, 200)
     return [cid, *subs], cut
+
+
+def smali_only_in_package(conn: sqlite3.Connection, package: str, java_names: set[str], limit: int = 100) -> list[str]:
+    """Class aplikasi di `package` yang ada di smali tetapi tidak dihasilkan jadx (nama sederhana tidak ada di `java_names`)."""
+    pre = package.strip()
+    if not pre:
+        return []
+    like = pre.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + ".%"
+    out: list[str] = []
+    for r in conn.execute("SELECT name, simple FROM cls WHERE declared = 1 AND is_lib = 0 AND name LIKE ? ESCAPE '\\' "
+                          "ORDER BY name LIMIT 4000", (like,)):
+        if "." in r["name"][len(pre) + 1:]:
+            continue                                   # subpackage lain
+        simple = r["simple"]
+        if "$$ExternalSynthetic" in simple or "$$Lambda" in simple:
+            continue
+        if simple in java_names or simple.split("$", 1)[0] in java_names:
+            continue
+        out.append(simple)
+        if len(out) >= limit:
+            break
+    return out
