@@ -41,9 +41,9 @@ update: ## Ambil kode terbaru lalu build ulang
 	git pull --ff-only
 	$(MAKE) up
 
-runner-selftest: ## Uji image runner: versi alat + bukti jaringan terisolasi
-	$(COMPOSE) --profile tools build runner
-	$(COMPOSE) --profile tools run --rm runner
+runner-selftest: ## Uji runner: alat benar-benar bisa bekerja + bukti isolasi (jaringan, rootfs, non-root)
+	$(COMPOSE) build runner
+	$(COMPOSE) run --rm --no-deps runner runner-selftest
 
 doctor: ## Periksa konfigurasi dan kesehatan layanan
 	@test -f .env || { echo "✗ .env belum ada (make init)"; exit 1; }

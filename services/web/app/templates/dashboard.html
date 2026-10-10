@@ -1,44 +1,92 @@
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
+{% from "_parts.html" import status_badge, time_el, notice_box %}
 {% block title %}Dashboard · reverse-apk{% endblock %}
 
-{% block header %}
-<header class="site-header">
-  <div class="container header-row">
-    <a class="brand" href="/">reverse-apk</a>
-    <nav aria-label="Navigasi utama">
-      <a href="/" aria-current="page">Dashboard</a>
-    </nav>
-    <form method="post" action="/logout" class="header-user">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <span class="muted" title="Masuk sebagai">{{ user }}</span>
-      <button type="submit" class="btn btn-ghost btn-sm">
-        {{ icon('log-out', 16) }}<span>Keluar</span>
-      </button>
-    </form>
-  </div>
-</header>
-{% endblock %}
+{% block header %}{% include "_header.html" %}{% endblock %}
 
 {% block content %}
 <div class="container page">
   <div class="page-head">
     <h1>APK</h1>
     <div class="page-actions">
-      <button type="button" class="btn btn-primary" disabled aria-describedby="upload-note">
+      <a class="btn btn-primary" href="/upload">
         {{ icon('upload', 16) }}<span>Upload APK</span>
-      </button>
+      </a>
     </div>
   </div>
 
+  {{ notice_box(notice) }}
+
+  {% if apks or q %}
+  <section class="card" aria-labelledby="apk-title">
+    <div class="card-head">
+      <h2 id="apk-title">Daftar APK</h2>
+      <form method="get" action="/" role="search" class="search">
+        <label class="sr-only" for="q">Cari nama, paket, atau hash</label>
+        <input id="q" name="q" type="search" value="{{ q }}" placeholder="Cari nama, paket, hash…" maxlength="100"
+               autocomplete="off" spellcheck="false">
+        <button type="submit" class="btn btn-ghost btn-sm">{{ icon('search', 16) }}<span>Cari</span></button>
+      </form>
+    </div>
+
+    <p class="muted hint" role="status" aria-atomic="true">
+      {% if q %}{{ apks|length }} hasil untuk “{{ q }}”{% else %}{{ apks|length }} APK{% endif %}
+    </p>
+
+    {% if apks %}
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Daftar APK (gulir horizontal bila perlu)">
+      <table class="table">
+        <thead>
+          <tr>
+            <th scope="col">Nama</th>
+            <th scope="col">Paket</th>
+            <th scope="col">Versi</th>
+            <th scope="col" class="num">Ukuran</th>
+            <th scope="col">Diunggah</th>
+            <th scope="col">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for a in apks %}
+          <tr>
+            <th scope="row" class="cell-name">
+              {% if a.analysis_id %}
+              <a href="/analyses/{{ a.analysis_id }}">{{ a.app_label or a.filename_display }}</a>
+              {% else %}{{ a.app_label or a.filename_display }}{% endif %}
+              {% if a.app_label and a.app_label != a.filename_display %}
+              <span class="muted file-sub">{{ a.filename_display }}</span>
+              {% endif %}
+            </th>
+            <td class="mono">{{ a.package or '–' }}</td>
+            <td class="mono">{{ a.version_name or '–' }}{% if a.version_code %} <span class="muted">({{ a.version_code }})</span>{% endif %}</td>
+            <td class="num mono">{{ a.size|bytes }}</td>
+            <td>{{ time_el(a.created_at) }}</td>
+            <td>
+              {{ status_badge(a.status, a.current_stage) }}
+              {% if a.status == 'done' and a.problem_stages %}
+              <span class="muted hint">· ada peringatan</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="muted">Tidak ada APK yang cocok. <a href="/">Tampilkan semua</a>.</p>
+    {% endif %}
+  </section>
+  {% else %}
   <section class="card empty" aria-labelledby="empty-title">
     <div class="empty-icon">{{ icon('upload', 28) }}</div>
     <h2 id="empty-title">Belum ada APK</h2>
-    <p class="muted" id="upload-note">
-      Upload dan analisis tersedia di tahap berikutnya (M1).
-      Untuk sekarang, pastikan semua layanan di bawah ini normal.
+    <p class="muted">
+      Upload APK pertama Anda untuk dibongkar dengan jadx dan apktool. Hasilnya tersimpan dan bisa dibuka lagi kapan saja.
     </p>
+    <a class="btn btn-primary" href="/upload">{{ icon('upload', 16) }}<span>Upload APK</span></a>
   </section>
+  {% endif %}
 
   <section class="card" aria-labelledby="status-title" {% if status.selftest_pending %}data-poll{% endif %}>
     <div class="card-head">

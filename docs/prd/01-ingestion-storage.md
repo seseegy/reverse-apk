@@ -57,5 +57,6 @@ audit_log      id, ts, action, detail(json)
 - Menghapus analisis mengosongkan seluruh `work/<id>` dan baris terkait.
 
 ## Pertanyaan terbuka
-- [OPEN] SQLite cukup atau langsung Postgres? (usul: SQLite + WAL untuk single-user)
+- [DIPUTUSKAN di M1] SQLite mode WAL, dibagi web dan worker lewat volume `db` (runner tidak punya akses). Skema dimigrasi lewat `PRAGMA user_version` (`services/rvcore/db.py`).
 - [OPEN] Perlu enkripsi at-rest untuk `/data`?
+- [DIPUTUSKAN di M1] Batas ukuran APK 200 MB (`MAX_UPLOAD_MB`). Unggahan berupa badan mentah (octet-stream) dengan metadata di header, bukan multipart, agar bisa di-stream ke disk tanpa melewati tmpfs berbasis RAM.

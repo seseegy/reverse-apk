@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_parts.html" import status_badge, sev %}
+{% set title = an.app_label or an.filename_display %}
+{% block title %}Manifest · {{ title }} · reverse-apk{% endblock %}
+
+{% block header %}{% include "_header.html" %}{% endblock %}
+
+{#- Nilai flag boolean: True/False/None(tidak diset). `note_none` = arti default Android saat tidak diset. -#}
+{% macro flag_row(label, value, risky_when_true, level, note_true, note_none) -%}
+<tr>
+  <th scope="row" class="mono">{{ label }}</th>
+  <td class="mono">
+    {%- if value is none %}tidak diset{% elif value %}true{% else %}false{% endif -%}
+  </td>
+  <td>
+    {%- if value and risky_when_true %}{{ sev(level, {'high': 'TINGGI', 'medium': 'SEDANG', 'low': 'RENDAH', 'info': 'INFO'}[level]) }} <span class="muted">{{ note_true }}</span>
+    {%- elif value is none and note_none %}<span class="muted">{{ note_none }}</span>
+    {%- else %}<span class="muted">–</span>{% endif -%}
+  </td>
+</tr>
+{%- endmacro %}
+
+{% block content %}
+<div class="container page">
+  <a class="back-link" href="/">{{ icon('arrow-left', 16) }}<span>Semua APK</span></a>
+
+  <section class="card head-card" aria-labelledby="an-title">
+    <div class="head-main">
+      <h1 id="an-title" class="break">{{ title }}</h1>
+      <p class="mono muted break">{{ an.package or '(paket belum diketahui)' }}</p>
+    </div>
+    <div class="head-side">{{ status_badge(snap.status) }}</div>
+  </section>
+
+  <nav class="tabs" aria-label="Bagian analisis">
+    <a href="/analyses/{{ an.id }}">Ringkasan</a>
+    <a href="/analyses/{{ an.id }}/manifest" aria-current="page">Manifest</a>
+  </nav>
+
+  {% if not manifest %}
+  <section class="card empty" aria-labelledby="nm-title">
+    <div class="empty-icon">{{ icon('file', 28) }}</div>
+    <h2 id="nm-title">Manifest belum tersedia</h2>
+    <p class="muted">
+      {% if snap.status in ('queued', 'running') %}
+      Manifest muncul setelah tahap apktool selesai. Pantau di tab <a href="/analyses/{{ an.id }}">Ringkasan</a>.
+      {% elif snap.status == 'cancelled' %}
+      Analisis dibatalkan sebelum manifest selesai diringkas.
+      {% else %}
+      Manifest tidak bisa diringkas untuk analisis ini. Lihat log di tab <a href="/analyses/{{ an.id }}">Ringkasan</a>.
+      {% endif %}
+    </p>
+  </section>
+  {% else %}
+  {% set f = manifest.flags or {} %}
+
+  <section class="card" aria-labelledby="id-title">
+    <h2 id="id-title">Identitas</h2>
+    <dl class="dl dl-wide">
+      <div><dt>Paket</dt><dd class="mono break">{{ manifest.package or '–' }}</dd></div>
+      <div><dt>Nama aplikasi</dt><dd>{{ manifest.app_label or '–' }}</dd></div>
+      <div><dt>Versi</dt><dd class="mono">{{ manifest.version_name or '–' }}{% if manifest.version_code %} ({{ manifest.version_code }}){% endif %}</dd></div>
+      <div><dt>SDK</dt><dd class="mono">min {{ manifest.min_sdk or '–' }} · target {{ manifest.target_sdk or '–' }}{% if manifest.compile_sdk %} · compile {{ manifest.compile_sdk }}{% endif %}</dd></div>
+      <div><dt>Activity peluncur</dt><dd class="mono break">{{ manifest.launcher or '–' }}</dd></div>
+      <div><dt>Kelas Application</dt><dd class="mono break">{{ manifest.application_class or '–' }}</dd></div>
+    </dl>
+    {% for w in manifest.warnings or [] %}
+    <div class="alert alert-warn" role="status">{{ icon('alert-triangle') }}<span>{{ w }}</span></div>
+    {% endfor %}
+  </section>
+
+  <section class="card" aria-labelledby="flag-title">
+    <h2 id="flag-title">Flag aplikasi</h2>
+    <p class="muted hint">Tingkat bersifat heuristik (bukan klaim kerentanan). Temuan terperinci hadir di M2.</p>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Flag aplikasi">
+      <table class="table">
+        <thead><tr><th scope="col">Atribut</th><th scope="col">Nilai</th><th scope="col">Catatan</th></tr></thead>
+        <tbody>
+          {{ flag_row('android:debuggable', f.get('debuggable'), true, 'high',
+                      'Bisa dilampiri debugger dan dibaca datanya lewat adb; tidak pantas untuk rilis.', 'default Android: false') }}
+          {{ flag_row('android:allowBackup', f.get('allow_backup'), true, 'low',
+                      'Data aplikasi bisa dicadangkan lewat adb backup.', 'default Android: aktif (true)') }}
+          {{ flag_row('android:usesCleartextTraffic', f.get('uses_cleartext_traffic'), true, 'medium',
+                      'Mengizinkan lalu lintas HTTP tanpa enkripsi.', 'default tergantung targetSdk (≥ 28: diblokir)') }}
+          {{ flag_row('android:testOnly', f.get('test_only'), true, 'medium',
+                      'Build uji; tidak untuk distribusi.', None) }}
+          <tr>
+            <th scope="row" class="mono">android:networkSecurityConfig</th>
+            <td class="mono break">{{ f.get('network_security_config') or 'tidak diset' }}</td>
+            <td>{% if f.get('network_security_config') %}{{ sev('info', 'INFO') }} <span class="muted">Periksa res/xml untuk aturan cleartext dan pinning.</span>{% else %}<span class="muted">–</span>{% endif %}</td>
+          </tr>
+          {{ flag_row('android:requestLegacyExternalStorage', f.get('request_legacy_external_storage'), true, 'low',
+                      'Meminta akses penyimpanan lama (scoped storage dilewati).', None) }}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  {% set perms = manifest.permissions or [] %}
+  {% set n_danger = perms|selectattr('level', 'equalto', 'dangerous')|list|length %}
+  {% set n_special = perms|selectattr('level', 'equalto', 'special')|list|length %}
+  <section class="card" aria-labelledby="perm-title">
+    <div class="card-head">
+      <h2 id="perm-title">Izin yang diminta</h2>
+      <p class="muted hint" role="status" aria-atomic="true">
+        {{ perms|length }} izin · {{ n_danger }} berbahaya · {{ n_special }} khusus
+      </p>
+    </div>
+    {% if perms %}
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Daftar izin">
+      <table class="table table-compact">
+        <thead><tr><th scope="col">Izin</th><th scope="col">Kategori</th></tr></thead>
+        <tbody>
+          {% for p in perms %}
+          <tr>
+            <th scope="row" class="mono break">{{ p.name }}</th>
+            <td>
+              {% if p.level == 'dangerous' %}{{ sev('medium', 'BERBAHAYA') }}
+              {% elif p.level == 'special' %}{{ sev('medium', 'KHUSUS') }}
+              {% else %}<span class="muted">normal / lainnya</span>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="muted">Tidak ada izin yang diminta.</p>
+    {% endif %}
+  </section>
+
+  {% set kinds = [('activity', 'Activity'), ('activity-alias', 'Activity alias'), ('service', 'Service'),
+                  ('receiver', 'Receiver'), ('provider', 'Provider')] %}
+  {% set comps = manifest.components or {} %}
+  {% for key, label in kinds %}
+  {% set items = comps.get(key) or [] %}
+  {% if items %}
+  {% set n_exp = items|selectattr('exported')|list|length %}
+  <section class="card" aria-labelledby="c-{{ key }}">
+    <div class="card-head">
+      <h2 id="c-{{ key }}">{{ label }}</h2>
+      <p class="muted hint" role="status" aria-atomic="true">{{ items|length }} komponen · {{ n_exp }} exported</p>
+    </div>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Daftar {{ label }}">
+      <table class="table table-compact">
+        <thead><tr><th scope="col">Nama</th><th scope="col">Exported</th><th scope="col">Izin pelindung</th><th scope="col">Intent filter</th></tr></thead>
+        <tbody>
+          {% for c in items|sort(attribute='exported', reverse=true) %}
+          <tr>
+            <th scope="row" class="mono break">
+              {{ c.name or '?' }}
+              {% if c.launcher %}<span class="chip">LAUNCHER</span>{% endif %}
+              {% if c.authorities %}<span class="muted file-sub">authorities: {{ c.authorities }}</span>{% endif %}
+              {% if c.target %}<span class="muted file-sub">→ {{ c.target }}</span>{% endif %}
+            </th>
+            <td>
+              {% if c.exported and not c.permission and not c.launcher %}{{ sev('medium', 'EXPORTED') }}
+              {% elif c.exported %}{{ sev('info', 'EXPORTED') }}
+              {% else %}<span class="muted">tidak</span>{% endif %}
+              {% if c.exported %}<span class="muted file-sub">{{ {'explicit': 'eksplisit', 'intent-filter': 'karena intent-filter', 'default': 'default'}.get(c.exported_source, '') }}</span>{% endif %}
+            </td>
+            <td class="mono break">{{ c.permission or '–' }}</td>
+            <td class="mono break">
+              {% for fl in c.filters %}
+              <div class="filter-line">
+                {{ (fl.actions + fl.categories + fl.data)|join(' · ') or '(kosong)' }}
+              </div>
+              {% else %}–{% endfor %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% endif %}
+  {% endfor %}
+  {% endif %}
+</div>
+{% endblock %}

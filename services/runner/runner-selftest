@@ -74,4 +74,34 @@ for host in ("1.1.1.1", "8.8.8.8"):
         pass
 report(not reachable, "jaringan terisolasi", "koneksi keluar gagal (benar)" if not reachable else "internet TERJANGKAU")
 
+# 5. Tool benar-benar bisa BEKERJA di rootfs read-only (bukan sekadar `--version`).
+#    Regresi M0: JVM mengabaikan $HOME dan memakai home dari /etc/passwd (read-only), sehingga dekompilasi
+#    sungguhan gagal padahal `--version` lolos. Di sini kedua tool dijalankan pada arsip sampah; galat yang
+#    DIHARAPKAN adalah galat parsing, bukan galat lingkungan.
+import tempfile
+import zipfile
+
+ENV_ERRORS = ("Read-only file system", "Could not create framework directory", "Failed to init common directories")
+work = tempfile.mkdtemp(prefix="selftest-", dir=os.environ.get("HOME", "/tmp/home"))
+junk = os.path.join(work, "junk.apk")
+with zipfile.ZipFile(junk, "w") as zf:
+    zf.writestr("AndroidManifest.xml", b"\x00junk" * 20)
+    zf.writestr("classes.dex", b"dex\n035\x00" + b"\xff" * 64)
+tool_env = {
+    "PATH": os.environ.get("PATH", ""),
+    "HOME": work,
+    "JADX_OPTS": f"-Xmx512m -Duser.home={work} -Djava.io.tmpdir=/tmp",
+}
+for label, cmd in (
+    ("apktool dapat bekerja", ["apktool", "d", "-f", "-o", os.path.join(work, "o1"), junk]),
+    ("jadx dapat bekerja", ["jadx", "-d", os.path.join(work, "o2"), junk]),
+):
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=tool_env, stdin=subprocess.DEVNULL)
+        text = out.stdout + out.stderr
+        bad = [e for e in ENV_ERRORS if e in text]
+        report(not bad, label, "tidak ada galat lingkungan" if not bad else "galat lingkungan: " + ", ".join(bad))
+    except Exception as exc:  # noqa: BLE001
+        report(False, label, f"{type(exc).__name__}: {exc}")
+
 sys.exit(1 if failed else 0)

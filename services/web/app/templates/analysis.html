@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_parts.html" import state_sprite, state_icon, status_badge, time_el, notice_box %}
+{% set title = an.app_label or an.filename_display %}
+{% block title %}{{ title }} · reverse-apk{% endblock %}
+
+{% block header %}{% include "_header.html" %}{% endblock %}
+
+{% block content %}
+<div class="container page">
+  {{ state_sprite() }}
+
+  <a class="back-link" href="/">{{ icon('arrow-left', 16) }}<span>Semua APK</span></a>
+
+  {{ notice_box(notice) }}
+
+  <section class="card head-card" aria-labelledby="an-title">
+    <div class="head-main">
+      <h1 id="an-title" class="break">{{ title }}</h1>
+      <p class="mono muted break">
+        {{ an.package or '(paket belum diketahui)' }}
+        {% if an.version_name %} · v{{ an.version_name }}{% endif %}
+        {% if an.version_code %} ({{ an.version_code }}){% endif %}
+      </p>
+    </div>
+    <div class="head-side">
+      <div id="status-badge" data-badge>{{ status_badge(snap.status) }}</div>
+      <div class="btn-row">
+        {% if snap.status in ('queued', 'running') %}
+        <form method="post" action="/analyses/{{ an.id }}/cancel" data-submit-lock>
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="btn btn-ghost btn-sm" {% if snap.cancel_requested %}disabled{% endif %}>
+            {{ icon('x', 16) }}<span>Batalkan</span>
+          </button>
+        </form>
+        {% else %}
+        <form method="post" action="/analyses/{{ an.id }}/retry"
+              data-confirm="{{ 'Jalankan ulang analisis? Hasil dekompilasi saat ini akan dihapus dan dibuat ulang.' if snap.status == 'done' else '' }}"
+              data-submit-lock>
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="btn btn-ghost btn-sm">
+            {{ icon('refresh', 16) }}<span>{{ 'Analisis ulang' if snap.status == 'done' else 'Coba lagi' }}</span>
+          </button>
+        </form>
+        <form method="post" action="/apks/{{ an.apk_id }}/delete"
+              data-confirm="Hapus APK ini beserta seluruh hasil analisisnya? Tindakan ini tidak bisa dibatalkan.">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="btn btn-danger btn-sm">
+            {{ icon('trash', 16) }}<span>Hapus</span>
+          </button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+  </section>
+
+  <nav class="tabs" aria-label="Bagian analisis">
+    <a href="/analyses/{{ an.id }}"{% if tab == 'summary' %} aria-current="page"{% endif %}>Ringkasan</a>
+    <a href="/analyses/{{ an.id }}/manifest"{% if tab == 'manifest' %} aria-current="page"{% endif %}>Manifest</a>
+  </nav>
+
+  <section class="card" aria-labelledby="pipe-title"
+           data-live data-analysis-id="{{ an.id }}" data-status="{{ snap.status }}"
+           data-terminal="{{ 'true' if snap.terminal else 'false' }}"
+           data-started="{{ snap.started_at or '' }}" data-finished="{{ snap.finished_at or '' }}"
+           data-server-now="{{ snap.server_now }}">
+    <div class="card-head">
+      <h2 id="pipe-title">Pipeline</h2>
+      <span class="muted hint">Percobaan ke-{{ snap.attempt }} · <span data-elapsed></span></span>
+    </div>
+
+    <p class="summary summary-{{ 'error' if snap.status == 'failed' else 'ok' }}" role="status" aria-atomic="true">
+      <span data-summary>{{ snap.summary }}</span>
+    </p>
+
+    <ol class="stepper" aria-label="Tahap pipeline" data-steps>
+      {% for s in snap.steps %}
+      <li class="step" data-key="{{ s.key }}" data-state="{{ s.state }}">
+        <span class="step-icon">{{ state_icon(s.state, 22) }}</span>
+        <span class="step-body">
+          <span class="step-label">{{ s.label }}</span>
+          <span class="step-state">{{ s.state_label }}</span>
+          <span class="step-detail muted" data-detail>{{ s.detail or '' }}</span>
+        </span>
+      </li>
+      {% endfor %}
+    </ol>
+
+    <div class="alert alert-error" role="alert" data-error {% if not snap.error %}hidden{% endif %}>
+      {{ icon('x-circle') }}
+      <span data-error-text>{{ snap.error or '' }}</span>
+    </div>
+
+    <h3 class="log-title" id="log-title">Log job</h3>
+    <ol class="log" aria-labelledby="log-title" aria-live="off" tabindex="0" data-log>
+      {% for l in snap.logs %}
+      <li class="log-line log-{{ l.level }}">
+        <time class="log-time" data-ts="{{ l.ts }}">{{ l.ts|hms }}</time>
+        <span class="log-level">{{ l.level|upper }}</span>
+        <span class="log-msg">{% if l.stage %}[{{ l.stage }}] {% endif %}{{ l.message }}</span>
+      </li>
+      {% endfor %}
+      <li class="log-empty muted" data-log-empty {% if snap.logs %}hidden{% endif %}>Belum ada log.</li>
+    </ol>
+  </section>
+
+  <div class="grid-2">
+    <section class="card" aria-labelledby="meta-title">
+      <h2 id="meta-title">Berkas</h2>
+      <dl class="dl">
+        <div><dt>Nama</dt><dd class="break">{{ an.filename_display }}</dd></div>
+        <div><dt>Ukuran</dt><dd class="mono">{{ an.size|bytes }} <span class="muted">({{ '{:,}'.format(an.size) }} B)</span></dd></div>
+        <div><dt>SHA-256</dt><dd class="mono break">{{ an.sha256 }}</dd></div>
+        <div><dt>MD5</dt><dd class="mono break">{{ an.md5 }}</dd></div>
+        <div><dt>Diunggah</dt><dd>{{ time_el(an.apk_created_at) }}</dd></div>
+        <div><dt>SDK</dt><dd class="mono">min {{ an.min_sdk or '–' }} · target {{ an.target_sdk or '–' }}</dd></div>
+        <div><dt>Opsi</dt><dd>jadx <span class="mono">--deobf</span>: {{ 'aktif' if options.get('deobf') else 'mati' }}</dd></div>
+      </dl>
+    </section>
+
+    <section class="card" aria-labelledby="art-title">
+      <h2 id="art-title">Artefak &amp; alat</h2>
+      {% if artifacts %}
+      <ul class="plain-list">
+        {% for a in artifacts %}
+        <li>
+          <span class="mono">{{ a.path }}/</span>
+          <span class="muted">{{ '{:,}'.format(a.files) }} berkas · {{ a.size|bytes }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="muted">Belum ada artefak{% if snap.status in ('queued', 'running') %} (menunggu pipeline selesai){% endif %}.</p>
+      {% endif %}
+      {% if versions %}
+      <h3 class="sub-title">Versi alat</h3>
+      <ul class="plain-list">
+        {% for k in ('apktool', 'jadx') if versions.get(k) %}
+        <li><span class="mono">{{ k }} {{ versions[k].version or '' }}</span>
+          {% if versions[k].duration_s is not none %}<span class="muted">{{ versions[k].duration_s }} dtk</span>{% endif %}</li>
+        {% endfor %}
+        {% if versions.get('java') %}<li><span class="mono">{{ versions['java'] }}</span></li>{% endif %}
+      </ul>
+      {% endif %}
+    </section>
+  </div>
+</div>
+{% endblock %}

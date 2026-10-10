@@ -62,11 +62,32 @@ Biasanya selesai dalam beberapa detik. Lalu buka **https://apk.revers3.my.id**.
 1. Login dengan `admin` dan password tadi.
 2. Di kartu **Status sistem**, semua baris harus *Normal*.
 3. Tekan **Uji antrean** → baris *Antrean* menjadi "uji berhasil".
-4. Uji isolasi alat dekompilasi:
+4. Baris **Runner** juga harus *Normal* ("siaga (tanpa jaringan)").
+5. Uji isolasi dan kemampuan alat dekompilasi:
    ```bash
    make runner-selftest
    ```
-   Semua baris harus `[OK ]`, termasuk "jaringan terisolasi" dan "rootfs read-only". Perintah ini keluar dengan kode 0 hanya jika semua lulus.
+   Semua baris harus `[OK ]`: termasuk "jaringan terisolasi", "rootfs read-only", dan "apktool/jadx dapat bekerja"
+   (menjalankan alat sungguhan, bukan hanya `--version`). Perintah ini keluar dengan kode 0 hanya jika semua lulus.
+6. Uji alur utama: buka **Upload**, pilih sebuah APK (centang pernyataan otorisasi), dan pastikan halaman analisis
+   menampilkan tahap *Validasi → apktool → jadx → Selesai* secara live.
+
+## Upload besar dan Cloudflare
+Batas ukuran APK diatur `MAX_UPLOAD_MB` di `.env` (bawaan 200). Nilai yang sama dipakai aplikasi dan Caddy.
+Jika proxy Cloudflare (awan oranye) dinyalakan, paket gratis membatasi body request ~100 MB sehingga APK yang
+lebih besar gagal di tepi; gunakan "DNS only" untuk host ini atau naikkan paket.
+
+## Data dan volume
+| Volume | Isi | Diakses oleh |
+|--------|-----|--------------|
+| `uploads` | APK asli `<sha256>.apk` (read-only setelah tervalidasi) | web (rw), worker & runner (ro) |
+| `work` | hasil per analisis: `jadx/`, `apktool/`, `logs/`, `manifest.json` | web, worker, runner |
+| `db` | SQLite (mode WAL) | web, worker — **runner tidak punya akses** |
+| `spool` | antrean berkas worker → runner | worker, runner |
+
+SQLite mode WAL membutuhkan filesystem lokal host (volume Docker biasa). Jangan memetakan `db` ke NFS/SMB.
+Hasil dekompilasi bisa besar (puluhan–ratusan MB per APK): pantau kartu **Disk data** di dashboard.
+Upload ditolak otomatis bila sisa disk < `MIN_FREE_GB` (bawaan 15 GB).
 
 ## Operasi harian
 | Tujuan | Perintah |
@@ -91,6 +112,12 @@ docker compose logs caddy | tail -50
 **Login selalu gagal** → `docker compose logs web | tail`. Pesan "Password admin belum diatur" berarti file `secrets/admin_password_hash` kosong.
 
 **Terkunci karena terlalu banyak percobaan** → tunggu 15 menit, atau `docker compose restart web` (pembatas disimpan di memori).
+
+**Status "Runner" merah / analisis macet di "Antre"** → `docker compose logs runner`. Runner sengaja keluar setelah
+setiap job lalu dimulai ulang oleh Docker (`RUNNER_RECYCLE=1`), jadi baris `daur ulang` di log itu normal. Jika
+job tidak diambil dalam 2 menit, analisis gagal dengan kode `runner_unavailable`.
+
+**Analisis berstatus "Gagal: terputus"** → worker/server dimulai ulang saat job berjalan. Tekan **Coba lagi**.
 
 **Status "Worker" merah** → `docker compose logs worker`; biasanya Redis belum sehat. `make ps` harus menunjukkan semua `healthy`.
 

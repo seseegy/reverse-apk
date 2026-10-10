@@ -46,6 +46,24 @@ APK **tidak pernah** dieksekusi, di-install, atau dimuat di emulator.
 - Dari dalam container worker, `curl https://example.com` gagal (tidak ada jaringan).
 - Dua job bersamaan tidak melebihi batas RAM total yang ditetapkan.
 
+## Kebijakan kegagalan (M1)
+| Kondisi | Hasil |
+|---------|-------|
+| Timeout tahap, batas keluaran terlampaui, runner mati | Analisis **gagal** (`timeout` / `output_limit` / `runner_unavailable`) |
+| jadx keluar non-nol tetapi ada source Java | Tahap `peringatan`, analisis tetap lanjut (FR-2.3) |
+| jadx keluar 0 tetapi **tidak ada** source Java | Tahap **gagal** (dex rusak; exit 0 saja menyesatkan) |
+| Satu tool gagal, yang lain berhasil | Analisis `selesai` dengan peringatan |
+| Kedua tool gagal | Analisis **gagal** (`tool_error`) |
+| Worker/server restart saat job berjalan | `failed: interrupted`, bisa **Coba lagi** (NFR-2.3) |
+| Runner restart saat tahap berjalan | Tahap diulang otomatis 1× (FR-2.7), lalu gagal bila terulang |
+
+## Catatan teknis
+- JVM mengabaikan `$HOME` dan memakai home dari `/etc/passwd`; pada rootfs read-only, jadx/apktool gagal total.
+  Runner memaksa `-Duser.home` ke direktori tmpfs per-job. `make runner-selftest` kini menjalankan kedua alat
+  (bukan hanya `--version`) agar regresi ini tertangkap.
+
 ## Pertanyaan terbuka
-- [OPEN] Pakai Docker-in-Docker/socket host untuk spawn container job, atau worker long-running yang sudah terisolasi? (usul: worker memanggil `docker run` lewat socket-proxy terbatas)
+- [DIPUTUSKAN di M1] Tidak memakai Docker socket sama sekali. Service `runner` terpisah (tanpa jaringan, Redis, atau DB) menerima job lewat volume `spool` berbasis berkas (`services/rvcore/spool.py`). Alasan: socket-proxy tidak bisa membatasi *isi* `create container`, sehingga kompromi worker setara root di host.
+  - **Penyimpangan dari "container sekali pakai"**: runner satu proses yang memproses job berurutan (1 job paralel). Untuk mendekati isolasi sekali pakai, runner **keluar setelah tiap job** dan Docker memulai container baru (`RUNNER_RECYCLE=1`): tmpfs, memori, dan proses bersih. Setiap tool berjalan di process group sendiri yang dimatikan seluruhnya saat timeout/batal.
+  - Paralelisme 2 job (FR-2.1) belum diaktifkan; menambah instance runner kedua adalah langkah berikutnya bila diperlukan.
 - [OPEN] Perlu `dex2jar`/CFR sebagai pembanding bila jadx gagal pada method tertentu?

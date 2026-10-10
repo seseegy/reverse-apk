@@ -11,6 +11,8 @@ from urllib.parse import quote
 log = logging.getLogger("reverse-apk.config")
 
 MIN_SECRET_LEN = 32
+MIB = 1024 * 1024
+GIB = 1024 * MIB
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -40,6 +42,15 @@ class Settings:
     login_window: int
     login_lock: int
     disk_warn_percent: int
+    # --- upload & validasi (01-ingestion-storage)
+    max_upload_bytes: int
+    min_free_bytes: int
+    zip_max_entries: int
+    zip_max_total_uncompressed: int
+    zip_max_entry_uncompressed: int
+    zip_max_ratio: int
+    # --- pipeline (diteruskan ke worker lewat env yang sama; di web hanya dipakai untuk antrean)
+    job_timeout: int
 
     @property
     def session_cookie(self) -> str:
@@ -53,7 +64,9 @@ class Settings:
     def load_password_hash(self) -> str | None:
         try:
             value = self.admin_password_hash_file.read_text(encoding="utf-8").strip()
-        except FileNotFoundError:
+        except OSError:
+            # Tidak ada / direktori (compose membuat direktori bila sumber bind-mount belum ada) / tak terbaca:
+            # jangan crash saat startup; login akan gagal dan peringatan jelas dicatat di log.
             return None
         return value or None
 
@@ -88,4 +101,11 @@ def load_settings() -> Settings:
         login_window=_int("LOGIN_WINDOW", 15 * 60),
         login_lock=_int("LOGIN_LOCK", 15 * 60),
         disk_warn_percent=_int("DISK_WARN_PERCENT", 80),
+        max_upload_bytes=_int("MAX_UPLOAD_MB", 200) * MIB,
+        min_free_bytes=_int("MIN_FREE_GB", 15) * GIB,
+        zip_max_entries=_int("ZIP_MAX_ENTRIES", 100_000),
+        zip_max_total_uncompressed=_int("ZIP_MAX_UNCOMPRESSED_MB", 3072) * MIB,
+        zip_max_entry_uncompressed=_int("ZIP_MAX_ENTRY_MB", 512) * MIB,
+        zip_max_ratio=_int("ZIP_MAX_RATIO", 100),
+        job_timeout=_int("JOB_TIMEOUT", 2700),
     )
