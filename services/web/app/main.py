@@ -1,25 +1,33 @@
-"""Aplikasi web reverse-apk (M0): login, dashboard status, uji antrean."""
+"""Aplikasi web reverse-apk: login, dashboard APK, upload, status analisis, uji antrean."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import mimetypes
-from pathlib import Path
 
 import redis
 from fastapi import FastAPI, Form, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 
 from . import status as system_status
-from .config import load_settings
+from .context import (
+    BASE_DIR,
+    client_ip,
+    current_session,
+    init_storage,
+    limiter,
+    redis_conn,
+    render,
+    sessions,
+    set_cookie,
+    settings,
+)
+from .routes_apk import router as apk_router
 from .security import (
-    LoginLimiter,
     Session,
-    SessionManager,
     new_token,
     tokens_equal,
     verify_password,
@@ -31,17 +39,11 @@ log = logging.getLogger("reverse-apk")
 # Image slim tidak selalu punya /etc/mime.types lengkap; daftarkan font secara eksplisit.
 mimetypes.add_type("font/woff2", ".woff2")
 
-BASE_DIR = Path(__file__).resolve().parent
-settings = load_settings()
-sessions = SessionManager(settings.secret_key, settings.session_max_age)
-limiter = LoginLimiter(settings.login_max_fails, settings.login_window, settings.login_lock)
-templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
-redis_conn = redis.Redis.from_url(
-    settings.redis_url, socket_connect_timeout=2, socket_timeout=2, health_check_interval=30
-)
+init_storage()  # direktori data + migrasi skema; gagal cepat bila volume tidak bisa ditulis
 
 app = FastAPI(title="reverse-apk", docs_url=None, redoc_url=None, openapi_url=None)
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+app.include_router(apk_router)
 
 if settings.load_password_hash() is None:
     log.warning(
@@ -67,36 +69,14 @@ async def security_headers(request: Request, call_next):
     h["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=()"
     h["Cross-Origin-Opener-Policy"] = "same-origin"
     h["X-Robots-Tag"] = "noindex, nofollow, noarchive"
-    if not request.url.path.startswith("/static/"):
+    # Jangan menimpa Cache-Control yang sudah ditetapkan rute (SSE memakai "no-store, no-transform").
+    if not request.url.path.startswith("/static/") and "cache-control" not in h:
         h["Cache-Control"] = "no-store"
     return response
 
 
 # ---------------------------------------------------------------- helpers
-
-
-def client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
-
-
-def current_session(request: Request) -> Session | None:
-    return sessions.loads(request.cookies.get(settings.session_cookie))
-
-
-def set_cookie(response: Response, name: str, value: str, max_age: int) -> None:
-    response.set_cookie(
-        name,
-        value,
-        max_age=max_age,
-        path="/",
-        httponly=True,
-        secure=settings.cookie_secure,
-        samesite="strict",
-    )
-
-
-def render(request: Request, name: str, context: dict, status_code: int = 200) -> Response:
-    return templates.TemplateResponse(request, name, context, status_code=status_code)
+# client_ip, current_session, set_cookie, render ada di context.py (dipakai bersama routes_apk.py).
 
 
 def login_page(
@@ -204,19 +184,7 @@ async def logout(request: Request, csrf: str = Form("", max_length=256)) -> Resp
     return RedirectResponse("/login" if not session else "/", status_code=303)
 
 
-@app.get("/", include_in_schema=False)
-async def dashboard(request: Request) -> Response:
-    session = current_session(request)
-    if not session:
-        return RedirectResponse("/login", status_code=303)
-    status = await run_in_threadpool(
-        system_status.collect, redis_conn, settings.data_dir, settings.disk_warn_percent
-    )
-    return render(
-        request,
-        "dashboard.html",
-        {"user": session.user, "csrf": session.csrf, "status": status},
-    )
+# Dashboard "/" ada di routes_apk.py (daftar APK + status sistem).
 
 
 @app.post("/selftest", include_in_schema=False)

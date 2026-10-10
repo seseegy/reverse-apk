@@ -1,0 +1,17 @@
+{% from "_icons.html" import icon %}
+<header class="site-header">
+  <div class="container header-row">
+    <a class="brand" href="/">reverse-apk</a>
+    <nav aria-label="Navigasi utama">
+      <a href="/"{% if nav == 'dashboard' %} aria-current="page"{% endif %}>Dashboard</a>
+      <a href="/upload"{% if nav == 'upload' %} aria-current="page"{% endif %}>Upload</a>
+    </nav>
+    <form method="post" action="/logout" class="header-user">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <span class="muted" title="Masuk sebagai">{{ user }}</span>
+      <button type="submit" class="btn btn-ghost btn-sm">
+        {{ icon('log-out', 16) }}<span>Keluar</span>
+      </button>
+    </form>
+  </div>
+</header>

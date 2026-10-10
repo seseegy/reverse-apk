@@ -1,3 +1,4 @@
+# Konteks build = ./services (agar paket bersama `rvcore` ikut tersalin); lihat docker-compose.yml.
 FROM python:3.12-slim-trixie
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -7,14 +8,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_ROOT_USER_ACTION=ignore
 
 RUN groupadd --system --gid 10001 app \
- && useradd --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app
+ && useradd --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app \
+ && mkdir -p /data/uploads /data/work /data/db /data/spool \
+ && chown -R 10001:10001 /data
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY worker/requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY worker.py tasks.py healthcheck.py ./
+COPY rvcore ./rvcore
+COPY worker/worker.py worker/tasks.py worker/healthcheck.py worker/pipeline.py \
+     worker/logtail.py worker/manifest.py ./
 
 USER 10001:10001
 

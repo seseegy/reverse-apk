@@ -2,8 +2,9 @@
 .env
 secrets/
 
-# Data runtime
+# Data runtime & berkas uji
 data/
+testdata/
 *.apk
 *.xapk
 *.apks

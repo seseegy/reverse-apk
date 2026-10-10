@@ -53,7 +53,7 @@ Tailscale/Cloudflare ──► Caddy :443 ──► web (FastAPI) ──► redi
 | Supply chain (image, dependency, skill eksternal) | Pin versi + hash, build image terkontrol, skill di-vendor pada commit tertentu & ditinjau (04) |
 
 ## Docker socket
-Worker perlu memulai container job. Jangan mount `/var/run/docker.sock` mentah ke service yang terpapar jaringan. Gunakan salah satu: `docker-socket-proxy` dengan izin minimal, atau runner terpisah yang hanya menerima job dari antrian lokal. [OPEN]
+Worker perlu memulai container job. Jangan mount `/var/run/docker.sock` mentah ke service yang terpapar jaringan. [DIPUTUSKAN di M1] Dipilih **runner terpisah yang menerima job dari antrian lokal** (volume `spool`), tanpa Docker socket di service mana pun. Lihat 02-decompile-pipeline.md.
 
 ## Kebutuhan non-fungsional
 - NFR-7.1: Pemulihan dari reboot VPS tanpa intervensi (≤ 2 menit stack kembali).

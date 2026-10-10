@@ -25,6 +25,7 @@ services:
       - "443:443/udp"
     environment:
       APP_DOMAIN: ${APP_DOMAIN:?isi APP_DOMAIN di .env}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-200}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -37,7 +38,9 @@ services:
 
   # ------------------------------------------------------------------ Aplikasi web
   web:
-    build: ./services/web
+    build:
+      context: ./services
+      dockerfile: web/Dockerfile
     <<: *hardening
     read_only: true
     tmpfs:
@@ -50,10 +53,15 @@ services:
       REDIS_HOST: redis
       REDIS_PASSWORD: ${REDIS_PASSWORD:?jalankan `make init`}
       DATA_DIR: /data
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-200}
+      MIN_FREE_GB: ${MIN_FREE_GB:-15}
+      JOB_TIMEOUT: ${JOB_TIMEOUT:-2700}
     secrets:
       - admin_password_hash
     volumes:
-      - appdata:/data
+      - uploads:/data/uploads
+      - work:/data/work
+      - db:/data/db
     networks: [edge, backend]
     depends_on:
       redis:
@@ -63,15 +71,18 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 15s
     mem_limit: 512m
     pids_limit: 256
 
   # ------------------------------------------------------------------ Worker antrean
   # Hanya di jaringan `backend` (internal, tanpa akses internet). Akses ke DeepSeek
-  # ditambahkan di M3 lewat jaringan terpisah. Alat dekompilasi TIDAK ada di sini.
+  # ditambahkan di M3 lewat jaringan terpisah. Alat dekompilasi TIDAK ada di sini:
+  # worker menitipkan job ke `runner` lewat volume `spool` (tanpa Docker socket).
   worker:
-    build: ./services/worker
+    build:
+      context: ./services
+      dockerfile: worker/Dockerfile
     <<: *hardening
     read_only: true
     tmpfs:
@@ -79,16 +90,28 @@ services:
     environment:
       REDIS_HOST: redis
       REDIS_PASSWORD: ${REDIS_PASSWORD:?jalankan `make init`}
+      DATA_DIR: /data
+      TIMEOUT_APKTOOL: ${TIMEOUT_APKTOOL:-300}
+      TIMEOUT_JADX: ${TIMEOUT_JADX:-900}
+      JOB_TIMEOUT: ${JOB_TIMEOUT:-2700}
+    volumes:
+      - uploads:/data/uploads:ro
+      - work:/data/work
+      - db:/data/db
+      - spool:/data/spool
     networks: [backend]
     depends_on:
       redis:
+        condition: service_healthy
+      # web membuat/menyiapkan isi volume (izin & skema DB) lebih dulu.
+      web:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "healthcheck.py"]
       interval: 15s
       timeout: 5s
       retries: 3
-      start_period: 15s
+      start_period: 20s
     mem_limit: 512m
     pids_limit: 256
 
@@ -116,21 +139,41 @@ services:
       retries: 5
     mem_limit: 320m
 
-  # ------------------------------------------------------------------ Runner (alat dekompilasi)
-  # Tidak ikut `up`. Dipakai untuk uji isolasi: `make runner-selftest`.
-  # Opsi di bawah adalah opsi isolasi yang sama untuk job dekompilasi di M1.
+  # ------------------------------------------------------------------ Runner (jadx + apktool)
+  # Satu-satunya tempat yang mem-parsing APK tak tepercaya. TANPA JARINGAN, tanpa Redis, tanpa DB, tanpa
+  # Docker socket: hanya melihat APK (read-only), direktori kerja, dan spool job. Setelah tiap job, daemon
+  # keluar dan Docker memulai container baru (RUNNER_RECYCLE) sehingga tiap job berjalan di lingkungan bersih.
   runner:
-    build: ./services/runner
-    profiles: ["tools"]
+    build:
+      context: ./services
+      dockerfile: runner/Dockerfile
+    restart: unless-stopped
     init: true
     network_mode: none
     read_only: true
-    user: "10002:10002"
+    user: "10001:10001"
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
     tmpfs:
       - /tmp:rw,size=256m,nosuid
+    environment:
+      DATA_DIR: /data
+      RUNNER_RECYCLE: ${RUNNER_RECYCLE:-1}
+      MAX_OUTPUT_MB: ${MAX_OUTPUT_MB:-3072}
+    volumes:
+      - uploads:/data/uploads:ro
+      - work:/data/work
+      - spool:/data/spool
+    depends_on:
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "runner-daemon", "--health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     mem_limit: 3g
     cpus: 2
     pids_limit: 512
@@ -143,7 +186,10 @@ networks:
     internal: true
 
 volumes:
-  appdata:
+  uploads:   # APK asli (<sha256>.apk); web rw, worker & runner ro
+  work:      # hasil per analisis (jadx/, apktool/, logs/, manifest.json)
+  db:        # SQLite (WAL); hanya web & worker — runner TIDAK punya akses
+  spool:     # antrean berkas worker -> runner; hanya worker & runner
   redisdata:
   caddy_data:
   caddy_config:

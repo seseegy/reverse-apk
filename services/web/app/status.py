@@ -14,6 +14,7 @@ from rq.exceptions import NoSuchJobError
 from rq.job import Job
 
 HEARTBEAT_KEY = "worker:heartbeat"
+RUNNER_HEARTBEAT_KEY = "runner:heartbeat"
 SELFTEST_KEY = "selftest:last"
 QUEUE_NAME = "jobs"
 HEARTBEAT_STALE_AFTER = 30  # detik; worker mengirim tiap 10 detik dengan TTL 30
@@ -83,6 +84,26 @@ def _check_worker(conn: redis.Redis) -> Check:
     return Check("worker", "Worker", "ok", f"aktif (heartbeat {age} dtk lalu)")
 
 
+def _check_runner(conn: redis.Redis) -> Check:
+    """Runner tidak punya jaringan, jadi detak jantungnya diteruskan worker ke Redis."""
+    try:
+        raw = conn.get(RUNNER_HEARTBEAT_KEY)
+    except redis.RedisError:
+        return Check("runner", "Runner", "error", "tidak bisa dicek (Redis bermasalah)")
+    if not raw:
+        return Check("runner", "Runner", "error", "tidak aktif — jadx/apktool tidak bisa dijalankan")
+    try:
+        beat = json.loads(raw)
+        age = max(0, int(time.time() - float(beat["ts"])))
+    except (ValueError, KeyError, TypeError):
+        return Check("runner", "Runner", "error", "data heartbeat tidak valid")
+    if age > HEARTBEAT_STALE_AFTER:
+        return Check("runner", "Runner", "error", f"terakhir terlihat {age} detik lalu")
+    if beat.get("state") == "busy":
+        return Check("runner", "Runner", "ok", "sedang memproses job")
+    return Check("runner", "Runner", "ok", "siaga (tanpa jaringan)")
+
+
 def _check_queue(conn: redis.Redis) -> tuple[Check, bool]:
     """Hasil uji antrean terakhir. Mengembalikan (Check, sedang_menunggu)."""
     try:
@@ -127,12 +148,14 @@ def collect(conn: redis.Redis, data_dir: Path, disk_warn_percent: int) -> System
     status.checks.append(redis_check)
     if redis_check.state == "ok":
         status.checks.append(_check_worker(conn))
+        status.checks.append(_check_runner(conn))
         queue_check, pending = _check_queue(conn)
         status.checks.append(queue_check)
         status.selftest_pending = pending
     else:
         # Jangan menunggu timeout berulang kali bila Redis sudah terbukti mati.
         status.checks.append(Check("worker", "Worker", "error", "tidak bisa dicek (Redis mati)"))
+        status.checks.append(Check("runner", "Runner", "error", "tidak bisa dicek (Redis mati)"))
         status.checks.append(Check("queue", "Antrean", "error", "tidak bisa dicek (Redis mati)"))
     status.checks.append(_check_disk(data_dir, disk_warn_percent))
     return status

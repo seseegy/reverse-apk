@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}Upload APK · reverse-apk{% endblock %}
+
+{% block header %}{% include "_header.html" %}{% endblock %}
+
+{% block content %}
+<div class="container page page-narrow">
+  <div class="page-head">
+    <h1>Upload APK</h1>
+  </div>
+
+  <noscript>
+    <div class="alert alert-error" role="alert">
+      {{ icon('x-circle') }}<span>Upload membutuhkan JavaScript (untuk progres dan pengiriman berkas besar). Aktifkan JavaScript lalu muat ulang halaman.</span>
+    </div>
+  </noscript>
+
+  <form id="upload-form" class="card stack" novalidate data-csrf="{{ csrf }}" data-max-mb="{{ max_mb }}">
+
+    <div id="upload-errors" class="alert alert-error" role="alert" tabindex="-1" hidden>
+      {{ icon('x-circle') }}
+      <div>
+        <strong id="upload-errors-title">Periksa isian berikut</strong>
+        <ul id="upload-errors-list" class="error-list"></ul>
+      </div>
+    </div>
+
+    <div class="field">
+      <span class="label" id="file-label">Berkas APK</span>
+      <div class="dropzone" id="dropzone" data-dropzone>
+        <span class="dropzone-icon">{{ icon('upload', 28) }}</span>
+        <p><strong>Seret APK ke sini</strong> atau pilih dari perangkat Anda.</p>
+        <input id="file" name="file" type="file" accept=".apk,application/vnd.android.package-archive"
+               class="file-input" aria-labelledby="file-label" aria-describedby="file-help file-error">
+        <label for="file" class="btn btn-ghost">{{ icon('file', 16) }}<span>Pilih berkas</span></label>
+        <p class="muted hint" id="file-help">Hanya <span class="mono">.apk</span>, maksimal {{ max_mb }} MB.
+          XAPK/APKS belum didukung.</p>
+        <p id="file-info" class="file-info mono" role="status" aria-atomic="true"></p>
+      </div>
+      <p class="field-error" id="file-error" hidden></p>
+    </div>
+
+    <div class="field">
+      <label class="check" for="authorized">
+        <input id="authorized" name="authorized" type="checkbox" aria-describedby="authorized-error">
+        <span>Saya berwenang menganalisis berkas ini (milik sendiri, CTF, atau riset keamanan yang berizin).
+          <span class="muted">Pernyataan ini dicatat di audit log.</span></span>
+      </label>
+      <p class="field-error" id="authorized-error" hidden></p>
+    </div>
+
+    <fieldset class="field fieldset">
+      <legend>Opsi</legend>
+      <label class="check" for="opt-deobf">
+        <input id="opt-deobf" name="deobf" type="checkbox">
+        <span>Aktifkan deobfuscation jadx <span class="mono">--deobf</span>
+          <span class="muted">— berguna untuk APK yang dikaburkan; sedikit lebih lambat.</span></span>
+      </label>
+    </fieldset>
+
+    <div id="upload-progress-box" class="progress-box" hidden>
+      <label for="upload-progress" class="sr-only">Progres upload</label>
+      <progress id="upload-progress" max="100" value="0"></progress>
+      <p id="upload-status" class="muted" role="status" aria-atomic="true"></p>
+    </div>
+
+    <div id="dup-box" class="alert alert-info" role="alert" tabindex="-1" hidden>
+      {{ icon('info') }}
+      <div class="dup-body">
+        <p><strong>Berkas ini sudah pernah diunggah.</strong>
+          <span id="dup-name" class="mono"></span></p>
+        <p class="muted">Tidak ada salinan baru yang dibuat. Buka hasil lama, atau jalankan analisis ulang
+          (hasil lama akan diganti).</p>
+        <div class="btn-row">
+          <a id="dup-open" class="btn btn-primary btn-sm" href="/">Buka hasil lama</a>
+          <button id="dup-retry" type="button" class="btn btn-ghost btn-sm">
+            {{ icon('refresh', 16) }}<span>Analisis ulang</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card-foot">
+      <button id="upload-submit" type="submit" class="btn btn-primary">
+        {{ icon('upload', 16) }}<span>Upload &amp; analisis</span>
+      </button>
+      <span class="muted hint">APK tidak pernah dijalankan; hanya dibongkar secara statis di lingkungan terisolasi.</span>
+    </div>
+  </form>
+
+  {# Form tersembunyi untuk "Analisis ulang" pada berkas duplikat (diisi JS). #}
+  <form id="dup-retry-form" method="post" action="/" hidden>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+  </form>
+</div>
+{% endblock %}

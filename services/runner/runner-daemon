@@ -1,0 +1,404 @@
+#!/usr/bin/env python3
+"""Daemon runner: menjalankan apktool/jadx untuk job dari spool. Container ini TANPA JARINGAN.
+
+Isolasi (ditegakkan oleh docker-compose.yml): network_mode none, non-root, rootfs read-only, cap_drop ALL,
+no-new-privileges, batas memori/CPU/PID. APK hanya dibaca (volume uploads read-only) dan TIDAK PERNAH dieksekusi.
+
+Daya tahan:
+  * Tiap tool berjalan di process group sendiri; timeout / pembatalan / batas keluaran mematikan SELURUH grup.
+  * Keluaran dipantau (byte & jumlah berkas) dan dihentikan bila melampaui batas -> kebal terhadap zip bomb yang
+    berbohong di header.
+  * RUNNER_RECYCLE=1 (default): setelah satu job, daemon keluar dan Docker (restart: unless-stopped) memulai
+    container baru -> tmpfs, memori, dan proses bersih untuk job berikutnya (mendekati "container sekali pakai").
+
+Protokol berkas: lihat rvcore/spool.py.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import signal
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+from rvcore.fsutil import remove_unsafe_entries, safe_rmtree, tree_stats
+from rvcore.paths import SHA256_RE, Layout
+from rvcore.spool import (
+    RESULT_ABORTED,
+    RESULT_CANCELLED,
+    RESULT_FAILED,
+    RESULT_OK,
+    RESULT_TIMEOUT,
+    RESULT_WARN,
+    TOOL_STAGES,
+    Spool,
+)
+
+MIB = 1024 * 1024
+DATA_DIR = os.environ.get("DATA_DIR", "/data")
+LAYOUT = Layout(DATA_DIR)
+SPOOL = Spool(LAYOUT.spool)
+
+RECYCLE = os.environ.get("RUNNER_RECYCLE", "1").strip().lower() in {"1", "true", "yes", "on"}
+MAX_OUTPUT_BYTES = int(os.environ.get("MAX_OUTPUT_MB", "3072")) * MIB
+MAX_OUTPUT_FILES = int(os.environ.get("MAX_OUTPUT_FILES", "600000"))
+MAX_LOG_BYTES = 5 * MIB
+TIMEOUT_MIN, TIMEOUT_MAX = 10, 3600
+
+HEARTBEAT_EVERY = 5.0
+HEALTH_MAX_AGE = 20.0
+TICK = 0.5
+OUTPUT_CHECK_EVERY = 5.0
+TERM_GRACE = 5.0
+MIN_UPTIME_BEFORE_RECYCLE = 12.0  # hindari backoff restart Docker bila job selesai sangat cepat
+STALE_FILE_SECONDS = 3600
+
+TOOL_HOME_ROOT = Path(os.environ.get("TOOL_HOME_ROOT", "/tmp/home"))
+STARTED = time.monotonic()
+STOP = threading.Event()
+
+_ERROR_LINE = re.compile(r"(?i)(exception|error|fatal|failed|cannot|unable)")
+
+
+def say(msg: str) -> None:
+    print(time.strftime("%Y-%m-%dT%H:%M:%S"), msg, flush=True)
+
+
+# ------------------------------------------------------------------ pembangun perintah
+
+
+def build_command(stage: str, apk: Path, out: Path, deobf: bool) -> tuple[list[str], list[str]]:
+    """(perintah_nyata, argumen_untuk_dicatat). Argumen berasal dari allowlist, bukan dari request."""
+    if stage == "apktool":
+        args = ["d", "-f", "-j", "2"]
+        return (["apktool", *args, "-o", str(out), str(apk)], ["apktool", *args, "-o", "<out>", "<apk>"])
+    args = ["-j", "2", "--show-bad-code"] + (["--deobf"] if deobf else [])
+    return (["jadx", *args, "-d", str(out), str(apk)], ["jadx", *args, "-d", "<out>", "<apk>"])
+
+
+def tool_version(stage: str) -> str | None:
+    return os.environ.get("APKTOOL_VERSION" if stage == "apktool" else "JADX_VERSION")
+
+
+_java_version: str | None = None
+
+
+def java_version() -> str | None:
+    global _java_version
+    if _java_version is None:
+        try:
+            out = subprocess.run(["java", "-version"], capture_output=True, text=True, timeout=30,
+                                 env={"PATH": os.environ.get("PATH", ""), "HOME": str(TOOL_HOME_ROOT)})
+            first = (out.stderr or out.stdout).strip().splitlines()
+            _java_version = first[0][:120] if first else ""
+        except (OSError, subprocess.SubprocessError):
+            _java_version = ""
+    return _java_version or None
+
+
+# ------------------------------------------------------------------ eksekusi satu job
+
+
+def kill_group(proc: subprocess.Popen) -> None:
+    """SIGTERM ke seluruh process group, lalu SIGKILL bila belum berhenti."""
+    for sig, wait in ((signal.SIGTERM, TERM_GRACE), (signal.SIGKILL, 5.0)):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            pass
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                return
+            time.sleep(0.1)
+
+
+def sweep_group(proc: subprocess.Popen) -> None:
+    """Pastikan tak ada anak yang tertinggal setelah proses utama selesai."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def pump_output(proc: subprocess.Popen, log_fd: int, state: dict[str, Any]) -> None:
+    """Salin stdout+stderr tool ke berkas log (dibatasi), tetap menguras pipa agar tool tak macet."""
+    written = 0
+    try:
+        while True:
+            chunk = os.read(proc.stdout.fileno(), 65536)
+            if not chunk:
+                return
+            if written < MAX_LOG_BYTES:
+                room = MAX_LOG_BYTES - written
+                os.write(log_fd, chunk[:room])
+                written += min(len(chunk), room)
+                if len(chunk) > room:
+                    os.write(log_fd, b"\n[log dipotong: melebihi batas 5 MiB]\n")
+                    state["log_truncated"] = True
+    except OSError:
+        return
+
+
+def last_error_line(log_path: Path) -> str | None:
+    try:
+        with log_path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 24 * 1024))
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in reversed(re.split(r"[\r\n]+", tail)):
+        line = line.strip()
+        if line and _ERROR_LINE.search(line) and not line.startswith("at "):
+            return line[:300]
+    return None
+
+
+def has_java_sources(out: Path) -> bool:
+    for _root, _dirs, files in os.walk(out / "sources"):
+        if any(f.endswith(".java") for f in files):
+            return True
+    return False
+
+
+def validate_request(job: dict[str, Any]) -> tuple[int, str, str, bool, int]:
+    stage = job.get("stage")
+    if stage not in TOOL_STAGES:
+        raise ValueError("tahap tidak dikenal")
+    analysis_id = job.get("analysis_id")
+    if not isinstance(analysis_id, int) or isinstance(analysis_id, bool) or not (1 <= analysis_id < 2**31):
+        raise ValueError("analysis_id tidak valid")
+    sha = job.get("sha256")
+    if not isinstance(sha, str) or not SHA256_RE.match(sha):
+        raise ValueError("sha256 tidak valid")
+    options = job.get("options") if isinstance(job.get("options"), dict) else {}
+    timeout = job.get("timeout")
+    if not isinstance(timeout, int) or isinstance(timeout, bool):
+        raise ValueError("timeout tidak valid")
+    timeout = max(TIMEOUT_MIN, min(TIMEOUT_MAX, timeout))
+    return analysis_id, stage, sha, bool(options.get("deobf")), timeout
+
+
+def run_job(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
+    started = time.monotonic()
+    try:
+        analysis_id, stage, sha, deobf, timeout = validate_request(job)
+    except ValueError as exc:
+        return {"status": RESULT_FAILED, "error_code": "bad_request", "message": f"request ditolak: {exc}"}
+
+    apk = LAYOUT.upload_path(sha)
+    work = LAYOUT.work_dir(analysis_id)
+    try:
+        if apk.is_symlink() or not apk.is_file():
+            return {"status": RESULT_FAILED, "error_code": "tool_error", "message": "berkas APK tidak ditemukan"}
+        if work.is_symlink() or not work.is_dir():
+            return {"status": RESULT_FAILED, "error_code": "tool_error", "message": "direktori kerja tidak ada"}
+    except OSError as exc:
+        return {"status": RESULT_FAILED, "error_code": "tool_error", "message": f"I/O: {exc}"}
+
+    out = work / stage
+    logs_dir = work / "logs"
+    logs_dir.mkdir(exist_ok=True)
+    log_path = logs_dir / f"{stage}.log"
+    safe_rmtree(out)
+
+    home = TOOL_HOME_ROOT / job_id
+    home.mkdir(parents=True, exist_ok=True)
+
+    cmd, shown_args = build_command(stage, apk, out, deobf)
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "HOME": str(home),
+        "LANG": "C.UTF-8",
+        # JVM mengabaikan $HOME dan memakai direktori dari /etc/passwd (read-only di sini), sehingga jadx/apktool
+        # gagal total. Paksa lewat properti user.home. (apktool: wrapper-nya membaca $HOME; jadx: JADX_OPTS.)
+        "JADX_OPTS": f"{os.environ.get('JADX_HEAP', '-Xmx2g')} -Duser.home={home} -Djava.io.tmpdir=/tmp",
+    }
+
+    log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+    state: dict[str, Any] = {}
+    outcome: str | None = None
+    detail = ""
+    proc = None
+    try:
+        say(f"[{job_id}] mulai: {' '.join(shown_args)} (timeout {timeout}s)")
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            cwd=home, env=env, start_new_session=True, close_fds=True,
+        )
+        reader = threading.Thread(target=pump_output, args=(proc, log_fd, state), daemon=True)
+        reader.start()
+
+        deadline = time.monotonic() + timeout
+        last_hb = last_check = 0.0
+        while proc.poll() is None:
+            now = time.monotonic()
+            if now - last_hb >= HEARTBEAT_EVERY:
+                SPOOL.write_heartbeat("busy", job_id)
+                last_hb = now
+            if STOP.is_set():
+                outcome, detail = RESULT_ABORTED, "runner dihentikan saat job berjalan"
+            elif SPOOL.cancel_requested(job_id):
+                outcome, detail = RESULT_CANCELLED, "dibatalkan"
+            elif now > deadline:
+                outcome, detail = RESULT_TIMEOUT, f"melebihi batas waktu {timeout} detik"
+            elif now - last_check >= OUTPUT_CHECK_EVERY:
+                last_check = now
+                size, files, over = tree_stats(out, MAX_OUTPUT_BYTES, MAX_OUTPUT_FILES)
+                if over:
+                    outcome = "output_limit"
+                    detail = (f"keluaran melebihi batas ({size // MIB} MiB atau {files:,} berkas); "
+                              "kemungkinan arsip berbahaya/zip bomb")
+            if outcome:
+                say(f"[{job_id}] dihentikan: {outcome} — {detail}")
+                kill_group(proc)
+                break
+            time.sleep(TICK)
+
+        proc.wait()
+        sweep_group(proc)
+        reader.join(timeout=10)
+    except OSError as exc:
+        outcome, detail = RESULT_FAILED, f"gagal menjalankan {stage}: {exc}"
+    finally:
+        os.close(log_fd)
+        if proc is not None and proc.poll() is None:
+            kill_group(proc)
+        safe_rmtree(home)
+
+    # Bersihkan symlink/berkas khusus yang mungkin dibuat tool dari isi APK.
+    removed = remove_unsafe_entries(out) if out.is_dir() else 0
+    size, files, _ = tree_stats(out) if out.is_dir() else (0, 0, False)
+    rc = proc.returncode if proc is not None else None
+
+    result: dict[str, Any] = {
+        "exit_code": rc,
+        "duration": round(time.monotonic() - started, 2),
+        "output_bytes": size,
+        "output_files": files,
+        "removed_unsafe": removed,
+        "tool": {"name": stage, "version": tool_version(stage)},
+        "args": shown_args,
+        "java": java_version(),
+    }
+
+    if outcome in (RESULT_TIMEOUT, RESULT_CANCELLED, RESULT_ABORTED):
+        return {**result, "status": outcome, "error_code": {"timeout": "timeout", "cancelled": "cancelled",
+                                                              "aborted": "runner_restart"}[outcome],
+                "message": detail}
+    if outcome == "output_limit":
+        return {**result, "status": RESULT_FAILED, "error_code": "output_limit", "message": detail}
+    if outcome == RESULT_FAILED:
+        return {**result, "status": RESULT_FAILED, "error_code": "tool_error", "message": detail}
+
+    reason = last_error_line(log_path)
+    if stage == "apktool":
+        if rc == 0 and (out / "AndroidManifest.xml").is_file():
+            return {**result, "status": RESULT_OK, "message": ""}
+        msg = reason or f"apktool keluar dengan kode {rc}" + ("" if rc else " tanpa AndroidManifest.xml")
+        return {**result, "status": RESULT_FAILED, "error_code": "tool_error", "message": msg}
+
+    # jadx: error parsial umum terjadi; keluaran parsial tetap dipakai (FR-2.3).
+    # Kode keluar 0 TIDAK cukup: pada dex rusak jadx tetap exit 0 ("No classes to decompile; decoding resources
+    # only") sehingga tanpa satu pun .java hasilnya tidak berguna dan harus dianggap gagal.
+    if not has_java_sources(out):
+        return {**result, "status": RESULT_FAILED, "error_code": "tool_error",
+                "message": reason or f"jadx (kode {rc}) tidak menghasilkan source Java"}
+    if rc == 0:
+        return {**result, "status": RESULT_OK, "message": ""}
+    return {**result, "status": RESULT_WARN,
+            "message": f"jadx melaporkan error parsial (kode {rc}); sebagian class mungkin tidak ter-dekompilasi"}
+
+
+# ------------------------------------------------------------------ siklus daemon
+
+
+def abort_orphans() -> None:
+    """Job yang tercatat 'running' tetapi prosesnya hilang (runner mati mendadak) dijawab 'aborted'."""
+    for job_id in SPOOL.running_job_ids():
+        say(f"[{job_id}] yatim dari proses sebelumnya -> aborted")
+        SPOOL.finish(job_id, {"status": RESULT_ABORTED, "error_code": "runner_restart",
+                              "message": "Runner dimulai ulang saat job berjalan."})
+
+
+def housekeeping() -> None:
+    """Buang sisa hasil/flag yang tak pernah dikonsumsi (mis. worker mati)."""
+    cutoff = time.time() - STALE_FILE_SECONDS
+    for directory in (SPOOL.results, SPOOL.cancel):
+        try:
+            for p in directory.iterdir():
+                try:
+                    if p.stat().st_mtime < cutoff:
+                        p.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+
+def health() -> int:
+    age = SPOOL.heartbeat_age()
+    return 0 if age is not None and age <= HEALTH_MAX_AGE else 1
+
+
+def main() -> int:
+    if "--health" in sys.argv:
+        return health()
+
+    os.umask(0o022)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: STOP.set())
+
+    TOOL_HOME_ROOT.mkdir(parents=True, exist_ok=True)
+    SPOOL.ensure_dirs()
+    abort_orphans()
+    housekeeping()
+    SPOOL.write_heartbeat("idle")
+    say(f"runner siap (recycle={'ya' if RECYCLE else 'tidak'}, uid={os.getuid()})")
+
+    last_hb = last_house = time.monotonic()
+    while not STOP.is_set():
+        claimed = SPOOL.claim_next()
+        if claimed:
+            job_id, job = claimed
+            SPOOL.write_heartbeat("busy", job_id)
+            try:
+                result = run_job(job_id, job)
+            except Exception as exc:  # noqa: BLE001 - satu job buruk tak boleh mematikan daemon
+                say(f"[{job_id}] galat internal: {type(exc).__name__}: {exc}")
+                result = {"status": RESULT_FAILED, "error_code": "tool_error",
+                          "message": f"galat internal runner: {type(exc).__name__}"}
+            SPOOL.finish(job_id, result)
+            say(f"[{job_id}] selesai: {result.get('status')} {result.get('message', '')}".rstrip())
+            if RECYCLE:
+                SPOOL.write_heartbeat("idle")
+                remaining = MIN_UPTIME_BEFORE_RECYCLE - (time.monotonic() - STARTED)
+                if remaining > 0:
+                    STOP.wait(remaining)
+                say("daur ulang: keluar agar Docker memulai container segar")
+                return 0
+            last_hb = time.monotonic()
+            continue
+
+        now = time.monotonic()
+        if now - last_hb >= HEARTBEAT_EVERY:
+            SPOOL.write_heartbeat("idle")
+            last_hb = now
+        if now - last_house >= 300:
+            housekeeping()
+            last_house = now
+        STOP.wait(TICK)
+    say("berhenti")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

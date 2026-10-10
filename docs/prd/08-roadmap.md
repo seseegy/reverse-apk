@@ -8,7 +8,7 @@ Urutan kerja disusun supaya tiap milestone bisa dicoba langsung di VPS dan membe
 - Auth dasar, `/healthz`, akses lewat Tailscale/domain.
 - **Selesai bila:** halaman login berjalan di VPS dan hanya bisa diakses lewat jalur privat; image worker mendekompilasi APK sampel.
 
-## M1 — Upload & dekompilasi (MVP-1)
+## M1 — Upload & dekompilasi (MVP-1) ✅ selesai
 - 01 (upload, validasi, dedup, anti zip-bomb) + 02 (antrian, pipeline, status live, timeout).
 - UI: dashboard, upload, status job, tampilan manifest dasar.
 - **Selesai bila:** upload APK → artefak `jadx/` dan `apktool/` tersimpan, status live tampil, job gagal tertangani.

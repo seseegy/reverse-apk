@@ -8,6 +8,13 @@ from datetime import datetime, timezone
 from rq import get_current_job
 
 
+def run_analysis(analysis_id: int) -> None:
+    """Jalankan pipeline untuk satu analisis (diantrekan oleh web dengan nama bertitik ini)."""
+    from pipeline import run_analysis as _run  # impor lambat: selftest tidak perlu memuat pipeline
+
+    _run(int(analysis_id))
+
+
 def selftest() -> dict:
     """Tugas uji: membuktikan web → Redis → worker → hasil kembali ke web berfungsi."""
     job = get_current_job()
