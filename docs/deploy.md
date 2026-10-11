@@ -130,6 +130,12 @@ Upload ditolak otomatis bila sisa disk < `MIN_FREE_GB` (bawaan 15 GB).
 | Ganti password | `make password` lalu `docker compose restart web` |
 | Hentikan | `make down` (data tetap ada di volume) |
 
+### Saya sudah mengubah `.env` tetapi nilainya tidak berlaku
+1. **Terapkan dengan `make restart` atau `make up`**, bukan `docker compose restart`. Perintah `restart` memakai ulang container lama beserta environment saat container itu dibuat, jadi `.env` yang baru tidak terbaca. `up -d` membuat ulang container yang konfigurasinya berubah.
+2. Jalankan **`make env-check`**: membandingkan tiap variabel di `.env` dengan yang benar-benar ada di container (web, worker, runner, caddy). Ia melaporkan (a) nilai yang belum diterapkan dan (b) variabel yang ada di `.env` tetapi **tidak diteruskan** oleh `docker-compose.yml` (diabaikan, tidak berefek apa pun).
+3. Format yang aman: `NAMA=nilai` per baris. Kutip dan komentar ` # ...` di akhir baris dibaca benar oleh Compose; angka desimal boleh `0.5` atau `0,5`. Nilai tidak valid (mis. `abc`) membuat halaman Chat menampilkan "Konfigurasi AI bermasalah".
+4. Anggaran: ada DUA batas, `AI_DAILY_BUDGET_CREDITS` (per hari) dan `AI_SESSION_BUDGET_CREDITS` (per sesi chat, bawaan hanya 1 kredit). Pesan "Anggaran sesi chat habis" berarti batas sesi, bukan harian. `0` = tanpa batas.
+
 ## Pemecahan masalah
 **Sertifikat HTTPS gagal / browser menunjukkan peringatan**
 ```bash

@@ -2,7 +2,7 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 COMPOSE ?= docker compose
 
-.PHONY: help init password up down restart logs ps update runner-selftest ai-check doctor
+.PHONY: help init password up down restart logs ps update runner-selftest ai-check env-check doctor
 
 help: ## Tampilkan daftar perintah
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[32m%-16s\033[0m %s\n", $$1, $$2}'
@@ -28,8 +28,10 @@ up: ## Build dan jalankan semua layanan
 down: ## Hentikan semua layanan (data tetap tersimpan)
 	$(COMPOSE) down
 
-restart: ## Restart semua layanan
-	$(COMPOSE) restart
+restart: ## Terapkan perubahan .env/compose dan restart (membuat ulang container yang berubah)
+	@# `docker compose restart` TIDAK membaca ulang .env: container tetap memakai nilai lama. `up -d` membuat ulang yang berubah.
+	$(COMPOSE) up -d
+	@./scripts/envcheck.sh || true
 
 logs: ## Ikuti log (Ctrl+C untuk keluar)
 	$(COMPOSE) logs -f --tail=100
@@ -47,6 +49,9 @@ runner-selftest: ## Uji runner: alat benar-benar bisa bekerja + bukti isolasi (j
 
 ai-check: ## Uji provider AI (koneksi, streaming, tool calling, pemakaian token) memakai kunci di .env
 	$(COMPOSE) run --rm --no-deps web python -m app.ai.check
+
+env-check: ## Bandingkan .env dengan environment container (mengapa variabel tidak termuat?)
+	@COMPOSE="$(COMPOSE)" ./scripts/envcheck.sh
 
 doctor: ## Periksa konfigurasi dan kesehatan layanan
 	@test -f .env || { echo "✗ .env belum ada (make init)"; exit 1; }
