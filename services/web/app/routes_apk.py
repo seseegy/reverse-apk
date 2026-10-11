@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import shutil
+import time
 from contextlib import closing
 from typing import Annotated, Any
 
@@ -345,8 +346,10 @@ async def _tab_context(request: Request, analysis_id: int, tab: str):
     if data is None:
         return RedirectResponse("/?notice=not_found", status_code=303), None
     analyzing = next((x for x in data["snap"]["stages"] if x["name"] == "analyzing"), None)
+    live = ai_chat.REGISTRY.active_for(analysis_id)
     base = {"user": session.user, "csrf": session.csrf, "nav": "dashboard", "tab": tab, "notice": None,
-            "analysis_ready": bool(analyzing and analyzing["status"] in (store.OK, store.WARN)), **data}
+            "analysis_ready": bool(analyzing and analyzing["status"] in (store.OK, store.WARN)),
+            "chat_active_sid": live.session_id if live else None, **data}
     return None, base
 
 
@@ -561,7 +564,12 @@ async def analysis_chat(request: Request, analysis_id: AnalysisId, s: int | None
     if early is not None:
         return early
     cfg, prices, cfg_error = _ai()
+    # Status giliran dibaca SEBELUM riwayat dari DB: jawaban asisten baru disimpan di akhir giliran, jadi bila giliran masih aktif dan
+    # pesan terakhir di DB masih milik pengguna, halaman menyambung ke aliran yang berjalan. Bila jawaban sudah tersimpan, tampilkan itu saja.
+    turn = ai_chat.REGISTRY.get(s) if s else None
+    was_active = bool(turn is not None and not turn.done)
     sessions, messages = await run_in_threadpool(_chat_state, analysis_id, s)
+    resume = was_active and bool(messages) and messages[-1]["role"] == "user"
     snap = None
     if cfg and cfg.enabled:
         with closing(db()) as conn:
@@ -572,6 +580,9 @@ async def analysis_chat(request: Request, analysis_id: AnalysisId, s: int | None
         "session_id": s if messages or any(x["id"] == s for x in sessions) else None, "budget": snap,
         "models": _allowed_models(cfg, prices) if cfg and cfg.enabled else [], "has_index": has_index, "cfg": cfg,
         "suggestions": _suggestions(ctx), "file_limits": file_store.limits,
+        "resume_stream": f"/analyses/{analysis_id}/chat/stream?s={s}" if resume else None,
+        "resume_model": turn.model if (resume and turn) else "",
+        "resume_elapsed": int(time.time() - turn.started_at) if (resume and turn) else 0,
     })
 
 
@@ -658,7 +669,7 @@ async def chat_send(request: Request, analysis_id: AnalysisId) -> Response:
                      code="no_vision")
     if status == "budget":
         return _json(402, error=sid, code="budget")
-    turn = ai_chat.REGISTRY.start(sid)
+    turn = ai_chat.REGISTRY.start(sid, analysis_id, eff_model)
     if turn is None:
         return _json(409, error="Masih ada jawaban yang berjalan di sesi ini. Tunggu atau tekan Berhenti.")
     ai_chat.run_in_thread(turn, cfg=cfg, prices=prices, analysis_id=analysis_id, work=layout.work, db=db, session_id=sid,
@@ -668,35 +679,56 @@ async def chat_send(request: Request, analysis_id: AnalysisId) -> Response:
 
 @router.get("/analyses/{analysis_id}/chat/stream", include_in_schema=False)
 async def chat_stream(request: Request, analysis_id: AnalysisId, s: int = Query(..., ge=1, le=2**31 - 1)) -> Response:
+    """Aliran peristiwa satu giliran. Pelanggan baru diputar ulang dari awal; yang menyambung ulang (EventSource mengirim
+    `Last-Event-ID`) melanjutkan tepat sesudah peristiwa terakhir yang diterimanya, tanpa duplikat."""
     if not current_session(request):
         return PlainTextResponse("auth", status_code=401)
     ok = await run_in_threadpool(lambda: _owns(analysis_id, s))
     turn = ai_chat.REGISTRY.get(s) if ok else None
     if turn is None:
         return PlainTextResponse("tidak ada giliran aktif", status_code=404)
+    last = request.headers.get("last-event-id", "")
+    resume_at = int(last) + 1 if last.isdigit() else 0
 
     async def stream():
         loop = asyncio.get_running_loop()
-        yield "retry: 0\n\n"
+        yield "retry: 1500\n\n"
+        pos = resume_at
+        if resume_at == 0:
+            for i, event, data in turn.replay():
+                yield ai_chat.sse_format(event, data, i)
+                pos = i + 1
+                if event == "end":
+                    return
         last_ping = loop.time()
         while True:
             if await request.is_disconnected():
                 return                                       # giliran tetap berjalan & tersimpan
-            try:
-                event, data = await loop.run_in_executor(None, lambda: turn.events.get(timeout=1.0))
-            except Exception:  # queue.Empty
-                if turn.done and turn.events.empty():
+            items, done = await loop.run_in_executor(None, lambda: turn.wait_after(pos, 1.0))
+            for i, event, data in items:
+                yield ai_chat.sse_format(event, data, i)
+                pos = i + 1
+                last_ping = loop.time()
+                if event == "end":
+                    return
+            if not items:
+                if done:
                     return
                 if loop.time() - last_ping > 15:
                     last_ping = loop.time()
                     yield ": ping\n\n"
-                continue
-            yield ai_chat.sse_format(event, data)
-            if event == "end":
-                return
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no"})
+
+
+@router.get("/analyses/{analysis_id}/chat/active", include_in_schema=False)
+async def chat_active(request: Request, analysis_id: AnalysisId) -> Response:
+    """Apakah ada jawaban asisten yang sedang berjalan pada analisis ini? (untuk penanda di tab lain)"""
+    if (bad := _api_guard(request)) is not None:
+        return bad
+    t = ai_chat.REGISTRY.active_for(analysis_id)
+    return _json(200, active=t is not None, session_id=t.session_id if t else None, model=t.model if t else None)
 
 
 def _owns(analysis_id: int, session_id: int) -> bool:
