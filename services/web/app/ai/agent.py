@@ -25,6 +25,7 @@ from . import attach as A
 from . import budget
 from . import tools as T
 from .config import AIConfig
+from .logutil import log
 from .pricing import PriceTable
 from .provider import AIError, Client
 
@@ -245,6 +246,9 @@ def run_turn(*, client: Client, cfg: AIConfig, prices: PriceTable, ctx: T.ToolCo
                 res.stopped = "cancelled"
             else:
                 res.stopped, res.error = "error", exc.message
+                # exc.message sudah disaring dari kunci API oleh provider; isi pesan pengguna tidak pernah ikut dicatat.
+                log.warning("provider gagal: session=%s analysis=%s model=%s langkah=%s kind=%s status=%s: %s",
+                            session_id, ctx.analysis_id, model, step, exc.kind, exc.status, exc.message)
             res.content = "".join(deltas)          # teks parsial yang sudah sempat ter-stream tetap disimpan
             break
         settle(r)
@@ -260,6 +264,8 @@ def run_turn(*, client: Client, cfg: AIConfig, prices: PriceTable, ctx: T.ToolCo
             res.stopped = "done" if r.finish_reason != "incomplete" else "error"
             if r.finish_reason == "incomplete":
                 res.error = "Jawaban terpotong karena koneksi ke provider terputus."
+                log.warning("aliran provider terputus di tengah jawaban: session=%s analysis=%s model=%s langkah=%s",
+                            session_id, ctx.analysis_id, model, step)
             if final_turn and step > cfg.max_steps:
                 res.stopped = "max_steps"
             elif final_turn:

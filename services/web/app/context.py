@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import time
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -60,8 +61,20 @@ def db():
     return rvdb.connect(layout.db_path)
 
 
+def audit_event(action: str, detail: dict) -> None:
+    """Catat satu aksi ke audit_log TANPA PERNAH menggagalkan aksi pengguna (pola `_reject_audit`): kegagalan hanya dicatat di log.
+
+    Dipakai untuk aksi berkas dan chat yang efeknya sudah terjadi saat dicatat. Aksi yang rahasianya baru boleh keluar SETELAH tercatat
+    (mis. `secret_reveal`) tetap memakai `store.audit` di dalam transaksi yang sama dan gagal-tertutup. Blocking: panggil lewat threadpool."""
+    try:
+        with closing(db()) as conn, rvdb.tx(conn):
+            store.audit(conn, action, detail)
+    except Exception:  # noqa: BLE001 - audit tidak boleh menggagalkan jawaban ke pengguna
+        log.exception("gagal mencatat audit %s", action)
+
+
 # Lampiran pengguna & berkas buatan AI (volume `files`, hanya web). Batas ukuran/kuota dari .env: ATTACH_MAX_MB, FILES_QUOTA_MB, FILES_MAX_COUNT.
-file_store = userfiles.FileStore(layout.files, layout.files_tmp, userfiles.limits_from_env(), db)
+file_store = userfiles.FileStore(layout.files, layout.files_tmp, userfiles.limits_from_env(), db, audit=audit_event)
 
 
 # ---------------------------------------------------------------- sesi & respons

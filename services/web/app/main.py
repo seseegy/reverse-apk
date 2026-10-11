@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import mimetypes
+from contextlib import closing
 
 import redis
 from fastapi import FastAPI, Form, Request
@@ -17,6 +18,7 @@ from .context import (
     BASE_DIR,
     client_ip,
     current_session,
+    db,
     init_storage,
     limiter,
     redis_conn,
@@ -116,6 +118,29 @@ def format_wait(seconds: int) -> str:
 
 @app.get("/healthz", include_in_schema=False)
 async def healthz() -> JSONResponse:
+    """Liveness: proses hidup. Sengaja murah dan tidak menyentuh dependensi (dipakai Caddy `health_uri` dan healthcheck compose)."""
+    return JSONResponse({"status": "ok"})
+
+
+READY_TIMEOUT = 5.0
+
+
+def _probe_ready() -> None:
+    with closing(db()) as conn:
+        conn.execute("SELECT 1").fetchone()
+    redis_conn.ping()
+
+
+@app.get("/readyz", include_in_schema=False)
+async def readyz() -> JSONResponse:
+    """Readiness: SQLite bisa dibuka dan Redis menjawab PING. Publik tanpa sesi seperti /healthz, jadi badannya minimal (tidak menyebut
+    komponen mana yang rusak); rincian ada di log server. Sengaja TIDAK dipakai Caddy: saat Redis mati situs tetap harus tampil agar
+    kartu Status sistem di dashboard bisa menunjukkan masalahnya, bukan 503 dari proxy."""
+    try:
+        await asyncio.wait_for(run_in_threadpool(_probe_ready), READY_TIMEOUT)
+    except Exception as exc:  # noqa: BLE001 - apa pun yang salah berarti belum siap (termasuk TimeoutError)
+        log.warning("readyz gagal: %s", type(exc).__name__)
+        return JSONResponse({"status": "unavailable"}, status_code=503)
     return JSONResponse({"status": "ok"})
 
 

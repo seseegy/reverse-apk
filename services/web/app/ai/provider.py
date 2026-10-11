@@ -23,6 +23,7 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from .config import AIConfig
+from .logutil import log
 
 MAX_BODY = 16 * 1024 * 1024          # batas jawaban non-stream
 MAX_STREAM_BYTES = 32 * 1024 * 1024  # batas total satu stream
@@ -136,6 +137,8 @@ class Client:
                     raise
                 wait = exc.retry_after if exc.retry_after is not None else RETRY_DELAYS[attempt] * random.uniform(0.8, 1.2)
                 attempt += 1
+                log.warning("provider %s (HTTP %s), coba ulang %d/%d dalam %.1f dtk: model=%s", exc.kind, exc.status, attempt, limit,
+                            min(wait, 30.0), model)
                 if self._sleep(min(wait, 30.0), cancel):
                     raise AIError("cancelled", "Dibatalkan.") from exc
 

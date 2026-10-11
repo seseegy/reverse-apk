@@ -32,6 +32,7 @@ from .ai.config import ConfigError, load_ai_config
 from .ai.pricing import PriceTable
 from .apkcheck import ApkRejected, Limits, validate_apk
 from .context import (
+    audit_event,
     client_ip,
     current_session,
     db,
@@ -782,7 +783,9 @@ async def chat_delete(request: Request, analysis_id: AnalysisId, session_id: Apk
     def work():
         with closing(db()) as conn:
             return store.delete_chat_session(conn, analysis_id, session_id)
-    await run_in_threadpool(work)
+    if await run_in_threadpool(work):
+        await run_in_threadpool(audit_event, "chat_session_delete",
+                                {"analysis_id": analysis_id, "session_id": session_id, "ip": client_ip(request)})
     return RedirectResponse(f"/analyses/{analysis_id}/chat", status_code=303)
 
 
