@@ -614,12 +614,18 @@ async def chat_send(request: Request, analysis_id: AnalysisId) -> Response:
         return _json(413, error="Pesan terlalu besar.")
     try:
         body = json.loads(raw or b"{}")
-        text = str(body.get("text", "")).strip()
+        text = body.get("text", "")
         model = body.get("model")
         session_id = body.get("session_id")
         att_ids = body.get("attachment_ids") or []
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, RecursionError):   # RecursionError: JSON bersarang sangat dalam (bukan ValueError)
         return _json(400, error="Format permintaan tidak valid.")
+    # Klien resmi selalu mengirim string; tipe lain ditolak, bukan diubah diam-diam jadi teks ("None", "123", "['a']").
+    if not isinstance(text, str) or "\x00" in text:
+        return _json(422, error="text harus berupa teks tanpa karakter NUL.")
+    text = text.strip()
+    if model is not None and not isinstance(model, str):
+        return _json(422, error="model tidak valid.")
     if (not isinstance(att_ids, list) or any(isinstance(i, bool) or not isinstance(i, int) or not 0 < i < 2**31 for i in att_ids)):
         return _json(422, error="attachment_ids tidak valid.")
     att_ids = list(dict.fromkeys(att_ids))
@@ -628,7 +634,8 @@ async def chat_send(request: Request, analysis_id: AnalysisId) -> Response:
     allowed = {m["slug"] for m in _allowed_models(cfg, prices)}
     if model and model not in allowed:
         return _json(422, error="Model tidak diizinkan.")
-    if session_id is not None and (isinstance(session_id, bool) or not isinstance(session_id, int)):
+    # Batas atas sama dengan Path(le=2**31 - 1) di rute lain; tanpanya SQLite melempar OverflowError (HTTP 500).
+    if session_id is not None and (isinstance(session_id, bool) or not isinstance(session_id, int) or not 0 < session_id < 2**31):
         return _json(422, error="session_id tidak valid.")
     eff_model = model or cfg.model
 
@@ -677,6 +684,16 @@ async def chat_send(request: Request, analysis_id: AnalysisId) -> Response:
     return _json(202, session_id=sid, stream=f"/analyses/{analysis_id}/chat/stream?s={sid}")
 
 
+def _resume_position(last: str) -> int:
+    """Posisi peristiwa untuk melanjutkan SSE dari header `Last-Event-ID`.
+
+    Hanya angka ASCII yang wajar yang dipakai (id dari server = indeks log, jauh di bawah 12 digit). Selain itu (kosong, huruf, digit
+    Unicode seperti '²' yang lolos str.isdigit() tetapi gagal int(), atau terlalu panjang) -> 0 = putar ulang dari awal."""
+    if 0 < len(last) <= 12 and last.isascii() and last.isdigit():
+        return int(last) + 1
+    return 0
+
+
 @router.get("/analyses/{analysis_id}/chat/stream", include_in_schema=False)
 async def chat_stream(request: Request, analysis_id: AnalysisId, s: int = Query(..., ge=1, le=2**31 - 1)) -> Response:
     """Aliran peristiwa satu giliran. Pelanggan baru diputar ulang dari awal; yang menyambung ulang (EventSource mengirim
@@ -687,8 +704,7 @@ async def chat_stream(request: Request, analysis_id: AnalysisId, s: int = Query(
     turn = ai_chat.REGISTRY.get(s) if ok else None
     if turn is None:
         return PlainTextResponse("tidak ada giliran aktif", status_code=404)
-    last = request.headers.get("last-event-id", "")
-    resume_at = int(last) + 1 if last.isdigit() else 0
+    resume_at = _resume_position(request.headers.get("last-event-id", ""))
 
     async def stream():
         loop = asyncio.get_running_loop()
