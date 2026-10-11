@@ -23,6 +23,8 @@ from . import agent
 from . import budget as ai_budget
 from . import tools as T
 from .config import AIConfig
+from .logutil import describe
+from .logutil import log as ai_log
 from .pricing import PriceTable
 from .provider import Client
 from .redact import Redactor
@@ -150,6 +152,7 @@ def run_in_thread(turn: Turn, *, cfg: AIConfig, prices: PriceTable, analysis_id:
                            "tools": len(res.tool_calls), "files": [file_view(o) for o in outputs],
                            "budget": {"today": snap["today"], "today_limit": snap["today_limit"], "today_idr": snap["today_idr"]}})
         except Exception as exc:  # noqa: BLE001 - giliran tidak boleh meninggalkan klien menunggu selamanya
+            ai_log.error("giliran chat gagal: session=%s analysis=%s model=%s: %s", session_id, analysis_id, turn.model, describe(exc, cfg))
             emit("final", {"content": "", "stopped": "error", "error": f"Galat internal ({type(exc).__name__}).",
                            "steps": 0, "citations": [], "cost_credits": 0, "session_credits": 0, "session_idr": 0,
                            "turn_idr": 0, "tools": 0})

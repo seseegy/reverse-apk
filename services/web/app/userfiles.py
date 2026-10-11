@@ -174,8 +174,10 @@ def open_regular(path: Path):
 
 
 class FileStore:
-    def __init__(self, root: Path, tmp: Path, limits: Limits, db: Callable[[], Any]) -> None:
+    def __init__(self, root: Path, tmp: Path, limits: Limits, db: Callable[[], Any],
+                 audit: Callable[[str, dict[str, Any]], None] | None = None) -> None:
         self.root, self.tmp, self.limits, self.db = Path(root), Path(tmp), limits, db
+        self.audit = audit          # (aksi, detail) -> None; tidak boleh melempar (lihat context.audit_event). None = tanpa audit
 
     # --- lokasi
     def base(self, analysis_id: int) -> Path:
@@ -237,8 +239,11 @@ class FileStore:
                 raise FileError("path bertabrakan dengan entri tidak valid")
         return target
 
-    def write_ai(self, analysis_id: int, path: str, content: str, mode: str = "overwrite") -> dict[str, Any]:
-        """Tulis/ganti/tambah berkas buatan AI. mode: overwrite | append | create. Mengembalikan metadata (id, revisi, ukuran, ...)."""
+    def write_ai(self, analysis_id: int, path: str, content: str, mode: str = "overwrite", *, via: str = "write_file") -> dict[str, Any]:
+        """Tulis/ganti/tambah berkas buatan AI. mode: overwrite | append | create. Mengembalikan metadata (id, revisi, ukuran, ...).
+
+        Tiap penulisan yang BERHASIL dicatat di audit_log (`ai_file_write`: id, path, ukuran, revisi, sha256; tanpa isi berkas).
+        `via` membedakan write_file dari edit_file."""
         rel = clean_ai_path(path)
         if mode not in ("overwrite", "append", "create"):
             raise FileError("mode harus overwrite, append, atau create")
@@ -282,16 +287,20 @@ class FileStore:
             tmp.unlink(missing_ok=True)
             raise FileError("gagal menulis berkas (disk penuh atau tidak bisa ditulis)") from exc
         guessed = mimetypes.guess_type(rel)[0] or "text/plain"
+        digest = hashlib.sha256(data).hexdigest()
         try:
             with closing(self.db()) as conn:
                 fid, revision, created = store.upsert_ai_file(
                     conn, analysis_id, path=rel, media="text", mime=guessed if guessed.startswith("text/") else "text/plain",
-                    size=len(data), sha256=hashlib.sha256(data).hexdigest(),
+                    size=len(data), sha256=digest,
                     quota_bytes=self.limits.quota_bytes, max_count=self.limits.max_count)
         except store.FileQuotaError as exc:
             if not existed:
                 target.unlink(missing_ok=True)
             raise FileError(str(exc)) from exc
+        if self.audit is not None:
+            self.audit("ai_file_write", {"analysis_id": int(analysis_id), "file_id": fid, "path": rel, "size": len(data), "revision": revision,
+                                         "created": created, "sha256": digest, "mode": mode, "via": via})
         return {"id": fid, "path": rel, "name": rel.rsplit("/", 1)[-1], "size": len(data), "revision": revision,
                 "created": created, "lines": data.count(b"\n") + (0 if data.endswith(b"\n") else 1)}
 
@@ -310,7 +319,7 @@ class FileStore:
             raise FileError("old_string tidak ditemukan persis (perhatikan spasi/indentasi). Baca ulang berkasnya dengan read_file.")
         if count > 1:
             raise FileError(f"old_string muncul {count} kali; perluas dengan baris di sekitarnya agar unik")
-        res = self.write_ai(analysis_id, rel, text.replace(old, new, 1), "overwrite")
+        res = self.write_ai(analysis_id, rel, text.replace(old, new, 1), "overwrite", via="edit_file")
         res["diganti"] = 1
         return res
 

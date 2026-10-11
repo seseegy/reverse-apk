@@ -21,7 +21,7 @@ from starlette.requests import ClientDisconnect
 from rvcore import store
 
 from . import userfiles as U
-from .context import client_ip, current_session, db, file_store, layout, log, render, settings
+from .context import audit_event, client_ip, current_session, db, file_store, layout, log, render, settings
 from .routes_apk import AnalysisId, _json, _tab_context
 from .security import tokens_equal
 from .uploads import UploadError, clean_display_name, receive_to_tmp
@@ -136,6 +136,9 @@ async def upload_attachment(request: Request, analysis: int = Query(..., ge=1, l
         received.path.unlink(missing_ok=True)
         raise
     row = await run_in_threadpool(_lookup, analysis, saved["id"])
+    await run_in_threadpool(audit_event, "file_upload", {
+        "analysis_id": analysis, "file_id": saved["id"], "name": saved["name"], "media": saved["media"], "size": saved["size"],
+        "sha256": received.sha256, "ip": client_ip(request)})
     return _json(201, **describe(analysis, row))
 
 
@@ -215,9 +218,15 @@ async def file_delete(request: Request, analysis_id: AnalysisId, file_id: FileId
         return _json(401, error="Sesi berakhir.") if xhr else RedirectResponse("/login", status_code=303)
     if not (_csrf_header_ok(session, request) if xhr else tokens_equal(session.csrf, csrf)):
         return _json(403, error="Token keamanan tidak valid.") if xhr else PlainTextResponse("CSRF token tidak valid", status_code=403)
+    row = await run_in_threadpool(_lookup, analysis_id, file_id)     # dibaca sebelum dihapus: nama/ukuran untuk audit
     ok = await run_in_threadpool(file_store.delete, analysis_id, file_id)
     if ok:
-        log.info("berkas %s dihapus (analisis %s) ip=%s", file_id, analysis_id, client_ip(request))
+        ip = client_ip(request)
+        log.info("berkas %s dihapus (analisis %s) ip=%s", file_id, analysis_id, ip)
+        if row is not None:
+            await run_in_threadpool(audit_event, "file_delete", {
+                "analysis_id": analysis_id, "file_id": file_id, "kind": row["kind"], "name": row["name"], "size": row["size"],
+                "path": row["path"] if row["kind"] == "ai" else None, "ip": ip})
     return _json(200 if ok else 404, ok=ok) if xhr else RedirectResponse(f"/analyses/{analysis_id}/files", status_code=303)
 
 

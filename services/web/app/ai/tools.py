@@ -28,6 +28,7 @@ from . import redact as redact_mod
 from .config import AIConfig
 from .. import callgraph, codeindex, decompile
 from .. import userfiles as U
+from .logutil import describe, log
 
 
 class ToolError(Exception):
@@ -879,8 +880,11 @@ def run_tool(ctx: ToolContext, name: str, raw_args: str) -> tuple[str, bool]:
     except ToolError as exc:
         entry.update(ok=False, error=str(exc)[:200])
         ctx.log.append(entry)
+        # Penolakan biasa (argumen salah, berkas tidak ada): model bisa memperbaikinya sendiri, jadi INFO. Pesannya sama dengan yang dilihat model.
+        log.info("tool %s ditolak: analysis=%s: %s", name, ctx.analysis_id, " ".join(str(exc).split())[:200])
         return f"<hasil_tool nama=\"{name}\" galat=\"true\">{exc}</hasil_tool>", False
     except Exception as exc:  # noqa: BLE001 - bug tool tidak boleh mematikan agent
         entry.update(ok=False, error=f"{type(exc).__name__}")
         ctx.log.append(entry)
+        log.error("tool %s galat internal: analysis=%s: %s", name, ctx.analysis_id, describe(exc, ctx.cfg))
         return f"<hasil_tool nama=\"{name}\" galat=\"true\">galat internal tool ({type(exc).__name__})</hasil_tool>", False

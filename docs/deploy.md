@@ -126,6 +126,7 @@ Upload ditolak otomatis bila sisa disk < `MIN_FREE_GB` (bawaan 15 GB).
 |--------|----------|
 | Lihat log | `make logs` |
 | Status kontainer | `make ps` |
+| Cek kesiapan (SQLite + Redis) | `curl -fsS https://<domain>/readyz` — 200 `{"status":"ok"}` atau 503; rincian penyebab ada di `make logs` (`readyz gagal`). `/healthz` hanya cek proses hidup. |
 | Update kode | `make update` |
 | Ganti password | `make password` lalu `docker compose restart web` |
 | Hentikan | `make down` (data tetap ada di volume) |
