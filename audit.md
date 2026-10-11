@@ -278,7 +278,9 @@ Jangan menganggap area ini aman hanya karena audit ini bersih:
 | **F · Proses** | QA-01, OP-04 (CI + lint), OP-03 (rotasi log dulu) | sedang | Butuh keputusan pemilik soal tes di repo. |
 | **G · Keputusan produk** | UI-06, UI-08, OP-05 | — | Tanya pemilik; tidak perlu kode dulu. |
 
-Saat memperbaiki, ikuti kebiasaan proyek: satu cabang baru dari `origin/main` per paket, PR lewat `gh api` (bukan `gh pr`), jangan commit tes, jujur soal apa yang belum diuji.
+Saat memperbaiki, ikuti kebiasaan proyek: satu cabang baru dari `origin/main` per paket, PR lewat `gh api` (bukan `gh pr`), jujur soal apa yang belum diuji.
+
+> **Pembaruan 11 Okt 2026:** pemilik mengizinkan tes di repo. Tes kini ada di `tests/` dan dijalankan CI (lihat `.kiro/steering/testing.md`); aturan lama "jangan commit tes" tidak berlaku lagi.
 
 ---
 
