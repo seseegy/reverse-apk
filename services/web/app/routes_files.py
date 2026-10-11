@@ -233,23 +233,44 @@ async def file_delete(request: Request, analysis_id: AnalysisId, file_id: FileId
 # ================================================================== halaman Berkas + ZIP
 
 
-def _page_data(analysis_id: int) -> dict[str, Any]:
+# Baris per halaman daftar berkas. Terukur ±2,9 KB HTML per baris (ikon SVG sebaris + 3 tombol + form hapus), jadi 50 baris
+# per bagian = ±285 KB untuk kedua bagian sekaligus. Tanpa paginasi, 1.500 berkas = 4,3 MB dan 52 ribu simpul DOM (audit BE-09).
+PAGE_SIZE = 50
+
+
+def _section(conn, analysis_id: int, kind: str, page: int, param: str, other: str, other_page: int) -> dict[str, Any]:
+    """Satu bagian daftar (berkas AI / lampiran) untuk satu halaman, beserta tautan navigasinya."""
+    total = store.count_files(conn, analysis_id, kind)
+    pages = max(1, -(-total // PAGE_SIZE))
+    page = min(max(1, page), pages)                                  # di luar jangkauan -> dijepit, bukan halaman kosong
+    page_rows = store.list_files(conn, analysis_id, kind, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE)
+    rows = [describe(analysis_id, r) | {"created_at": r["created_at"], "updated_at": r["updated_at"]} for r in page_rows]
+
+    def url(p: int) -> str:
+        return f"?{param}={p}" + (f"&{other}={other_page}" if other_page > 1 else "")
+
+    return {"rows": rows, "total": total, "page": page, "pages": pages,
+            "first": (page - 1) * PAGE_SIZE + 1 if total else 0, "last": min(page * PAGE_SIZE, total),
+            "prev": url(page - 1) if page > 1 else None, "next": url(page + 1) if page < pages else None}
+
+
+def _page_data(analysis_id: int, page_ai: int, page_up: int) -> dict[str, Any]:
     with closing(db()) as conn:
-        ups = [describe(analysis_id, r) | {"created_at": r["created_at"], "updated_at": r["updated_at"]}
-               for r in store.list_files(conn, analysis_id, "upload")]
-        ais = [describe(analysis_id, r) | {"created_at": r["created_at"], "updated_at": r["updated_at"]}
-               for r in store.list_files(conn, analysis_id, "ai")]
-        used, count = store.files_usage(conn, analysis_id)
+        ai = _section(conn, analysis_id, "ai", page_ai, "ai", "up", page_up)
+        up = _section(conn, analysis_id, "upload", page_up, "up", "ai", page_ai)
+        used, count = store.files_usage(conn, analysis_id)            # kuota tetap dari SELURUH berkas, bukan halaman ini
     lim = file_store.limits
-    return {"uploads": ups, "ai_files": ais, "used": used, "count": count, "quota": lim.quota_bytes, "max_file": lim.max_file_bytes}
+    return {"ai": ai, "up": up, "used": used, "count": count, "quota": lim.quota_bytes, "max_file": lim.max_file_bytes,
+            "page_size": PAGE_SIZE}
 
 
 @router.get("/analyses/{analysis_id}/files", include_in_schema=False)
-async def analysis_files(request: Request, analysis_id: AnalysisId) -> Response:
+async def analysis_files(request: Request, analysis_id: AnalysisId,
+                         ai: int = Query(1, ge=1, le=10**6), up: int = Query(1, ge=1, le=10**6)) -> Response:
     early, ctx = await _tab_context(request, analysis_id, "files")
     if early is not None:
         return early
-    data = await run_in_threadpool(_page_data, analysis_id)
+    data = await run_in_threadpool(_page_data, analysis_id, ai, up)
     return render(request, "files.html", {**ctx, **data})
 
 

@@ -6,6 +6,20 @@
 
 {% block header %}{% include "_header.html" %}{% endblock %}
 
+{#- Navigasi halaman daftar. Hanya tampil bila lebih dari satu halaman; hitungan selalu jumlah SELURUH berkas. -#}
+{% macro pager(s, satuan) -%}
+{% if s.pages > 1 %}
+<nav class="pager" aria-label="Halaman daftar {{ satuan }}">
+  {% if s.prev %}<a class="btn btn-ghost btn-sm" href="{{ s.prev }}" rel="prev">{{ icon('arrow-left', 16) }}<span>Sebelumnya</span></a>
+  {% else %}<span class="btn btn-ghost btn-sm" aria-disabled="true">{{ icon('arrow-left', 16) }}<span>Sebelumnya</span></span>{% endif %}
+  <span class="pager-info muted hint" role="status" aria-atomic="true">{{ s.first|num }}–{{ s.last|num }} dari {{ s.total|num }} {{ satuan }}
+    <span class="pager-page">(halaman {{ s.page|num }} dari {{ s.pages|num }})</span></span>
+  {% if s.next %}<a class="btn btn-ghost btn-sm" href="{{ s.next }}" rel="next"><span>Berikutnya</span>{{ icon('arrow-right', 16) }}</a>
+  {% else %}<span class="btn btn-ghost btn-sm" aria-disabled="true"><span>Berikutnya</span>{{ icon('arrow-right', 16) }}</span>{% endif %}
+</nav>
+{% endif %}
+{%- endmacro %}
+
 {% macro frow(f, kind) -%}
 {%- set dir = (f.path.rsplit('/', 1)[0] ~ '/') if (f.path and '/' in f.path) else '' -%}
 <li class="frow" data-frow="{{ f.id }}">
@@ -52,11 +66,12 @@
 
   <section class="card" aria-labelledby="ai-files-title">
     <div class="files-head">
-      <h2 id="ai-files-title">Dibuat asisten <span class="count-pill">{{ ai_files|length }}</span></h2>
-      {% if ai_files %}<a class="btn btn-ghost btn-sm" href="/analyses/{{ an.id }}/files/download.zip?kind=ai" download>{{ icon('archive', 16) }}<span>Unduh semua (.zip)</span></a>{% endif %}
+      <h2 id="ai-files-title">Dibuat asisten <span class="count-pill">{{ ai.total|num }}</span></h2>
+      {% if ai.total %}<a class="btn btn-ghost btn-sm" href="/analyses/{{ an.id }}/files/download.zip?kind=ai" download>{{ icon('archive', 16) }}<span>Unduh semua (.zip)</span></a>{% endif %}
     </div>
-    {% if ai_files %}
-    <ul class="flist plain-list">{% for f in ai_files %}{{ frow(f, 'ai') }}{% endfor %}</ul>
+    {% if ai.rows %}
+    <ul class="flist plain-list">{% for f in ai.rows %}{{ frow(f, 'ai') }}{% endfor %}</ul>
+    {{ pager(ai, 'berkas') }}
     {% else %}
     <div class="files-empty">
       <span class="empty-icon">{{ icon('file-code', 28) }}</span>
@@ -69,11 +84,12 @@
 
   <section class="card" aria-labelledby="up-files-title">
     <div class="files-head">
-      <h2 id="up-files-title">Lampiran Anda <span class="count-pill">{{ uploads|length }}</span></h2>
-      {% if uploads %}<a class="btn btn-ghost btn-sm" href="/analyses/{{ an.id }}/files/download.zip?kind=upload" download>{{ icon('archive', 16) }}<span>Unduh semua (.zip)</span></a>{% endif %}
+      <h2 id="up-files-title">Lampiran Anda <span class="count-pill">{{ up.total|num }}</span></h2>
+      {% if up.total %}<a class="btn btn-ghost btn-sm" href="/analyses/{{ an.id }}/files/download.zip?kind=upload" download>{{ icon('archive', 16) }}<span>Unduh semua (.zip)</span></a>{% endif %}
     </div>
-    {% if uploads %}
-    <ul class="flist plain-list">{% for f in uploads %}{{ frow(f, 'upload') }}{% endfor %}</ul>
+    {% if up.rows %}
+    <ul class="flist plain-list">{% for f in up.rows %}{{ frow(f, 'upload') }}{% endfor %}</ul>
+    {{ pager(up, 'lampiran') }}
     {% else %}
     <div class="files-empty">
       <span class="empty-icon">{{ icon('paperclip', 28) }}</span>
