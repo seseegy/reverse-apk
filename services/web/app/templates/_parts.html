@@ -56,3 +56,48 @@
   <span>{{ text }}</span>
 </span>
 {%- endmacro %}
+
+{#- Ikon berkas menurut jenis isi/ekstensi. `media` = image | text | binary (ditentukan server dari ISI berkas). -#}
+{% set CODE_EXTS = ['py','pyi','js','mjs','cjs','ts','tsx','jsx','sh','bash','java','kt','kts','smali','c','h','cc','cpp','go','rs','rb','php','lua','swift','dart','sql','gradle','ps1','bat','json','yml','yaml','xml','html','css','toml','ini'] %}
+{% macro fileicon(name, media, size=18) -%}
+{%- set ext = (name.rsplit('.', 1)[-1] | lower) if '.' in name else '' -%}
+{%- if media == 'image' %}{{ icon('image', size) }}
+{%- elif ext in ['zip','apk','tar','gz','tgz','7z','rar','jar'] %}{{ icon('archive', size) }}
+{%- elif ext in CODE_EXTS %}{{ icon('file-code', size) }}
+{%- elif media == 'text' %}{{ icon('file-text', size) }}
+{%- else %}{{ icon('file', size) }}{% endif -%}
+{%- endmacro %}
+
+{#- Atribut yang dibaca penampil berkas di JS (id, nama, jenis, ukuran, revisi). -#}
+{% macro fileattrs(f) -%}
+data-file-view data-file-id="{{ f.id }}" data-file-name="{{ f.name }}" data-file-media="{{ f.media }}" data-file-size="{{ f.size }}" data-file-rev="{{ f.link_revision or f.revision }}" data-file-path="{{ f.path or '' }}"
+{%- endmacro %}
+
+{#- Lampiran di gelembung pesan pengguna: gambar sebagai thumbnail, lainnya sebagai chip. -#}
+{% macro attachments(files) -%}
+<div class="msg-atts" role="list" aria-label="Lampiran">
+  {%- for f in files %}
+  {% if f.media == 'image' -%}
+  <button type="button" class="att-img" role="listitem" {{ fileattrs(f) }} title="{{ f.name }}" aria-label="Lihat gambar {{ f.name }}"><img src="{{ f.raw }}" alt="" loading="lazy"></button>
+  {%- else -%}
+  <button type="button" class="file-chip" role="listitem" {{ fileattrs(f) }} title="{{ f.name }}">{{ fileicon(f.name, f.media, 16) }}<span class="file-chip-name">{{ f.name }}</span><span class="muted hint">{{ f.size|bytes }}</span></button>
+  {%- endif %}
+  {%- endfor %}
+</div>
+{%- endmacro %}
+
+{#- Kartu berkas buatan AI di bawah jawaban: ikon, path, ukuran/revisi, Lihat + Unduh. -#}
+{% macro fcard(f) -%}
+{%- set base = f.path.rsplit('/', 1)[0] ~ '/' if '/' in f.path else '' -%}
+<div class="fcard" data-fcard="{{ f.id }}">
+  <span class="fcard-ic">{{ fileicon(f.name, f.media, 20) }}</span>
+  <div class="fcard-main">
+    <span class="fcard-name mono"><span class="fcard-dir">{{ base }}</span>{{ f.name }}</span>
+    <span class="fcard-meta muted hint">{{ f.size|bytes }}{% if (f.link_revision or f.revision) > 1 %} · revisi {{ f.link_revision or f.revision }}{% endif %}</span>
+  </div>
+  <div class="fcard-actions">
+    <button type="button" class="btn btn-ghost btn-sm" {{ fileattrs(f) }} aria-label="Lihat {{ f.name }}">{{ icon('eye', 16) }}<span>Lihat</span></button>
+    <a class="btn btn-ghost btn-sm" href="{{ f.download }}" download aria-label="Unduh {{ f.name }}">{{ icon('download', 16) }}<span>Unduh</span></a>
+  </div>
+</div>
+{%- endmacro %}

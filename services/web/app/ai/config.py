@@ -64,6 +64,11 @@ class AIConfig:
     max_tool_chars: int = 14000  # batas ukuran satu hasil tool (karakter)
     max_turn_tool_chars: int = DEFAULT_TURN_TOOL_CHARS  # batas total hasil tool dalam satu giliran (0 = tanpa batas)
     tool_timeout_s: float = 60.0  # batas WAKTU satu kueri/pencarian tool (detik; 0 = tanpa batas)
+    # Lampiran. Ini bukan batas kemampuan AI: gambar > max_image_bytes tetap tersimpan & bisa diunduh, hanya tidak dikirim ke model
+    # (permintaan HTTP ke provider punya batas ukuran sendiri). Teks lampiran <= inline_attach_chars langsung disertakan di pesan
+    # (hemat satu putaran tool); yang lebih besar dibaca model lewat read_file secara bertahap.
+    max_image_bytes: int = 10 * 1024 * 1024
+    inline_attach_chars: int = 16000
 
     @property
     def enabled(self) -> bool:
@@ -119,4 +124,6 @@ def load_ai_config() -> AIConfig:
         max_tool_chars=_int("AI_MAX_TOOL_CHARS", 14000, 1000, 100_000_000),
         max_turn_tool_chars=_int("AI_MAX_TURN_TOOL_CHARS", DEFAULT_TURN_TOOL_CHARS, 0, 1_000_000_000),
         tool_timeout_s=_float("AI_TOOL_TIMEOUT", 60.0),
+        max_image_bytes=int(_float("AI_MAX_IMAGE_MB", 10.0) * 1024 * 1024),
+        inline_attach_chars=_int("AI_INLINE_ATTACH_CHARS", 16000, 0, 100_000_000),
     )

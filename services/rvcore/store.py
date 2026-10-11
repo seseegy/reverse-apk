@@ -400,6 +400,149 @@ def delete_chat_session(conn: sqlite3.Connection, analysis_id: int, session_id: 
         return conn.execute("DELETE FROM chat_session WHERE id = ? AND analysis_id = ?", (session_id, analysis_id)).rowcount == 1
 
 
+# ------------------------------------------------------------------ berkas: lampiran pengguna & buatan AI
+class FileQuotaError(Exception):
+    """Kuota berkas per analisis terlampaui (ukuran total atau jumlah). Pesan aman ditampilkan."""
+
+
+_FILE_COLS = "id, analysis_id, kind, path, name, media, mime, size, sha256, revision, pending, created_at, updated_at"
+
+
+def files_usage(conn: sqlite3.Connection, analysis_id: int) -> tuple[int, int]:
+    """(total_byte, jumlah_berkas) milik analisis ini, termasuk unggahan yang belum dikirim."""
+    row = conn.execute("SELECT COALESCE(SUM(size), 0), COUNT(*) FROM analysis_file WHERE analysis_id = ?", (analysis_id,)).fetchone()
+    return int(row[0]), int(row[1])
+
+
+def _check_quota(conn: sqlite3.Connection, analysis_id: int, add_bytes: int, add_count: int,
+                 quota_bytes: int, max_count: int) -> None:
+    used, count = files_usage(conn, analysis_id)
+    if quota_bytes and used + add_bytes > quota_bytes:
+        raise FileQuotaError(f"Kuota berkas analisis ini penuh ({used // (1024 * 1024)} dari {quota_bytes // (1024 * 1024)} MB). "
+                             "Hapus berkas lama di tab Berkas, atau naikkan FILES_QUOTA_MB di .env.")
+    if max_count and add_count > 0 and count + add_count > max_count:   # menimpa berkas yang ada tidak menambah jumlah
+        raise FileQuotaError(f"Jumlah berkas analisis ini sudah {count} (batas {max_count}). Hapus yang tidak dipakai di tab Berkas.")
+
+
+def add_upload(conn: sqlite3.Connection, analysis_id: int, *, path: str, name: str, media: str, mime: str, size: int,
+               sha256: str, quota_bytes: int = 0, max_count: int = 0) -> int:
+    """Catat lampiran pengguna (pending=1 sampai dikirim bersama pesan)."""
+    ts = now()
+    with tx(conn):
+        _check_quota(conn, analysis_id, size, 1, quota_bytes, max_count)
+        cur = conn.execute(
+            "INSERT INTO analysis_file (analysis_id, kind, path, name, media, mime, size, sha256, pending, created_at, updated_at) "
+            "VALUES (?, 'upload', ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+            (analysis_id, path, _text(name, 255) or "berkas", media, mime[:80], size, sha256, ts, ts))
+        return int(cur.lastrowid)
+
+
+def upsert_ai_file(conn: sqlite3.Connection, analysis_id: int, *, path: str, media: str, mime: str, size: int, sha256: str,
+                   quota_bytes: int = 0, max_count: int = 0) -> tuple[int, int, bool]:
+    """Catat berkas buatan AI. Path yang sama = revisi baru. Mengembalikan (id, revisi, baru?)."""
+    ts = now()
+    name = path.rsplit("/", 1)[-1]
+    with tx(conn):
+        old = conn.execute("SELECT id, size, revision FROM analysis_file WHERE analysis_id = ? AND kind = 'ai' AND path = ?",
+                           (analysis_id, path)).fetchone()
+        _check_quota(conn, analysis_id, size - (old["size"] if old else 0), 0 if old else 1, quota_bytes, max_count)
+        if old:
+            conn.execute("UPDATE analysis_file SET size = ?, sha256 = ?, media = ?, mime = ?, revision = revision + 1, updated_at = ? "
+                         "WHERE id = ?", (size, sha256, media, mime[:80], ts, old["id"]))
+            return int(old["id"]), int(old["revision"]) + 1, False
+        cur = conn.execute(
+            "INSERT INTO analysis_file (analysis_id, kind, path, name, media, mime, size, sha256, pending, created_at, updated_at) "
+            "VALUES (?, 'ai', ?, ?, ?, ?, ?, ?, 0, ?, ?)", (analysis_id, path, name, media, mime[:80], size, sha256, ts, ts))
+        return int(cur.lastrowid), 1, True
+
+
+def get_file(conn: sqlite3.Connection, analysis_id: int, file_id: int) -> sqlite3.Row | None:
+    return conn.execute(f"SELECT {_FILE_COLS} FROM analysis_file WHERE id = ? AND analysis_id = ?", (file_id, analysis_id)).fetchone()
+
+
+def find_file(conn: sqlite3.Connection, analysis_id: int, kind: str, path: str) -> sqlite3.Row | None:
+    return conn.execute(f"SELECT {_FILE_COLS} FROM analysis_file WHERE analysis_id = ? AND kind = ? AND path = ?",
+                        (analysis_id, kind, path)).fetchone()
+
+
+def list_files(conn: sqlite3.Connection, analysis_id: int, kind: str | None = None, *, include_pending: bool = False) -> list[sqlite3.Row]:
+    sql = f"SELECT {_FILE_COLS} FROM analysis_file WHERE analysis_id = ?"
+    params: list[Any] = [analysis_id]
+    if kind:
+        sql += " AND kind = ?"
+        params.append(kind)
+    if not include_pending:
+        sql += " AND pending = 0"
+    return conn.execute(sql + " ORDER BY id", params).fetchall()
+
+
+def count_files(conn: sqlite3.Connection, analysis_id: int) -> int:
+    return int(conn.execute("SELECT COUNT(*) FROM analysis_file WHERE analysis_id = ? AND pending = 0", (analysis_id,)).fetchone()[0])
+
+
+def pending_uploads(conn: sqlite3.Connection, analysis_id: int, ids: list[int]) -> list[sqlite3.Row]:
+    """Lampiran yang boleh dikirim sekarang: milik analisis ini, jenis upload, belum terkait pesan mana pun. Urutan = urutan `ids`."""
+    if not ids:
+        return []
+    marks = ",".join("?" * len(ids))
+    rows = conn.execute(f"SELECT {_FILE_COLS} FROM analysis_file WHERE analysis_id = ? AND kind = 'upload' AND pending = 1 "
+                        f"AND id IN ({marks})", [analysis_id, *ids]).fetchall()
+    by_id = {r["id"]: r for r in rows}
+    return [by_id[i] for i in ids if i in by_id]
+
+
+def attach_uploads(conn: sqlite3.Connection, message_id: int, analysis_id: int, ids: list[int]) -> list[sqlite3.Row]:
+    """Kaitkan lampiran dengan pesan pengguna (pending -> 0). Hanya yang masih pending dan milik analisis ini."""
+    rows = pending_uploads(conn, analysis_id, ids)
+    claimed: list[sqlite3.Row] = []
+    with tx(conn):
+        for r in rows:
+            # Compare-and-set: bila pengiriman lain sudah mengklaim lampiran ini, jangan ikut mengaitkannya.
+            if conn.execute("UPDATE analysis_file SET pending = 0 WHERE id = ? AND pending = 1", (r["id"],)).rowcount == 1:
+                conn.execute("INSERT OR IGNORE INTO message_file (message_id, file_id, role, revision) VALUES (?, ?, 'attachment', ?)",
+                             (message_id, r["id"], r["revision"]))
+                claimed.append(r)
+    return claimed
+
+
+def link_outputs(conn: sqlite3.Connection, message_id: int, items: list[tuple[int, int]]) -> None:
+    """Kaitkan berkas buatan AI dengan jawaban yang membuatnya: [(file_id, revisi)]."""
+    if not items:
+        return
+    with tx(conn):
+        for file_id, revision in items:
+            conn.execute("INSERT OR REPLACE INTO message_file (message_id, file_id, role, revision) "
+                         "SELECT ?, id, 'output', ? FROM analysis_file WHERE id = ?", (message_id, revision, file_id))
+
+
+def files_for_messages(conn: sqlite3.Connection, message_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+    """Berkas per pesan: {message_id: [{...kolom berkas, role, link_revision}]} urut id berkas."""
+    if not message_ids:
+        return {}
+    marks = ",".join("?" * len(message_ids))
+    rows = conn.execute(
+        "SELECT mf.message_id, mf.role, mf.revision AS link_revision, f.id, f.analysis_id, f.kind, f.path, f.name, f.media, f.mime, f.size, f.revision "
+        f"FROM message_file mf JOIN analysis_file f ON f.id = mf.file_id WHERE mf.message_id IN ({marks}) ORDER BY f.id", message_ids).fetchall()
+    out: dict[int, list[dict[str, Any]]] = {}
+    for r in rows:
+        out.setdefault(int(r["message_id"]), []).append(dict(r))
+    return out
+
+
+def delete_file_row(conn: sqlite3.Connection, analysis_id: int, file_id: int) -> sqlite3.Row | None:
+    """Hapus catatan berkas (isi di disk dihapus oleh pemanggil). Mengembalikan baris yang dihapus, atau None."""
+    with tx(conn):
+        row = conn.execute(f"SELECT {_FILE_COLS} FROM analysis_file WHERE id = ? AND analysis_id = ?", (file_id, analysis_id)).fetchone()
+        if row is not None:
+            conn.execute("DELETE FROM analysis_file WHERE id = ?", (file_id,))
+        return row
+
+
+def stale_pending_uploads(conn: sqlite3.Connection, analysis_id: int, older_than: float) -> list[sqlite3.Row]:
+    return conn.execute(f"SELECT {_FILE_COLS} FROM analysis_file WHERE analysis_id = ? AND kind = 'upload' AND pending = 1 "
+                        "AND created_at < ?", (analysis_id, older_than)).fetchall()
+
+
 # ------------------------------------------------------------------ aksi pengguna (web)
 def request_cancel(conn: sqlite3.Connection, analysis_id: int) -> str:
     """'cancelled' (antre, langsung batal) | 'requested' (sedang jalan) | 'noop'."""

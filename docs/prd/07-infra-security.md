@@ -48,6 +48,10 @@ Tailscale/Cloudflare ──► Caddy :443 ──► web (FastAPI) ──► redi
 | Prompt injection dari isi APK | Kode = data; tool read-only; sanitasi output (04, 05) |
 | XSS dari konten APK/LLM | Escape selalu, CSP ketat |
 | Path traversal lewat tool/viewer | Normalisasi path, whitelist root `work/<id>` |
+| Lampiran berbahaya (HTML/SVG/JS, polyglot) | Jenis dari isi, bukan ekstensi; hanya png/jpeg/gif/webp yang disajikan inline (CSP `sandbox`); selain itu hanya unduhan `octet-stream` + `nosniff`; pratinjau teks lewat `textContent` |
+| AI menulis path/berkas berbahaya | `clean_ai_path` (allowlist ekstensi teks, tanpa `..`/absolut), tulis atomik, tanpa symlink, tidak pernah dijalankan; folder terpisah dari `work/` dan tidak terpasang di runner/worker |
+| Gambar lampiran membocorkan rahasia ke provider | Tidak bisa diredaksi: peringatan di UI; teks lampiran diredaksi seperti pesan |
+| Disk penuh lewat lampiran | `ATTACH_MAX_MB`, kuota ukuran & jumlah per APK, `MIN_FREE_GB`, pembersihan unggahan pending |
 | Penyalahgunaan sebagai alat serang pihak ketiga | Tidak ada tool jaringan/eksekusi; kebijakan penggunaan (00 §7); audit log |
 | Disk penuh / DoS diri sendiri | Batas ukuran upload, disk guard, kuota job, retensi |
 | Supply chain (image, dependency, skill eksternal) | Pin versi + hash, build image terkontrol, skill di-vendor pada commit tertentu & ditinjau (04) |

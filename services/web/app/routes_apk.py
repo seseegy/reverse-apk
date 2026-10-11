@@ -34,6 +34,7 @@ from .context import (
     client_ip,
     current_session,
     db,
+    file_store,
     layout,
     log,
     redis_conn,
@@ -271,6 +272,7 @@ def _detail(analysis_id: int) -> dict[str, Any] | None:
         snap = store.analysis_snapshot(conn, analysis_id)
         artifacts = [dict(a) for a in store.get_artifacts(conn, analysis_id)]
         counts = store.finding_counts(conn, analysis_id)
+        files_count = store.count_files(conn, analysis_id)
     def _loads(raw: str | None) -> dict[str, Any]:
         try:
             data = json.loads(raw) if raw else {}
@@ -278,7 +280,7 @@ def _detail(analysis_id: int) -> dict[str, Any] | None:
         except ValueError:
             return {}
 
-    return {"an": dict(an), "snap": snap, "artifacts": artifacts, "counts": counts,
+    return {"an": dict(an), "snap": snap, "artifacts": artifacts, "counts": counts, "files_count": files_count,
             "versions": _loads(an["tool_versions"]), "options": _loads(an["options"])}
 
 
@@ -527,22 +529,28 @@ def _allowed_models(cfg, prices) -> list[dict[str, str]]:
             seen.add(slug)
             r = prices.rate(slug)
             out.append({"slug": slug, "label": prices.labels.get(slug, slug), "role": role, "known": r.known,
-                        "idr_per_m": round(cfg.idr((r.in_per_m + r.out_per_m) / 2), 1)})
+                        "vision": prices.supports_vision(slug), "idr_per_m": round(cfg.idr((r.in_per_m + r.out_per_m) / 2), 1)})
     return out
 
 
 def _chat_state(analysis_id: int, session_id: int | None):
+    from .routes_files import describe     # impor lokal: routes_files mengimpor routes_apk (hindari impor melingkar)
     with closing(db()) as conn:
         sessions = [dict(r) for r in store.list_chat_sessions(conn, analysis_id)]
         messages = []
         if session_id is not None and store.get_chat_session(conn, analysis_id, session_id):
-            for m in store.get_chat_messages(conn, session_id):
+            rows = store.get_chat_messages(conn, session_id)
+            fmap = store.files_for_messages(conn, [m["id"] for m in rows])
+            for m in rows:
                 d = dict(m)
                 for k in ("tool_calls", "citations"):
                     try:
                         d[k] = json.loads(d[k]) if d[k] else []
                     except ValueError:
                         d[k] = []
+                fl = fmap.get(m["id"], [])
+                d["attachments"] = [describe(analysis_id, f) for f in fl if f["role"] == "attachment"]
+                d["outputs"] = [describe(analysis_id, f) | {"link_revision": f["link_revision"]} for f in fl if f["role"] == "output"]
                 messages.append(d)
         return sessions, messages
 
@@ -563,7 +571,7 @@ async def analysis_chat(request: Request, analysis_id: AnalysisId, s: int | None
         **ctx, "ai_enabled": bool(cfg and cfg.enabled), "ai_error": cfg_error, "sessions": sessions, "messages": messages,
         "session_id": s if messages or any(x["id"] == s for x in sessions) else None, "budget": snap,
         "models": _allowed_models(cfg, prices) if cfg and cfg.enabled else [], "has_index": has_index, "cfg": cfg,
-        "suggestions": _suggestions(ctx),
+        "suggestions": _suggestions(ctx), "file_limits": file_store.limits,
     })
 
 
@@ -598,23 +606,36 @@ async def chat_send(request: Request, analysis_id: AnalysisId) -> Response:
         text = str(body.get("text", "")).strip()
         model = body.get("model")
         session_id = body.get("session_id")
+        att_ids = body.get("attachment_ids") or []
     except (ValueError, AttributeError):
         return _json(400, error="Format permintaan tidak valid.")
-    if not text:
+    if (not isinstance(att_ids, list) or any(isinstance(i, bool) or not isinstance(i, int) or not 0 < i < 2**31 for i in att_ids)):
+        return _json(422, error="attachment_ids tidak valid.")
+    att_ids = list(dict.fromkeys(att_ids))
+    if not text and not att_ids:
         return _json(422, error="Pesan kosong.")
     allowed = {m["slug"] for m in _allowed_models(cfg, prices)}
     if model and model not in allowed:
         return _json(422, error="Model tidak diizinkan.")
     if session_id is not None and (isinstance(session_id, bool) or not isinstance(session_id, int)):
         return _json(422, error="session_id tidak valid.")
+    eff_model = model or cfg.model
 
     def prepare():
         with closing(db()) as conn:
             an = store.get_analysis(conn, analysis_id)
             if an is None:
                 return "not_found", None
+            title = text[:60]
+            if att_ids:
+                rows = store.pending_uploads(conn, analysis_id, att_ids)
+                if len(rows) != len(att_ids):
+                    return "bad_attachment", None
+                if any(r["media"] == "image" for r in rows) and not prices.supports_vision(eff_model):
+                    return "no_vision", prices.labels.get(eff_model, eff_model)
+                title = title or f"Lampiran: {rows[0]['name']}"[:60]
             if session_id is None:
-                sid = store.create_chat_session(conn, analysis_id, text[:60])
+                sid = store.create_chat_session(conn, analysis_id, title)
             else:
                 if store.get_chat_session(conn, analysis_id, session_id) is None:
                     return "no_session", None
@@ -630,13 +651,18 @@ async def chat_send(request: Request, analysis_id: AnalysisId) -> Response:
         return _json(404, error="Analisis tidak ditemukan.")
     if status == "no_session":
         return _json(404, error="Sesi chat tidak ditemukan untuk analisis ini.")
+    if status == "bad_attachment":
+        return _json(422, error="Lampiran tidak valid atau sudah terpakai di pesan lain. Hapus lalu lampirkan ulang.", code="attachment")
+    if status == "no_vision":
+        return _json(422, error=f"Model {sid} tidak bisa melihat gambar. Pilih model yang mendukung gambar, atau hapus gambar dari lampiran.",
+                     code="no_vision")
     if status == "budget":
         return _json(402, error=sid, code="budget")
     turn = ai_chat.REGISTRY.start(sid)
     if turn is None:
         return _json(409, error="Masih ada jawaban yang berjalan di sesi ini. Tunggu atau tekan Berhenti.")
     ai_chat.run_in_thread(turn, cfg=cfg, prices=prices, analysis_id=analysis_id, work=layout.work, db=db, session_id=sid,
-                          user_text=text, model=model)
+                          user_text=text, model=model, files=file_store, attachment_ids=att_ids)
     return _json(202, session_id=sid, stream=f"/analyses/{analysis_id}/chat/stream?s={sid}")
 
 
@@ -723,6 +749,12 @@ async def chat_export(request: Request, analysis_id: AnalysisId, session_id: Apk
     for m in messages:
         who = "Anda" if m["role"] == "user" else "Asisten"
         lines += [f"## {who}", "", m["content"], ""]
+        for f in (m.get("attachments") or []):
+            lines += [f"- Lampiran: {f['name']} ({f['media']}, {f['size']} byte)"]
+        for f in (m.get("outputs") or []):
+            lines += [f"- Berkas dibuat: hasil_ai/{f['path']} ({f['size']} byte)"]
+        if m.get("attachments") or m.get("outputs"):
+            lines += [""]
         if m["role"] == "assistant" and m["tool_calls"]:
             lines += ["<details><summary>Langkah tool</summary>", ""]
             lines += [f"- `{t.get('name')}` {t.get('summary', '')}" for t in m["tool_calls"]]
@@ -883,6 +915,7 @@ def _delete(apk_id: int, ip: str) -> str:
                                              "filename": row["filename_display"], "analyses": ids, "ip": ip})
     for analysis_id in ids:
         safe_rmtree(layout.work_dir(analysis_id))
+        file_store.remove_all(analysis_id)         # lampiran & berkas buatan AI (baris DB sudah hilang lewat CASCADE)
     try:
         path = layout.upload_path(row["sha256"])
         path.unlink(missing_ok=True)

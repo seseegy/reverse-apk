@@ -70,6 +70,27 @@ def estimate_tokens(text: str) -> int:
     return int(len(text) / 3.5) + 1
 
 
+IMAGE_TOKENS = 1200   # perkiraan kasar token per gambar bila provider tidak melaporkan pemakaian
+
+
+def _without_images(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Salinan pesan dengan gambar base64 diganti penanda pendek (dan jumlah gambarnya), agar perkiraan token tidak membengkak."""
+    out, n = [], 0
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, list):
+            parts = []
+            for part in c:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    n += 1
+                    parts.append({"type": "text", "text": "[gambar]"})
+                else:
+                    parts.append(part)
+            m = {**m, "content": parts}
+        out.append(m)
+    return out, n
+
+
 class Client:
     def __init__(self, cfg: AIConfig) -> None:
         self.cfg = cfg
@@ -222,7 +243,8 @@ class Client:
             cached = details.get("cached_tokens") or u.get("prompt_cache_hit_tokens") or 0
             return Usage(u["prompt_tokens"], u["completion_tokens"], int(cached) if isinstance(cached, int) else 0)
         # Provider tidak melaporkan pemakaian: perkirakan dari panjang teks dan tandai sebagai perkiraan.
-        prompt = estimate_tokens(json.dumps(messages, ensure_ascii=False) + (json.dumps(tools) if tools else ""))
+        flat, n_images = _without_images(messages)
+        prompt = estimate_tokens(json.dumps(flat, ensure_ascii=False) + (json.dumps(tools) if tools else "")) + n_images * IMAGE_TOKENS
         comp = estimate_tokens(content + "".join(c.name + c.arguments for c in calls))
         return Usage(prompt, comp, 0, estimated=True)
 

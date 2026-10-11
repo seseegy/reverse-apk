@@ -19,6 +19,7 @@ from rvcore import db as rvdb
 from rvcore import store
 from rvcore.paths import Layout
 
+from . import userfiles
 from .config import load_settings
 from .security import LoginLimiter, Session, SessionManager
 
@@ -40,22 +41,27 @@ STALE_TMP_SECONDS = 3600
 
 def init_storage() -> None:
     """Siapkan direktori + skema DB. Dipanggil sekali saat startup; gagal cepat bila volume tak bisa ditulis."""
-    for d in (layout.uploads, layout.uploads_tmp, layout.work, layout.db_dir):
+    for d in (layout.uploads, layout.uploads_tmp, layout.work, layout.db_dir, layout.files, layout.files_tmp):
         d.mkdir(parents=True, exist_ok=True)
     rvdb.migrate(layout.db_path)
     # Sisa unggahan yang terputus (proses mati di tengah jalan).
     cutoff = time.time() - STALE_TMP_SECONDS
-    for p in layout.uploads_tmp.iterdir():
-        try:
-            if p.is_file() and p.stat().st_mtime < cutoff:
-                p.unlink()
-        except OSError:
-            pass
+    for tmp_dir in (layout.uploads_tmp, layout.files_tmp):
+        for p in tmp_dir.iterdir():
+            try:
+                if p.is_file() and p.stat().st_mtime < cutoff:
+                    p.unlink()
+            except OSError:
+                pass
 
 
 def db():
     """Koneksi SQLite baru. Pemanggil bertanggung jawab menutupnya (gunakan `with closing(db())`)."""
     return rvdb.connect(layout.db_path)
+
+
+# Lampiran pengguna & berkas buatan AI (volume `files`, hanya web). Batas ukuran/kuota dari .env: ATTACH_MAX_MB, FILES_QUOTA_MB, FILES_MAX_COUNT.
+file_store = userfiles.FileStore(layout.files, layout.files_tmp, userfiles.limits_from_env(), db)
 
 
 # ---------------------------------------------------------------- sesi & respons

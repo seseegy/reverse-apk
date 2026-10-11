@@ -10,7 +10,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Titik mount volume dibuat & dimiliki uid aplikasi agar volume kosong yang baru dibuat mewarisi izinnya.
 RUN groupadd --system --gid 10001 app \
  && useradd --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app \
- && mkdir -p /data/uploads /data/work /data/db \
+ && mkdir -p /data/uploads /data/work /data/files /data/db \
  && chown -R 10001:10001 /data
 
 WORKDIR /srv

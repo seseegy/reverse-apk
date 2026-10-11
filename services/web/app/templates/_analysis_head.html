@@ -48,6 +48,8 @@
   <a href="/analyses/{{ an.id }}/network"{% if tab == 'network' %} aria-current="page"{% endif %}>Jaringan</a>
   <a href="/analyses/{{ an.id }}/code"{% if tab == 'code' %} aria-current="page"{% endif %}>Kode</a>
   <a href="/analyses/{{ an.id }}/chat"{% if tab == 'chat' %} aria-current="page"{% endif %}>Chat</a>
+  <a href="/analyses/{{ an.id }}/files"{% if tab == 'files' %} aria-current="page"{% endif %}>Berkas
+    {%- if files_count %} <span class="tab-count">{{ files_count }}</span>{% endif %}</a>
   <a href="/analyses/{{ an.id }}/manifest"{% if tab == 'manifest' %} aria-current="page"{% endif %}>Manifest</a>
 </nav>
 
