@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{#- Halaman galat (404/405/422/500/lainnya) untuk navigasi browser. Dirender oleh handler galat di main.py; teks dari server, bukan dari permintaan. -#}
+{% block title %}{{ heading }} · reverse-apk{% endblock %}
+
+{% block header %}{% if user %}{% include "_header.html" %}{% endif %}{% endblock %}
+
+{% block content %}
+<div class="container page page-narrow">
+  <section class="card empty" aria-labelledby="err-title">
+    <div class="empty-icon">{{ icon('alert-triangle' if status_code >= 500 else 'info', 28) }}</div>
+    <h1 id="err-title">{{ heading }}</h1>
+    <p class="muted">{{ message }}</p>
+    <p class="muted hint mono">Kode {{ status_code }}</p>
+    <a class="btn btn-primary" href="/">{{ icon('arrow-left', 16) }}<span>Kembali ke dashboard</span></a>
+  </section>
+</div>
+{% endblock %}

@@ -10,8 +10,10 @@ from contextlib import closing
 import redis
 from fastapi import FastAPI, Form, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import status as system_status
 from .context import (
@@ -65,6 +67,12 @@ CSP = (
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
+    _apply_security_headers(request, response)
+    return response
+
+
+def _apply_security_headers(request: Request, response: Response) -> None:
+    """Dipakai middleware di atas DAN handler galat 500 (yang dijalankan Starlette di luar middleware ini)."""
     h = response.headers
     # Rute boleh memasang CSP yang LEBIH ketat (mis. penyajian berkas pengguna: "default-src 'none'; sandbox"); jangan ditimpa.
     if "content-security-policy" not in h:
@@ -78,6 +86,76 @@ async def security_headers(request: Request, call_next):
     # Jangan menimpa Cache-Control yang sudah ditetapkan rute (SSE memakai "no-store, no-transform").
     if not request.url.path.startswith("/static/") and "cache-control" not in h:
         h["Cache-Control"] = "no-store"
+
+
+# ---------------------------------------------------------------- halaman galat (BE-12)
+# Galat yang terjadi SEBELUM isi rute berjalan (alamat tak dikenal, metode salah, parameter tidak valid) dan galat tak terduga.
+# Siapa yang bertanya ditentukan dari header Accept: navigasi browser mengirim text/html dan mendapat halaman; fetch()/EventSource/
+# skrip mendapat JSON {"error": ...} seperti respons rute lain (app.js membaca d.error). Rute yang menangani galatnya sendiri tidak
+# terpengaruh (mis. /analyses/999999 -> ?notice=not_found, API tanpa sesi -> 401).
+
+ERROR_TEXT: dict[int, tuple[str, str, str]] = {   # status -> (judul halaman, penjelasan, pesan JSON)
+    404: ("Halaman tidak ditemukan", "Alamat ini tidak ada di aplikasi. Mungkin salah ketik, atau tautannya sudah lama.", "Tidak ditemukan."),
+    405: ("Aksi tidak tersedia", "Alamat ini tidak menerima permintaan seperti itu. Gunakan tombol dan menu di aplikasi.",
+          "Metode tidak diizinkan."),
+    422: ("Permintaan tidak valid", "Ada bagian alamat yang tidak valid, misalnya teks pencarian terlalu panjang.",
+          "Parameter permintaan tidak valid."),
+    500: ("Terjadi galat di server", "Permintaan Anda tidak bisa diselesaikan. Kejadiannya tercatat di log server; coba lagi sebentar lagi.",
+          "Galat internal server."),
+}
+GENERIC_ERROR = ("Permintaan tidak bisa diproses", "Server menolak permintaan ini.", "Permintaan tidak bisa diproses.")
+
+# Cadangan bila template halaman galat sendiri ikut gagal dirender (tanpa gaya/skrip inline: tetap patuh CSP).
+FALLBACK_500 = ('<!doctype html><html lang="id"><head><meta charset="utf-8"><title>Terjadi galat di server</title></head><body>'
+                "<h1>Terjadi galat di server</h1><p>Permintaan Anda tidak bisa diselesaikan. Coba lagi sebentar lagi.</p>"
+                '<p><a href="/">Kembali ke dashboard</a></p></body></html>')
+
+
+def _wants_html(request: Request) -> bool:
+    return "text/html" in request.headers.get("accept", "")
+
+
+def _error_response(request: Request, status_code: int, headers: dict | None = None) -> Response:
+    heading, message, api_message = ERROR_TEXT.get(status_code, GENERIC_ERROR)
+    if not _wants_html(request):
+        return JSONResponse({"error": api_message}, status_code=status_code, headers=headers)
+    session = current_session(request)
+    if session is None and status_code < 500:
+        # Belum login: sama seperti setiap halaman lain (dan tidak membocorkan rute mana yang ada). 500 tidak diarahkan, agar
+        # halaman login yang rusak tidak berputar ke dirinya sendiri.
+        return RedirectResponse("/login", status_code=303)
+    try:
+        response = render(request, "error.html", {
+            "status_code": status_code, "heading": heading, "message": message,
+            "user": session.user if session else None, "csrf": session.csrf if session else ""}, status_code)
+    except Exception:  # noqa: BLE001 - halaman galat tidak boleh menjadi sumber galat baru
+        log.exception("gagal merender halaman galat %s", status_code)
+        response = HTMLResponse(FALLBACK_500 if status_code >= 500 else f"<!doctype html><title>{status_code}</title>", status_code)
+    for k, v in (headers or {}).items():
+        response.headers[k] = v
+    return response
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_error(request: Request, exc: StarletteHTTPException) -> Response:
+    """404 (alamat tak dikenal, berkas statis tak ada), 405 (metode salah, header Allow dipertahankan), dan HTTPException lain."""
+    return _error_response(request, exc.status_code, exc.headers)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, exc: RequestValidationError) -> Response:
+    """Parameter tidak valid. Id di PATH yang tidak valid (/analyses/abc, /analyses/0) = data tidak ada, sama seperti id yang tidak ada."""
+    if _wants_html(request) and current_session(request) is not None and any((e.get("loc") or ("",))[0] == "path" for e in exc.errors()):
+        return RedirectResponse("/?notice=not_found", status_code=303)
+    return _error_response(request, 422)
+
+
+@app.exception_handler(Exception)
+async def server_error(request: Request, exc: Exception) -> Response:
+    """Galat tak terduga. Starlette menjalankan handler ini DI LUAR middleware, jadi header keamanan dipasang di sini. Galatnya tetap
+    diteruskan Starlette ke uvicorn sesudahnya, sehingga traceback lengkap muncul di log server (tidak dicatat dua kali di sini)."""
+    response = _error_response(request, 500)
+    _apply_security_headers(request, response)
     return response
 
 
