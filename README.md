@@ -21,7 +21,9 @@ make doctor      # periksa kesehatan
 Panduan lengkap untuk VPS: [docs/deploy.md](docs/deploy.md).
 
 ## Perintah
-`make help` menampilkan semuanya: `init`, `password`, `up`, `down`, `restart`, `logs`, `ps`, `update`, `runner-selftest`, `doctor`.
+`make help` menampilkan semuanya: `init`, `password`, `up`, `down`, `restart`, `logs`, `ps`, `update`, `runner-selftest`, `doctor`, `test`.
+
+Tes (tanpa Docker): `pip install -r services/web/requirements.txt -r tests/requirements.txt` lalu `make test`. CI menjalankannya di setiap PR.
 
 Set berkas uji (zip bomb sintetis, APK besar, APK sampah): `scripts/make-test-apks.py --help`.
 APK uji berisi kelemahan yang sengaja ditanam (untuk memverifikasi analisis statis): `python3 scripts/sample-apk/build.py`.

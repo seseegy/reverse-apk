@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"        # sama dengan image web/worker/runner (python:3.12-slim-trixie)
+          cache: pip
+          cache-dependency-path: |
+            services/web/requirements.txt
+            tests/requirements.txt
+      - name: Pasang dependensi
+        run: pip install -r services/web/requirements.txt -r tests/requirements.txt
+      - name: pyflakes
+        run: python -m pyflakes services tests
+      - name: pytest
+        run: python -m pytest

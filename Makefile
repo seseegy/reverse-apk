@@ -2,7 +2,7 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 COMPOSE ?= docker compose
 
-.PHONY: help init password up down restart logs ps update runner-selftest ai-check env-check doctor
+.PHONY: help init password up down restart logs ps update runner-selftest ai-check env-check doctor test
 
 help: ## Tampilkan daftar perintah
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[32m%-16s\033[0m %s\n", $$1, $$2}'
@@ -52,6 +52,10 @@ ai-check: ## Uji provider AI (koneksi, streaming, tool calling, pemakaian token)
 
 env-check: ## Bandingkan .env dengan environment container (mengapa variabel tidak termuat?)
 	@COMPOSE="$(COMPOSE)" ./scripts/envcheck.sh
+
+test: ## Jalankan tes (lokal, tanpa Docker; butuh Python 3.12 + pip install -r services/web/requirements.txt -r tests/requirements.txt)
+	python3 -m pyflakes services tests
+	python3 -m pytest
 
 doctor: ## Periksa konfigurasi dan kesehatan layanan
 	@test -f .env || { echo "✗ .env belum ada (make init)"; exit 1; }

@@ -1,0 +1,6 @@
+# Dependensi tambahan untuk tes (di atas services/web/requirements.txt). Ter-pin.
+#   pip install -r services/web/requirements.txt -r tests/requirements.txt && python -m pytest
+pytest==9.1.1
+httpx==0.28.1
+fakeredis==2.39.0
+pyflakes==4.0.3
