@@ -1005,3 +1005,40 @@ select:hover { border-color: var(--color-muted-foreground); }
 .tstep.is-draft .tstep-time { font-style: italic; }
 .tab-live { display: inline-block; width: 8px; height: 8px; margin-left: 4px; border-radius: 50%; background: var(--color-accent); vertical-align: middle;
   animation: live-pulse 1.4s ease-in-out infinite; }
+
+/* =====================================================================
+   Target sentuh pada layar sentuh / sempit (audit UI-02)
+   Blok ini sengaja di AKHIR berkas: beberapa aturan di atas (.msg-foot .btn 28px, .code-search input 36px,
+   .tree-item 28px) punya kekhususan sama dengan penimpa di sini, jadi yang menang adalah yang terakhir.
+   ===================================================================== */
+@media (pointer: coarse), (max-width: 640px) {
+  /* Kontrol MANDIRI yang terukur 19–40px. inline-flex + align-items agar teksnya tetap di tengah
+     dan tinggi baris tidak bergeser. Tautan di tengah kalimat TIDAK ikut (lihat .cite di bawah). */
+  .back-link, .link-quiet, .tabs a, .header-row nav a, .subtabs a,
+  .table th a, .table td a, .evidence a, .frow-link {
+    min-height: 44px; display: inline-flex; align-items: center;
+  }
+  .tree-item, .result-item { min-height: 44px; }
+  .msg-tools > summary, .side-fold > summary, .f-details > summary {
+    min-height: 44px; display: flex; align-items: center;
+  }
+  /* Penimpa yang sebelumnya mengalahkan aturan 44px */
+  .msg-foot .btn, .msg-actions .btn { min-height: 44px; }
+  .code-search input[type="search"], .filters input[type="search"] { min-height: 44px; }
+  select { min-height: 44px; }
+  .check-sm { min-height: 44px; align-items: center; }
+
+  /* Chip sitasi di tengah kalimat: 18px -> 24px lewat padding tegak pada elemennya sendiri.
+     Lapisan ::after tak terlihat sempat dicoba agar tata letak sama sekali tidak berubah, tetapi TIDAK efektif
+     (terukur: hanya +2px di atas, 0 di bawah; pengujian hit-test), jadi dipakai cara yang benar-benar terbukti.
+     line-height .msg-body (1,65) lebih tinggi dari 24px, sehingga baris paragraf praktis tidak merenggang. */
+  .cite { padding-block: 3px; }
+  /* Daftar sesi di sisi chat (terukur 23px, tepat di bawah ambang) */
+  .chat-sessions a { min-height: 44px; display: inline-flex; align-items: center; }
+}
+
+/* Navigasi halaman daftar berkas (audit BE-09). Tombol mati memakai <span aria-disabled> agar tidak bisa difokus. */
+.pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: var(--space-3); margin-top: var(--space-4); }
+.pager-info { text-align: center; }
+.pager-page { white-space: nowrap; }
+.pager [aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }

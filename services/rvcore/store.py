@@ -465,7 +465,9 @@ def find_file(conn: sqlite3.Connection, analysis_id: int, kind: str, path: str) 
                         (analysis_id, kind, path)).fetchone()
 
 
-def list_files(conn: sqlite3.Connection, analysis_id: int, kind: str | None = None, *, include_pending: bool = False) -> list[sqlite3.Row]:
+def list_files(conn: sqlite3.Connection, analysis_id: int, kind: str | None = None, *, include_pending: bool = False,
+               limit: int | None = None, offset: int = 0) -> list[sqlite3.Row]:
+    """Berkas satu analisis, urut id. `limit`/`offset` untuk paginasi halaman Berkas (limit=None -> semua, dipakai ZIP & tool AI)."""
     sql = f"SELECT {_FILE_COLS} FROM analysis_file WHERE analysis_id = ?"
     params: list[Any] = [analysis_id]
     if kind:
@@ -473,11 +475,18 @@ def list_files(conn: sqlite3.Connection, analysis_id: int, kind: str | None = No
         params.append(kind)
     if not include_pending:
         sql += " AND pending = 0"
-    return conn.execute(sql + " ORDER BY id", params).fetchall()
+    sql += " ORDER BY id LIMIT ? OFFSET ?"
+    params += [-1 if limit is None else limit, max(0, offset)]
+    return conn.execute(sql, params).fetchall()
 
 
-def count_files(conn: sqlite3.Connection, analysis_id: int) -> int:
-    return int(conn.execute("SELECT COUNT(*) FROM analysis_file WHERE analysis_id = ? AND pending = 0", (analysis_id,)).fetchone()[0])
+def count_files(conn: sqlite3.Connection, analysis_id: int, kind: str | None = None) -> int:
+    sql = "SELECT COUNT(*) FROM analysis_file WHERE analysis_id = ? AND pending = 0"
+    params: list[Any] = [analysis_id]
+    if kind:
+        sql += " AND kind = ?"
+        params.append(kind)
+    return int(conn.execute(sql, params).fetchone()[0])
 
 
 def pending_uploads(conn: sqlite3.Connection, analysis_id: int, ids: list[int]) -> list[sqlite3.Row]:

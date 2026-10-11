@@ -362,7 +362,11 @@ Waktu server murah (13–118 ms); biayanya ada di ukuran HTML dan DOM klien. Hal
 
 Yang **gagal WCAG 2.2 AA 2.5.8 (< 24px)**: 642 elemen, 6 jenis. Sisanya (982 elemen) lolos WCAG tetapi di bawah panduan proyek 44px.
 
-> **Positif palsu yang sudah dipastikan:** `input.file-input` di halaman Upload terukur 1×1 px, tetapi tombol sebenarnya adalah `<label for="file" class="btn">` terpisah (sudah ≥ 44px di ponsel). Jangan dikejar.
+> **Dua koreksi atas cara mengukur** (penting sebelum angka di atas dipakai lagi):
+> 1. Metrik memakai `min(lebar, tinggi)`. Sebagian "39px" sebenarnya **lebar** label pendek (mis. tab `Kode` berukuran 39×44 px) — itu **lolos** 2.5.8 yang mensyaratkan 24×24. Jadi hitungan 982 di atas kelebihan hitung.
+> 2. WCAG 2.5.8 punya pengecualian **Inline**: target di dalam kalimat, yang ukurannya ditentukan `line-height` teks sekitarnya, dikecualikan. Itu berlaku untuk chip sitasi dan tautan "Ringkasan" di paragraf halaman Manifest.
+
+> **Positif palsu yang sudah dipastikan:** `input.file-input` di halaman Upload terukur 1×1 px, tetapi tombol sebenarnya adalah `<label for="file" class="btn">` terpisah (sudah ≥ 44px di ponsel). Begitu juga `input` di `label.check` (20px): yang diketuk adalah labelnya (terukur 332×44 px setelah perbaikan). Jangan dikejar.
 
 **BE-07 — rekonsiliasi DB ↔ disk** (dijalankan, bukan dibaca):
 
@@ -409,6 +413,32 @@ Dikelompokkan menurut **layanan yang membacanya**; ini yang menentukan ke mana v
 | UI-03 (glyph ▯) | **Tidak dikerjakan** |
 | UI-06, UI-08, OP-05 | Belum diputuskan |
 
-### 10.5 Cara mengulang pengukuran
+### 10.5 Hasil setelah perbaikan BE-09 (halaman Berkas) & UI-02
+
+**Halaman Berkas** dengan 1.500 berkas, pengukuran yang sama persis:
+
+| | Sebelum | Sesudah (paginasi, `PAGE_SIZE = 50`) |
+|---|---|---|
+| HTML | 4.349 KB | **153 KB** (28× lebih kecil) |
+| Simpul DOM | 52.628 | **1.891** |
+| `loadEventEnd` | 753 ms | **93 ms** |
+| CPU 4× lambat | 2.468 ms | **186 ms** |
+
+Biaya per baris terukur **±2,9 KB** (ikon SVG sebaris, tiga tombol, dan form hapus per baris). Kalau nanti perlu lebih ringan lagi, langkah berikutnya adalah memakai sprite `<use href="#…">` seperti `state_sprite()` di `_parts.html`, bukan menurunkan `PAGE_SIZE` lagi.
+
+**Chat 600 pesan belum disentuh** (649 KB, 29.094 simpul): memecah riwayat chat menjadi halaman bersinggungan dengan sambung-ulang aliran (FR-5.15) dan dengan perilaku "menempel di dasar", jadi risikonya jauh lebih besar daripada halaman Berkas dan dikerjakan terpisah.
+
+**Target sentuh** sesudah perbaikan, pengukuran yang sama (390 px):
+
+| Sisa yang masih < 24px | Alasan dibiarkan |
+|---|---|
+| `a` "Ringkasan" di paragraf Manifest, 19px | di tengah kalimat → pengecualian **Inline** 2.5.8 |
+| `input.file-input` 1px, `input` di `label.check` 20px | positif palsu: labelnya yang diketuk (44px) |
+
+Chip sitasi dinaikkan 18px → **24px**. Yang tadinya 982 elemen di bawah 44px kini tinggal `a.skip-link` (tersembunyi sampai difokus) dan beberapa label tab yang **lebarnya** 39px dengan tinggi 44px.
+
+> **Jangan diulangi:** lapisan `::after` tak terlihat untuk memperbesar area ketuk chip sitasi tanpa mengubah tata letak **tidak bekerja** — diuji dengan `elementFromPoint`, hanya menambah ±2px di atas dan 0 di bawah. Yang berhasil adalah `padding-block` pada elemennya sendiri.
+
+### 10.6 Cara mengulang pengukuran
 
 Alat di §9 (`/projects/.scratch`) **sudah hilang**; risiko QA-01 sudah terjadi. Pengukuran di atas memakai Playwright + Chromium di luar repo, dan sengaja **tidak** ditambahkan ke CI (unduhan Chromium ±115 MB). Tes yang ada di `tests/` menjalankan aplikasi web tanpa jaringan (Redis & provider AI tidak terjangkau); worker, runner, analyzer, dan stack Docker penuh belum tercakup.
