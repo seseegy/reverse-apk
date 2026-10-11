@@ -38,6 +38,8 @@ Yang perlu dikerjakan, berurutan menurut nilai:
 
 Hitungan: **1 Tinggi (proses) · 8 Sedang · 15 Rendah · 3 Catatan** (27 butir; QA-02 hanya penunjuk ke §7).
 
+> **Status terkini ada di §10** (11 Okt 2026): apa yang sudah diperbaiki beserta nomor PR, hasil pengukuran butir yang tadinya hanya dugaan angka, dan keputusan pemilik. Tabel di atas adalah temuan awal 10 Okt dan sengaja tidak diubah.
+
 ---
 
 ## 2. Backend
@@ -316,3 +318,97 @@ Jalankan satu skrip uji per panggilan `local_run.sh` bila skrip membuat APK deng
 - Chrome headless minimal selebar ±500 px; gunakan `Emulation.setDeviceMetricsOverride` (lihat `cdpweb.js`) untuk viewport sempit, dan ukur dengan `visualViewport.width` (bukan `innerWidth`, yang ikut melebar bila ada overflow).
 - Tes stack Docker butuh `mkdir -p /run/podman`; `cycle.sh` menghapus semua container/volume lain.
 - Starlette 1.x: `app.routes` tidak menampilkan router yang di-include; daftar rute diambil dari dekorator (AST) atau diuji langsung.
+
+---
+
+## 10. Status & hasil pengukuran (11 Okt 2026)
+
+Ditulis sesi berikutnya, setelah tiap temuan diverifikasi ulang dari kode dan dijalankan. Angka di bawah **terukur**, bukan dugaan.
+
+### 10.1 Sudah diperbaiki
+
+| Butir | PR | Catatan |
+|---|---|---|
+| BE-01, BE-02, BE-03 | #25 | + dua temuan baru: `model` berupa list/objek → 500 (`TypeError` unhashable), JSON bersarang dalam → 500 (`RecursionError`). BE-02 hanya bisa dipicu dengan **byte latin-1 mentah** (`0xB2`); klien HTTP yang menyandikan ke UTF-8 tidak memicunya. |
+| BE-04, BE-05, BE-11 | #26 | Logger `reverse-apk.ai` (`ai/logutil.py`). Audit log + `file_upload`, `file_delete`, `ai_file_write`, `chat_session_delete`. `/readyz` **sengaja tidak** dipakai Caddy: saat Redis mati situs harus tetap tampil agar kartu Status sistem bisa dibuka. |
+| BE-12 | #27 | Pilihan halaman vs JSON dari header `Accept`, **bukan** `/api/*` seperti saran §4: sebagian besar endpoint XHR ada di bawah `/analyses/...`. Temuan tambahan: respons 500 sebelumnya **tanpa header keamanan** (handler 500 berjalan di luar middleware) — berarti klaim §6 "header ada di setiap tipe respons" tidak berlaku untuk 500. |
+| QA-01, OP-04 | #28 | `tests/` + CI (pyflakes + pytest). Menggantikan aturan lama "jangan commit tes". |
+| UI-04, UI-05, UI-07 | #29 | Satu sumber format angka `rvcore/fmt.py` (dipakai web, worker, runner) + `fmtNum` di `app.js`. `readJson()` agar respons non-JSON tidak lagi jadi "Koneksi gagal". |
+| Sesi kosong saat anggaran habis (tidak ada di audit awal) | #29 | `budget.check()` dipindah sebelum `create_chat_session()`. |
+
+### 10.2 Hasil pengukuran
+
+**BE-09 — ukuran halaman** (Chromium 153, server lokal, 1.280×900):
+
+| Halaman | HTML | Simpul DOM | Server | `loadEventEnd` | CPU 4× lambat |
+|---|---|---|---|---|---|
+| Dashboard (pembanding) | 10 KB | 153 | 13 ms | 59 ms | — |
+| Chat, 600 pesan | 649 KB | 29.094 | 78 ms | 455 ms | 1.327 ms |
+| **Berkas, 1.500 berkas** | **4.349 KB** | 52.628 | 118 ms | 753 ms | **2.468 ms** |
+
+Waktu server murah (13–118 ms); biayanya ada di ukuran HTML dan DOM klien. Halaman **Berkas** yang terparah, dan `FILES_MAX_COUNT` bawaan 2000 mengizinkan ±5,8 MB. Angka Berkas cocok dengan §2; angka Chat lebih kecil dari klaim §2 (1,8 MB / 81k simpul) karena panjang pesan uji berbeda — jadi perbandingan antar sesi hanya sah bila isi pesannya sama.
+
+**UI-02 — target sentuh pada 390 px** (`min(lebar, tinggi)`; target efektif dihitung dari `<label>` pembungkus bila ada):
+
+| Elemen | Ukuran | Jumlah | Halaman |
+|---|---|---|---|
+| `a.cite` (chip sitasi) | **18px** | 600 | Chat |
+| `a` di dalam tabel | **19px** | 32 | Dashboard, Temuan, Manifest |
+| `a.link-quiet`, `a.back-link`, checkbox tab Kode | **22px** | 9 | hampir semua halaman analisis |
+| `button.btn` di `.msg-foot` (Salin) | 28px | 600 | Chat |
+| `summary` daftar sesi | 29px | 301 | Chat |
+| `input[type=search]`, `select` | 36–40px | 5 | Kode, Temuan |
+| tautan nav & tab, `a.skip-link` | 39px | 76 | semua |
+
+Yang **gagal WCAG 2.2 AA 2.5.8 (< 24px)**: 642 elemen, 6 jenis. Sisanya (982 elemen) lolos WCAG tetapi di bawah panduan proyek 44px.
+
+> **Positif palsu yang sudah dipastikan:** `input.file-input` di halaman Upload terukur 1×1 px, tetapi tombol sebenarnya adalah `<label for="file" class="btn">` terpisah (sudah ≥ 44px di ponsel). Jangan dikejar.
+
+**BE-07 — rekonsiliasi DB ↔ disk** (dijalankan, bukan dibaca):
+
+| Keadaan | Perilaku nyata |
+|---|---|
+| Baris ada di DB, berkas hilang dari disk | Halaman Berkas menampilkan barisnya **tanpa penanda apa pun**; `/text` → 200 `{"missing": true}` (penampil baru memberi tahu saat dibuka); `/download` → 404; **ZIP → 200 berisi arsip kosong 22 byte, tanpa peringatan**; kuota tetap menghitungnya. |
+| Berkas ada di disk, tidak ada barisnya di DB | Tidak tampil di UI, tidak dihitung kuota, tidak ikut ZIP. Hanya hilang saat APK dihapus (`rmtree`). |
+
+**BE-06 — lampiran *pending*:** lampiran berumur 10 jam di analisis B **tetap ada** setelah `purge_stale_uploads(analisis A)`, dan terus dihitung ke kuota analisis B sampai ada unggahan baru di sana. Sesuai §2.
+
+**OP-02 — pin versi:**
+
+| Hal | Keadaan |
+|---|---|
+| Dependensi Python | **37 dari 37 paket ter-pin `==`** (web 27, worker 6, tes 4); **0 dengan `--hash`** |
+| Image | `python:3.12-slim-trixie` (×3), `caddy:2.11-alpine`, `redis:8.8-alpine` — **tidak ada `@sha256:` sama sekali** |
+| jadx & apktool | **Sudah** diverifikasi SHA-256 saat build (`sha256sum -c`) |
+| GitHub Actions | `actions/checkout@v4`, `actions/setup-python@v5` (tag, bukan commit) |
+
+### 10.3 OP-01 — 14 variabel yang tidak diteruskan compose
+
+Dikelompokkan menurut **layanan yang membacanya**; ini yang menentukan ke mana variabelnya harus ditambahkan.
+
+| Variabel | Dibaca | Bawaan | Usul |
+|---|---|---|---|
+| `LOGIN_MAX_FAILS`, `LOGIN_WINDOW`, `LOGIN_LOCK` | web | 5 · 900 s · 900 s | teruskan (keamanan login) |
+| `SESSION_MAX_AGE` | web | 43200 s | teruskan |
+| `AI_READ_TIMEOUT`, `AI_CONNECT_TIMEOUT` | web | 120 s · 10 s | teruskan (model lambat) |
+| `DISK_WARN_PERCENT` | web | 80 | teruskan (murah) |
+| `ZIP_MAX_ENTRIES`, `ZIP_MAX_UNCOMPRESSED_MB`, `ZIP_MAX_ENTRY_MB`, `ZIP_MAX_RATIO` | web | 100000 · 3072 · 512 · 100 | biarkan internal (pengaman zip-bomb) |
+| `JOB_MIN_FREE_GB`, `RUNNER_PICKUP_TIMEOUT` | **worker** | 5 GB · 120 s | biarkan, atau tambahkan ke service `worker` |
+| `MAX_OUTPUT_FILES` | **runner** | 600000 | biarkan internal (pengaman) |
+
+`REDIS_URL` dan `REDIS_PORT` bukan masalah: keduanya alternatif dari `REDIS_HOST`/`REDIS_PASSWORD` yang sudah diteruskan. `TOOL_HOME_ROOT`, `HOME`, `PATH` internal.
+
+### 10.4 Keputusan pemilik (11 Okt 2026)
+
+| Butir | Keputusan |
+|---|---|
+| QA-01 / OP-04 (tes di repo) | **Boleh** → #28 |
+| OP-03 (backup, rotasi log) | **Tidak dikerjakan** untuk sekarang |
+| BE-10 (`MAX_CHAT_BODY` 4 MiB) | **Ditutup**: pengaman yang disengaja (PRD 05), Caddy sudah menahan 1 MB di rute itu |
+| UI-01 (overflow 320 px) | **Dibiarkan**: di bawah breakpoint uji design system (375 px ke atas) |
+| UI-03 (glyph ▯) | **Tidak dikerjakan** |
+| UI-06, UI-08, OP-05 | Belum diputuskan |
+
+### 10.5 Cara mengulang pengukuran
+
+Alat di §9 (`/projects/.scratch`) **sudah hilang**; risiko QA-01 sudah terjadi. Pengukuran di atas memakai Playwright + Chromium di luar repo, dan sengaja **tidak** ditambahkan ke CI (unduhan Chromium ±115 MB). Tes yang ada di `tests/` menjalankan aplikasi web tanpa jaringan (Redis & provider AI tidak terjangkau); worker, runner, analyzer, dan stack Docker penuh belum tercakup.
