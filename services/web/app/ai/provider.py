@@ -106,7 +106,8 @@ class Client:
     def chat(self, messages: list[dict[str, Any]], *, model: str | None = None,
              tools: list[dict[str, Any]] | None = None, tool_choice: str | dict | None = None,
              max_tokens: int | None = None, temperature: float | None = None, stream: bool = False,
-             on_delta: Callable[[str], None] | None = None, cancel: threading.Event | None = None) -> ChatResult:
+             on_delta: Callable[[str], None] | None = None, cancel: threading.Event | None = None,
+             on_tool: Callable[[int, str, str], None] | None = None) -> ChatResult:
         if not self.cfg.enabled:
             raise AIError("config", "AI belum dikonfigurasi (AI_BASE_URL / AI_API_KEY / AI_MODEL).")
         model = model or self.cfg.model
@@ -121,7 +122,7 @@ class Client:
 
             try:
                 return self._once(messages, model, tools, tool_choice, max_tokens, temperature, stream,
-                                  delta if stream else None, cancel)
+                                  delta if stream else None, cancel, on_tool if stream else None)
             except AIError as exc:
                 if cancel is not None and cancel.is_set():
                     raise AIError("cancelled", "Dibatalkan.") from exc
@@ -146,7 +147,7 @@ class Client:
             return False
         return cancel.wait(seconds)
 
-    def _once(self, messages, model, tools, tool_choice, max_tokens, temperature, stream, on_delta, cancel) -> ChatResult:  # noqa: ANN001
+    def _once(self, messages, model, tools, tool_choice, max_tokens, temperature, stream, on_delta, cancel, on_tool=None) -> ChatResult:  # noqa: ANN001
         body: dict[str, Any] = {"model": model, "messages": messages,
                                 "max_tokens": max_tokens or self.cfg.max_output_tokens, "stream": bool(stream)}
         if temperature is not None:
@@ -183,7 +184,7 @@ class Client:
                 raise self._http_error(resp)
             ctype = (resp.getheader("Content-Type") or "").lower()
             if stream and "text/event-stream" in ctype:
-                return self._read_stream(resp, model, messages, tools, on_delta, cancel)
+                return self._read_stream(resp, model, messages, tools, on_delta, cancel, on_tool)
             if stream and on_delta is not None:
                 # Beberapa router mengabaikan stream=true dan membalas JSON biasa: tetap diterima.
                 result = self._parse_full(resp.read(MAX_BODY + 1), model, messages, tools)
@@ -268,7 +269,7 @@ class Client:
         return ChatResult(content, calls, choice.get("finish_reason"),
                           self._usage(data.get("usage"), messages, tools, content, calls), str(data.get("model") or model))
 
-    def _read_stream(self, resp, model, messages, tools, on_delta, cancel) -> ChatResult:  # noqa: ANN001
+    def _read_stream(self, resp, model, messages, tools, on_delta, cancel, on_tool=None) -> ChatResult:  # noqa: ANN001
         parts: list[str] = []
         calls: dict[int, dict[str, str]] = {}
         finish = None
@@ -339,6 +340,9 @@ class Client:
                         slot["name"] += fn["name"]
                     if isinstance(fn.get("arguments"), str):
                         slot["arguments"] += fn["arguments"]
+                    if on_tool and slot["name"]:
+                        # Model sedang MENYUSUN pemanggilan tool (mis. menulis isi file): beri tahu pemanggil agar UI tidak tampak diam.
+                        on_tool(idx, slot["name"], slot["arguments"])
                 if ch.get("finish_reason"):
                     finish = ch["finish_reason"]
         if not done and not finish and (parts or calls):

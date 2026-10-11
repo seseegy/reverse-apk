@@ -25,7 +25,8 @@
   {% else %}
   <section class="chat-app" data-chat data-analysis-id="{{ an.id }}" data-csrf="{{ csrf }}"
            data-session-id="{{ session_id or '' }}" data-ready="{{ 'true' if has_index else 'false' }}"
-           data-max-file="{{ file_limits.max_file_bytes }}">
+           data-max-file="{{ file_limits.max_file_bytes }}" data-default-model="{{ models[0].slug if models else '' }}"
+           {% if resume_stream %}data-resume-stream="{{ resume_stream }}" data-resume-model="{{ resume_model }}" data-resume-elapsed="{{ resume_elapsed }}"{% endif %}>
 
     <aside class="chat-side">
       <a class="btn btn-primary btn-sm" href="/analyses/{{ an.id }}/chat">{{ icon('refresh', 16) }}<span>Sesi baru</span></a>
@@ -82,7 +83,7 @@
       <div class="chat-log" data-log tabindex="0" role="log" aria-live="polite" aria-label="Riwayat percakapan">
         {% for m in messages %}
         <article class="msg msg-{{ m.role }}" data-role="{{ m.role }}">
-          <header class="msg-head">{{ 'Anda' if m.role == 'user' else 'Asisten' }}{% if m.model %} <span class="muted mono">· {{ m.model }}</span>{% endif %}</header>
+          <header class="msg-head">{{ 'Anda' if m.role == 'user' else 'Asisten' }}{% if m.model and m.role == 'assistant' %}<span class="msg-model mono" title="Model yang menjawab">{{ m.model }}</span>{% endif %}</header>
           {% if m.attachments %}{{ attachments(m.attachments) }}{% endif %}
           {% if m.tool_calls %}
           <details class="msg-tools"><summary>{{ m.tool_calls|length }} langkah tool</summary>

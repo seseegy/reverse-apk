@@ -1087,6 +1087,29 @@
     return api;
   }
 
+  // ------------------------------------------------------------------ penanda "asisten sedang bekerja" pada tab Chat
+  function setTabLive(on) {
+    var tab = $("[data-chat-tab]"); if (!tab) return;
+    var dot = $("[data-tab-live]", tab);
+    if (on && !dot) {
+      dot = document.createElement("span"); dot.className = "tab-live"; dot.setAttribute("data-tab-live", ""); dot.title = "Asisten sedang bekerja";
+      var sr = document.createElement("span"); sr.className = "sr-only"; sr.textContent = "(asisten sedang bekerja)"; dot.appendChild(sr);
+      tab.appendChild(document.createTextNode(" ")); tab.appendChild(dot);
+    } else if (!on && dot) dot.parentNode.removeChild(dot);
+    tab.setAttribute("data-chat-active", on ? "1" : "0");
+  }
+  // Di halaman selain Chat: bila saat dimuat ada jawaban berjalan, pantau sampai selesai agar penandanya hilang sendiri.
+  (function watchChatTab() {
+    var tab = $("[data-chat-tab]");
+    if (!tab || $("[data-chat]") || tab.getAttribute("data-chat-active") !== "1") return;
+    var aid = tab.getAttribute("data-analysis-id"), timer = setInterval(function () {
+      fetch("/analyses/" + encodeURIComponent(aid) + "/chat/active", { credentials: "same-origin", cache: "no-store" })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) { if (d && !d.active) { clearInterval(timer); setTabLive(false); } })
+        .catch(function () { /* coba lagi pada putaran berikutnya */ });
+    }, 3000);
+  })();
+
   // ------------------------------------------------------------------ berkas: ikon, penampil, kartu (chat & halaman Berkas)
   // Teks berkas/AI SELALU lewat textContent. Berkas tidak pernah dirender sebagai HTML; hanya gambar raster yang ditampilkan lewat <img>.
   var CODE_EXT = /\.(py|pyi|js|mjs|cjs|ts|tsx|jsx|sh|bash|java|kt|kts|smali|c|h|cc|cpp|go|rs|rb|php|lua|swift|dart|sql|gradle|ps1|bat|json|ya?ml|xml|html|css|toml|ini)$/i;
@@ -1578,6 +1601,157 @@
     window.addEventListener("drop", function (e) { if (hasFiles(e)) { e.preventDefault(); dragDepth = 0; dz.hidden = true; } });
     }   // composerOk
 
+    // ---- tampilan satu jawaban asisten (dipakai untuk giliran baru DAN untuk menyambung giliran yang sedang berjalan)
+    var baseTitle = document.title;
+    function setLiveTitle(on) { document.title = on ? "● Asisten bekerja · " + baseTitle : baseTitle; setTabLive(on); }
+    function setHeadModel(art, slug) {
+      var head = $(".msg-head", art); if (!head || !slug) return;
+      var m = $(".msg-model", head);
+      if (!m) { m = document.createElement("span"); m.className = "msg-model mono"; m.title = "Model yang menjawab"; var act = $(".msg-actions", head); head.insertBefore(m, act); }
+      m.textContent = slug;
+    }
+    function newAssistantView(modelSlug, elapsedSec) {
+      var v = { asst: addMsg("assistant", "Asisten"), raw: "", finished: false };
+      var asst = v.asst, toolsBox = null, toolsList = null, toolsSummary = null, pending = false, nSteps = 0, running = 0, cardsBox = null, drafts = {};
+      var bodyEl = document.createElement("div"), stepById = {}, t0 = Date.now() - (elapsedSec || 0) * 1000;
+      setHeadModel(asst, modelSlug);
+      var typing = document.createElement("div"); typing.className = "typing"; typing.setAttribute("aria-hidden", "true");
+      typing.appendChild(document.createElement("span")); typing.appendChild(document.createElement("span")); typing.appendChild(document.createElement("span"));
+      bodyEl.className = "msg-body"; asst.appendChild(typing); asst.appendChild(bodyEl);
+      // Bilah status yang SELALU tampil di dasar jawaban sampai selesai, supaya jeda (mis. model sedang menulis file) tidak terlihat seperti sudah selesai.
+      var live = document.createElement("div"); live.className = "msg-live"; live.setAttribute("aria-hidden", "true");
+      var dot = document.createElement("span"); dot.className = "msg-live-dot";
+      var lbl = document.createElement("span"); lbl.className = "msg-live-label";
+      var clock = document.createElement("span"); clock.className = "msg-live-time mono";
+      live.appendChild(dot); live.appendChild(lbl); live.appendChild(clock); asst.appendChild(live);
+      function tick() { var sec = Math.floor((Date.now() - t0) / 1000); clock.textContent = Math.floor(sec / 60) + ":" + ("0" + (sec % 60)).slice(-2); }
+      tick(); var timer = setInterval(tick, 1000);
+      function label(t) { lbl.textContent = t; }
+      label("Asisten bekerja…");
+      v.label = label; v.t0 = t0;
+      v.setTyping = function (on) { if (on && !typing.parentNode) asst.insertBefore(typing, bodyEl); else if (!on && typing.parentNode) typing.parentNode.removeChild(typing); };
+      function ensureTools() {
+        if (toolsBox) return;
+        toolsBox = document.createElement("details"); toolsBox.className = "msg-tools is-running"; toolsBox.open = true;
+        toolsSummary = document.createElement("summary"); toolsList = document.createElement("ul"); toolsList.className = "tsteps";
+        toolsBox.appendChild(toolsSummary); toolsBox.appendChild(toolsList); asst.insertBefore(toolsBox, typing.parentNode ? typing : bodyEl);
+      }
+      function sumText() { if (toolsSummary) toolsSummary.textContent = "Langkah tool (" + nSteps + ")" + (running || Object.keys(drafts).length ? " · bekerja…" : ""); }
+      function cards() {
+        if (!cardsBox) { cardsBox = document.createElement("div"); cardsBox.className = "fcards"; cardsBox.setAttribute("aria-label", "Berkas yang dibuat asisten"); asst.insertBefore(cardsBox, live); }
+        return cardsBox;
+      }
+      function paint() {                                   // render ulang dibatasi ~8x/detik agar streaming tidak berat
+        if (pending) return; pending = true;
+        setTimeout(function () { pending = false; renderMarkdown(v.raw, bodyEl, { analysisId: aid, citations: {} }); scrollDown(false); }, 120);
+      }
+      function clearDrafts() { Object.keys(drafts).forEach(function (k) { var d = drafts[k]; if (d.li.parentNode) d.li.parentNode.removeChild(d.li); }); drafts = {}; sumText(); }
+      function draftLabel(name, path) {
+        if (name === "write_file") return "Menulis " + (path ? baseName(path) : "berkas");
+        if (name === "edit_file") return "Menyusun perubahan " + (path ? baseName(path) : "berkas");
+        return "Menyiapkan " + name;
+      }
+
+      v.onRound = function (d) { if (!running) label((v.raw ? "Asisten melanjutkan" : "Menunggu model") + " (langkah " + d.step + ")…"); };
+      v.onDelta = function (d) { v.setTyping(false); clearDrafts(); v.raw += d.text; label("Menulis jawaban…"); paint(); };
+      v.onDraft = function (d) {
+        // Model sedang menyusun pemanggilan tool. Untuk write_file inilah saat isi file ditulis: bisa lama untuk file besar.
+        ensureTools(); v.setTyping(false);
+        var dr = drafts[d.index];
+        if (!dr) {
+          var li = document.createElement("li"); li.className = "tstep is-run is-draft";
+          var ic = document.createElement("span"); ic.className = "tstep-ic"; ic.appendChild(svgIcon("spinner", 16, true));
+          var body = document.createElement("span"); var l = document.createElement("span"); l.className = "tstep-label";
+          var sub = document.createElement("span"); sub.className = "tstep-sub"; body.appendChild(l); body.appendChild(sub);
+          var time = document.createElement("span"); time.className = "tstep-time"; time.textContent = "menyusun";
+          li.appendChild(ic); li.appendChild(body); li.appendChild(time); toolsList.appendChild(li);
+          dr = drafts[d.index] = { li: li, l: l, sub: sub };
+        }
+        dr.l.textContent = draftLabel(d.name, d.path);
+        dr.sub.textContent = fmtBytes(d.chars) + " ditulis model…"; dr.sub.hidden = false; sumText();
+        label(draftLabel(d.name, d.path) + " · " + fmtBytes(d.chars) + " (belum selesai)…");
+        scrollDown(false);
+      };
+      v.onToolStart = function (d) {
+        ensureTools(); v.setTyping(false); clearDrafts();
+        var st = makeStep(d.name, d.args || ""); stepById[d.id] = { step: st, t0: Date.now() };
+        toolsList.appendChild(st.li); nSteps++; running++; sumText(); scrollDown(false);
+        label("Menjalankan " + toolLabel(d.name, d.args || "").toLowerCase() + "…");
+        statusEl.textContent = "Memanggil " + d.name + "…";
+      };
+      v.onToolEnd = function (d) {
+        var rec = stepById[d.id];
+        if (rec) { rec.step.done(!!d.ok, d.summary || (d.ok ? "ok" : "galat"), typeof d.ms === "number" ? d.ms : Date.now() - rec.t0); running = Math.max(0, running - 1); sumText(); }
+        if (!running) { label("Asisten melanjutkan setelah menjalankan tool…"); if (!v.raw) v.setTyping(true); }
+        scrollDown(false);
+      };
+      v.onFile = function (f) {
+        v.setTyping(false); upsertFileCard(cards(), aid, f);
+        label("Berkas " + (f.path || f.name) + " tersimpan. Asisten masih bekerja, tunggu jawaban akhir…"); scrollDown(false);
+      };
+      v.finish = function (d) {
+        v.finished = true; clearInterval(timer); clearDrafts();
+        if (live.parentNode) live.parentNode.removeChild(live);
+        (d.files || []).forEach(function (f) { upsertFileCard(cards(), aid, f); });
+        var text = d.content || ""; v.raw = text; v.setTyping(false);
+        if (d.model) setHeadModel(asst, d.model);
+        renderMarkdown(text, bodyEl, { analysisId: aid, citations: citeMap(d.citations) });
+        if (toolsBox) { toolsBox.open = false; toolsBox.className = "msg-tools"; toolsSummary.textContent = d.tools + " langkah tool · " + fmtDur(Date.now() - t0); }
+        var foot = addActions(asst, function () { return v.raw; });
+        var meta = document.createElement("div"); meta.className = "msg-meta";
+        meta.textContent = d.steps + " langkah · giliran ≈ Rp" + Number(d.turn_idr).toFixed(2) + " · sesi ≈ Rp" + Number(d.session_idr).toFixed(2);
+        foot.appendChild(meta);
+        var notes = { max_steps: "Berhenti di batas langkah (AI_MAX_STEPS).", budget: "Anggaran habis.", cancelled: "Dihentikan.", error: "Terjadi galat.",
+                      tool_budget: "Batas total data tool giliran ini tercapai; jawaban disusun dari yang sudah dibaca." };
+        if (d.stopped !== "done" && notes[d.stopped]) {
+          var n = document.createElement("div"); n.className = "msg-note";
+          var nt = document.createElement("span"); nt.textContent = notes[d.stopped] + (d.error ? " " + d.error : ""); n.appendChild(nt);
+          if (d.stopped === "max_steps" || d.stopped === "tool_budget") {
+            var cb = document.createElement("button"); cb.type = "button"; cb.className = "btn btn-ghost btn-sm"; cb.textContent = "Lanjutkan";
+            cb.addEventListener("click", function () { cb.disabled = true; send("lanjutkan", []); });
+            n.appendChild(cb);
+          } else if (d.stopped === "error") {
+            var rb = document.createElement("button"); rb.type = "button"; rb.className = "btn btn-ghost btn-sm"; rb.textContent = "Coba lagi";
+            rb.addEventListener("click", function () { rb.disabled = true; send(lastUserText || "Lanjutkan", []); });   // lampiran pesan itu sudah tersimpan di riwayat
+            n.appendChild(rb);
+          }
+          asst.insertBefore(n, foot);
+        }
+        updateBudget(d.budget);
+        statusEl.textContent = "Biaya giliran ≈ Rp" + Number(d.turn_idr).toFixed(2) + " · sesi ≈ Rp" + Number(d.session_idr).toFixed(2) + " · " + d.steps + " langkah";
+        scrollDown(true);
+      };
+      v.abandon = function () { clearInterval(timer); if (live.parentNode) live.parentNode.removeChild(live); clearDrafts(); v.setTyping(false); };
+      return v;
+    }
+
+    // Sambungkan satu aliran SSE ke tampilan jawaban. EventSource menyambung ulang sendiri bila jaringan putus, dengan Last-Event-ID,
+    // jadi server melanjutkan tepat sesudah peristiwa terakhir yang diterima (tanpa duplikat).
+    function attachStream(v, url, resumed) {
+      setLiveTitle(true);
+      es = new EventSource(url);
+      var parse = function (e) { try { return JSON.parse(e.data); } catch (_) { return {}; } };
+      es.addEventListener("round", function (e) { v.onRound(parse(e)); });
+      es.addEventListener("delta", function (e) { v.onDelta(parse(e)); });
+      es.addEventListener("tool_draft", function (e) { v.onDraft(parse(e)); });
+      es.addEventListener("tool_start", function (e) { v.onToolStart(parse(e)); });
+      es.addEventListener("tool_end", function (e) { v.onToolEnd(parse(e)); });
+      es.addEventListener("file", function (e) { v.onFile(parse(e)); });
+      es.addEventListener("final", function (e) { v.finish(parse(e)); });
+      es.addEventListener("end", function () {
+        if (es) es.close(); es = null; setLiveTitle(false); v.setTyping(false); setBusy(false); input.focus();
+        if (!v.finished) { v.abandon(); fail("Koneksi terputus sebelum jawaban selesai. Muat ulang halaman untuk melihat hasil tersimpan."); }
+      });
+      es.onerror = function () {
+        if (!es || es.readyState !== 2) return;                         // CONNECTING = menyambung ulang otomatis
+        es = null; setLiveTitle(false);
+        if (v.finished) return;
+        v.abandon(); setBusy(false);
+        if (resumed && !sessionStorage.getItem("rvResumeReload")) { sessionStorage.setItem("rvResumeReload", "1"); location.reload(); return; }   // giliran sudah selesai/dibersihkan: tampilkan hasil tersimpan
+        fail("Koneksi stream terputus. Muat ulang halaman untuk melihat hasil tersimpan.");
+      };
+    }
+
     function send(text, retryAtts) {
       text = String(text || "").trim();
       var sent = retryAtts || readyAtts();
@@ -1590,34 +1764,16 @@
       if (text) { var ub = document.createElement("div"); ub.className = "msg-body msg-plain"; ub.textContent = text; u.appendChild(ub); }
       input.value = ""; grow(); setBusy(true); statusEl.textContent = "Mengirim…"; scrollDown(true);
 
-      var asst = addMsg("assistant", "Asisten"), toolsBox = null, toolsList = null, toolsSummary = null, bodyEl = document.createElement("div"), raw = "", pending = false;
-      var typing = document.createElement("div"); typing.className = "typing"; typing.setAttribute("aria-hidden", "true");
-      typing.appendChild(document.createElement("span")); typing.appendChild(document.createElement("span")); typing.appendChild(document.createElement("span"));
-      bodyEl.className = "msg-body"; asst.appendChild(typing); asst.appendChild(bodyEl);
-      var t0 = Date.now(), nSteps = 0, running = 0;
-      function setTyping(on) { if (on && !typing.parentNode) asst.insertBefore(typing, bodyEl); else if (!on && typing.parentNode) typing.parentNode.removeChild(typing); }
-      function ensureTools() {
-        if (toolsBox) return;
-        toolsBox = document.createElement("details"); toolsBox.className = "msg-tools is-running"; toolsBox.open = true;
-        toolsSummary = document.createElement("summary"); toolsList = document.createElement("ul"); toolsList.className = "tsteps";
-        toolsBox.appendChild(toolsSummary); toolsBox.appendChild(toolsList); asst.insertBefore(toolsBox, typing.parentNode ? typing : bodyEl);
-      }
-      function sumText() { toolsSummary.textContent = "Langkah tool (" + nSteps + ")" + (running ? " · bekerja…" : ""); }
-      var stepById = {};
-      function paint() {                                   // render ulang dibatasi ~8x/detik agar streaming tidak berat
-        if (pending) return; pending = true;
-        setTimeout(function () { pending = false; renderMarkdown(raw, bodyEl, { analysisId: aid, citations: {} }); scrollDown(false); }, 120);
-      }
-
       var payload = { text: text, session_id: sessionId ? parseInt(sessionId, 10) : null };
       if (sent.length) payload.attachment_ids = sent.map(function (a) { return a.id; });
       if (modelEl && modelEl.value) payload.model = modelEl.value;
+      var v = newAssistantView(payload.model || root.getAttribute("data-default-model") || "");     // nama model langsung tampil (tidak menunggu jawaban selesai)
       fetch("/analyses/" + enc(aid) + "/chat/send", { method: "POST", credentials: "same-origin",
         headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify(payload) })
         .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
         .then(function (res) {
           if (!res.ok) {
-            log.removeChild(asst); setBusy(false); statusEl.textContent = "";
+            v.abandon(); log.removeChild(v.asst); setBusy(false); statusEl.textContent = "";
             if (sent.length && !retryAtts) {                           // kembalikan ke kotak pesan agar bisa diperbaiki (mis. ganti model) lalu kirim lagi
               log.removeChild(u); input.value = text; grow(); updateSend();
               if (attWarn) { attWarn.textContent = res.d.error || "Gagal mengirim pesan."; attWarn.hidden = false; } input.focus(); return;
@@ -1628,75 +1784,29 @@
           sessionId = String(res.d.session_id); root.setAttribute("data-session-id", sessionId);
           history.replaceState(null, "", "?s=" + sessionId);
           statusEl.textContent = "Asisten bekerja…";
-          es = new EventSource(res.d.stream);
-          var finished = false;
-          es.addEventListener("delta", function (e) { setTyping(false); raw += JSON.parse(e.data).text; paint(); });
-          es.addEventListener("tool_start", function (e) {
-            var d = JSON.parse(e.data); ensureTools(); setTyping(false);
-            var st = makeStep(d.name, d.args || ""); stepById[d.id] = { step: st, t0: Date.now() };
-            toolsList.appendChild(st.li); nSteps++; running++; sumText(); scrollDown(false);
-            statusEl.textContent = "Memanggil " + d.name + "…";
-          });
-          es.addEventListener("tool_end", function (e) {
-            var d = JSON.parse(e.data), rec = stepById[d.id];
-            if (rec) { rec.step.done(!!d.ok, d.summary || (d.ok ? "ok" : "galat"), Date.now() - rec.t0); running = Math.max(0, running - 1); sumText(); }
-            if (!running && !raw) setTyping(true);
-            scrollDown(false);
-          });
-          var cardsBox = null;
-          function cards() {
-            if (!cardsBox) { cardsBox = document.createElement("div"); cardsBox.className = "fcards"; cardsBox.setAttribute("aria-label", "Berkas yang dibuat asisten"); asst.appendChild(cardsBox); }
-            return cardsBox;
-          }
-          es.addEventListener("file", function (e) { setTyping(false); upsertFileCard(cards(), aid, JSON.parse(e.data)); scrollDown(false); });
-          es.addEventListener("final", function (e) {
-            finished = true; var d = JSON.parse(e.data);
-            (d.files || []).forEach(function (f) { upsertFileCard(cards(), aid, f); });
-            var text = d.content || ""; raw = text; setTyping(false);
-            renderMarkdown(text, bodyEl, { analysisId: aid, citations: citeMap(d.citations) });
-            if (toolsBox) {
-              toolsBox.open = false; toolsBox.className = "msg-tools";
-              toolsSummary.textContent = d.tools + " langkah tool · " + fmtDur(Date.now() - t0);
-            }
-            var foot = addActions(asst, function () { return raw; });
-            var meta = document.createElement("div"); meta.className = "msg-meta";
-            meta.textContent = d.steps + " langkah · giliran ≈ Rp" + Number(d.turn_idr).toFixed(2) + " · sesi ≈ Rp" + Number(d.session_idr).toFixed(2);
-            foot.appendChild(meta);
-            var notes = { max_steps: "Berhenti di batas langkah (AI_MAX_STEPS).", budget: "Anggaran habis.", cancelled: "Dihentikan.", error: "Terjadi galat.",
-                          tool_budget: "Batas total data tool giliran ini tercapai; jawaban disusun dari yang sudah dibaca." };
-            if (d.stopped !== "done" && notes[d.stopped]) {
-              var n = document.createElement("div"); n.className = "msg-note";
-              var nt = document.createElement("span"); nt.textContent = notes[d.stopped] + (d.error ? " " + d.error : ""); n.appendChild(nt);
-              if (d.stopped === "max_steps" || d.stopped === "tool_budget") {
-                var cb = document.createElement("button"); cb.type = "button"; cb.className = "btn btn-ghost btn-sm"; cb.textContent = "Lanjutkan";
-                cb.addEventListener("click", function () { cb.disabled = true; send("lanjutkan", []); });
-                n.appendChild(cb);
-              } else if (d.stopped === "error") {
-                var rb = document.createElement("button"); rb.type = "button"; rb.className = "btn btn-ghost btn-sm"; rb.textContent = "Coba lagi";
-                rb.addEventListener("click", function () { rb.disabled = true; send(lastUserText || "Lanjutkan", []); });   // lampiran pesan itu sudah tersimpan di riwayat
-                n.appendChild(rb);
-              }
-              asst.insertBefore(n, foot);
-            }
-            updateBudget(d.budget);
-            statusEl.textContent = "Biaya giliran ≈ Rp" + Number(d.turn_idr).toFixed(2) + " · sesi ≈ Rp" + Number(d.session_idr).toFixed(2) + " · " + d.steps + " langkah";
-            scrollDown(true);
-          });
-          es.addEventListener("end", function () { if (es) es.close(); es = null; setTyping(false); setBusy(false); input.focus(); if (!finished) fail("Koneksi terputus sebelum jawaban selesai. Muat ulang halaman untuk melihat hasil tersimpan."); });
-          es.onerror = function () {
-            if (es && es.readyState === 2) { es = null; setTyping(false); if (!finished) { setBusy(false); fail("Koneksi stream terputus. Muat ulang halaman untuk melihat hasil tersimpan."); } }
-          };
+          attachStream(v, res.d.stream, false);
         })
         .catch(function () {
-          setTyping(false); setBusy(false); statusEl.textContent = "";
+          v.abandon(); setLiveTitle(false); setBusy(false); statusEl.textContent = "";
           if (sent.length && !retryAtts && u.parentNode) {
-            if (asst.parentNode) log.removeChild(asst);
+            if (v.asst.parentNode) log.removeChild(v.asst);
             log.removeChild(u); input.value = text; grow(); updateSend();
             if (attWarn) { attWarn.textContent = "Koneksi gagal. Periksa jaringan lalu coba lagi."; attWarn.hidden = false; } return;
           }
+          if (v.asst.parentNode) log.removeChild(v.asst);
           fail("Koneksi gagal. Periksa jaringan lalu coba lagi.", lastUserText, sent);
         });
     }
+
+    // Halaman dibuka saat jawaban masih berjalan (mis. pindah ke tab Berkas lalu kembali): sambungkan ke aliran itu. Server memutar ulang
+    // semua peristiwa sejak awal giliran, jadi teks, langkah tool, dan berkas yang sudah ada langsung tampil lagi.
+    (function resumeRunning() {
+      var url = root.getAttribute("data-resume-stream");
+      if (!url) { sessionStorage.removeItem("rvResumeReload"); return; }
+      setBusy(true); statusEl.textContent = "Menyambung ke jawaban yang sedang berjalan…";
+      attachStream(newAssistantView(root.getAttribute("data-resume-model") || "", parseInt(root.getAttribute("data-resume-elapsed") || "0", 10) || 0), url, true);
+      scrollDown(true);
+    })();
 
     form.addEventListener("submit", function (e) { e.preventDefault(); send(input.value); });
     input.addEventListener("input", function () { grow(); updateSend(); });

@@ -52,6 +52,9 @@ Validasi: semua path dinormalisasi dan harus berada di bawah akar yang diizinkan
 | FR-5.12 | AI membaca gambar (lampiran dan gambar dalam APK) pada model yang mendukung; model tanpa dukungan ditolak jelas, bukan gambar dibuang diam-diam | P0 |
 | FR-5.13 | AI membuat berkas sungguhan (py, js, md, json, ...) di folder khusus per APK; tampil sebagai kartu Lihat/Unduh di jawaban dan di tab **Berkas**, unduh ZIP | P0 |
 | FR-5.14 | Berkas pengguna/AI bertahan saat "Analisis ulang" dan terhapus bersama APK; kuota ukuran & jumlah per APK | P0 |
+| FR-5.15 | Giliran yang berjalan tetap bisa dipantau setelah pengguna pindah halaman/tab atau jaringan putus: sambung ulang memutar ulang seluruh giliran (teks, langkah, berkas), tanpa duplikat | P0 |
+| FR-5.16 | Status "asisten sedang bekerja" selalu terlihat sampai jawaban akhir, termasuk saat model menulis isi file (nama berkas + ukuran yang bertambah + timer); penanda juga muncul di tab Chat halaman lain | P0 |
+| FR-5.17 | Nama model tampil di setiap pesan asisten, sejak jawaban mulai dan setelah tersimpan | P1 |
 
 ## Skill dalam chat
 - Skill `apk-analyst` (04, FR-4.22) dimuat sebagai bagian konteks sistem: metodologi triase, daftar kata kunci pencarian (login, sign, encrypt, token, root, certificate, okhttp, webview), dan checklist pemeriksaan.
@@ -101,6 +104,17 @@ Permintaan untuk menyerang layanan pihak ketiga (mis. mengeksploitasi endpoint y
 **Menulis berkas.** Satu-satunya tool yang menulis. Path dari model divalidasi ketat (`userfiles.clean_ai_path`: tanpa `..`/absolut/titik awal/spasi, maks 5 tingkat, ekstensi teks saja; 80 ribu masukan acak/mutasi di-fuzz), ditulis atomik (tmp + fsync + `os.replace`), tidak mengikuti symlink, dan tidak pernah dijalankan. Berkas besar ditulis bertahap (`mode=append`) karena satu panggilan dibatasi `AI_MAX_OUTPUT_TOKENS`; JSON argumen yang terpotong menghasilkan petunjuk itu. Path sama = revisi baru.
 
 **Batas (semua dari `.env`, infrastruktur, bukan batas kemampuan AI):** `ATTACH_MAX_MB` (25; juga dipakai Caddy), `FILES_QUOTA_MB` (1024), `FILES_MAX_COUNT` (2000), `AI_MAX_IMAGE_MB` (10; gambar lebih besar tetap tersimpan, hanya tidak dikirim ke model), `AI_INLINE_ATTACH_CHARS` (16000). Tampilan UI: pratinjau teks 512 KB dan 1500 baris per potongan hanyalah batas tampilan (berkas utuh tetap bisa diunduh).
+
+## Giliran yang berjalan: sambung ulang & status kerja
+**Masalah yang diperbaiki.** Antrean SSE lama habis dikonsumsi koneksi pertama dan jawaban asisten baru disimpan di akhir giliran; akibatnya pindah ke tab lain lalu kembali menampilkan percakapan tanpa jawaban. Selain itu, saat model menulis isi `write_file` (argumen tool call yang panjang) UI tidak menerima apa pun sampai selesai, sehingga tampak sudah selesai.
+
+**Rancangan.**
+- Tiap `Turn` menyimpan **log peristiwa** (bukan antrean). Pelanggan baru diputar ulang dari awal (potongan `delta` berurutan digabung); penyambung ulang memakai `Last-Event-ID` (tiap peristiwa SSE punya `id:` = indeks log) dan lanjut tepat sesudahnya. Beberapa tab boleh menonton giliran yang sama. `retry: 1500` pada aliran.
+- Halaman chat memuat `data-resume-stream` bila giliran sesi itu masih aktif **dan** pesan terakhir di DB masih milik pengguna (status giliran dibaca sebelum riwayat DB agar tidak ada celah balapan). Klien lalu memakai kode tampilan yang sama dengan giliran baru.
+- Peristiwa baru: `round` (awal tiap putaran model), `tool_draft` (model sedang menyusun pemanggilan tool: nama, `path` bila sudah terbaca dari JSON yang belum selesai, jumlah karakter; dibatasi ±2,5/detik), `tool_end.ms` (durasi dari server), `final.model`.
+- Bilah status di dasar jawaban (label + timer) tampil sampai `final`: "Menulis lambat.py · 1,3 KB (belum selesai)…", "Berkas X tersimpan. Asisten masih bekerja…", "Asisten melanjutkan (langkah N)…". Judul tab browser diberi penanda saat bekerja.
+- `GET /analyses/{id}/chat/active` + titik hijau pada tab **Chat** di semua halaman analisis (tautan tab langsung ke sesi yang berjalan); di halaman selain Chat, titik hilang sendiri lewat polling 3 detik.
+- Batas: log peristiwa hidup di memori proses web (±10 menit setelah giliran selesai). Bila web di-restart saat giliran berjalan, giliran itu hilang (sama seperti sebelumnya) dan halaman menampilkan apa yang sudah tersimpan.
 
 ## UI/UX chat (peningkatan)
 - **Lini masa langkah tool** dengan label manusiawi ("Baca LoginActivity (smali)", "Cari pemakai Cipher.doFinal"), status (centang/silang/berputar), ringkasan hasil, dan durasi per langkah; terlipat setelah selesai ("11 langkah tool · 38 dtk").

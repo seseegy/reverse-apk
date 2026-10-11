@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from contextlib import closing
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -107,6 +108,20 @@ F. Analisis, penjelasan, rekonstruksi API/protokol, dan penulisan klien atau skr
 Anda, termasuk untuk aplikasi pihak ketiga yang dianalisis secara statis. Satu-satunya hal yang ditolak (singkat, tawarkan alternatif \
 defensif/analitis): membuat muatan atau skrip yang dipakai MENYERANG server atau pengguna pihak lain (eksploitasi, DoS, brute force atau \
 credential stuffing, penyalahgunaan massal, pencurian data pengguna lain)."""
+
+_PATH_PEEK = re.compile(r'"path"\s*:\s*"((?:[^"\\]|\\.){1,200})"')
+
+
+def _peek_path(partial_args: str) -> str:
+    """Nilai "path" dari argumen tool call yang BELUM selesai (JSON terpotong), untuk label 'sedang menulis <berkas>'."""
+    m = _PATH_PEEK.search(partial_args)
+    if not m:
+        return ""
+    try:
+        return str(json.loads('"' + m.group(1) + '"'))[:200]
+    except ValueError:
+        return m.group(1)[:200]
+
 
 CITATION_RE = re.compile(r"((?:jadx/sources|jadx/resources|apktool)/[\w$./\-]{1,300}?):(\d{1,7})")
 
@@ -205,14 +220,25 @@ def run_turn(*, client: Client, cfg: AIConfig, prices: PriceTable, ctx: T.ToolCo
             messages.append({"role": "user", "content": "Batas langkah/konteks tercapai. JANGAN memanggil tool lagi. Rangkum "
                              "apa yang sudah Anda temukan, sebutkan apa yang belum terjawab, dan beri sitasi dari yang sudah dibaca."})
         deltas: list[str] = []
+        emit("round", {"step": step})
+        drafts: dict[int, float] = {}
 
         def on_delta(text: str) -> None:
             deltas.append(text)
             emit("delta", {"text": text})
 
+        def on_tool(idx: int, name: str, args: str) -> None:
+            # Model sedang menyusun pemanggilan tool (mis. isi write_file yang panjang). Tanpa sinyal ini UI tampak diam sampai seluruh
+            # argumen selesai. Dibatasi ±2,5 kali/detik per tool call agar log peristiwa tidak membengkak.
+            now = time.monotonic()
+            if idx in drafts and now - drafts[idx] < 0.4:
+                return
+            drafts[idx] = now
+            emit("tool_draft", {"index": idx, "name": name, "chars": len(args), "path": _peek_path(args)})
+
         try:
             r = client.chat(messages, model=model, tools=None if final_turn else schemas, stream=True,
-                            on_delta=on_delta, cancel=cancel, temperature=0.2)
+                            on_delta=on_delta, cancel=cancel, temperature=0.2, on_tool=on_tool)
         except AIError as exc:
             settle(None, exc)
             if exc.kind == "cancelled":
@@ -245,17 +271,20 @@ def run_turn(*, client: Client, cfg: AIConfig, prices: PriceTable, ctx: T.ToolCo
             {"id": c.id, "type": "function", "function": {"name": c.name, "arguments": c.arguments}} for c in r.tool_calls]})
         for c in r.tool_calls:
             emit("tool_start", {"id": c.id, "name": c.name, "args": c.arguments[:300]})
+            tool_ms = 0
             if cfg.max_turn_tool_chars and tool_chars >= cfg.max_turn_tool_chars:
                 out, ok = ("<hasil_tool galat=\"true\">batas total data tool untuk giliran ini tercapai; berikan jawaban dari "
                            "yang sudah dibaca.</hasil_tool>"), False
                 force_final = True
             else:
+                t_tool = time.monotonic()
                 out, ok = T.run_tool(ctx, c.name, c.arguments)
+                tool_ms = int((time.monotonic() - t_tool) * 1000)
                 tool_chars += len(out)
             messages.append({"role": "tool", "tool_call_id": c.id, "content": out})
             summary = _summarize(c.name, out, ok)
             res.tool_calls.append({"name": c.name, "args": c.arguments[:300], "ok": ok, "summary": summary})
-            emit("tool_end", {"id": c.id, "name": c.name, "ok": ok, "summary": summary})
+            emit("tool_end", {"id": c.id, "name": c.name, "ok": ok, "summary": summary, "ms": tool_ms})
             for w in ctx.take_written():
                 emit("file", w)
         if ctx.pending_images:
