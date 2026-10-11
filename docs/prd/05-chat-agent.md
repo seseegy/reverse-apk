@@ -14,16 +14,16 @@ Memberi pengguna antarmuka tanya-jawab ke kode APK. Model menelusuri kode sendir
 |------|-----------|-------|-------|
 | `get_overview` | – | ringkasan manifest, temuan statis, ringkasan AI aplikasi, hasil dekompilasi (method yang gagal di jadx) | – |
 | `get_manifest` | – | manifest ter-parse | – |
-| `list_packages` | `prefix?` | package dan jumlah class | 200 baris |
-| `list_classes` | `package`, `limit` | class + ukuran | 200 baris |
-| `search_code` | `query`, `regex?`, `path?` | lokasi cocok + konteks | 50 hasil |
+| `list_packages` | `prefix?` | package dan jumlah class | tanpa batas jumlah (ukuran dibatasi `AI_MAX_TOOL_CHARS`) |
+| `list_classes` | `package`, `limit` | class + ukuran | tanpa batas jumlah (ukuran dibatasi `AI_MAX_TOOL_CHARS`); `limit` dari model dihormati bila diisi |
+| `search_code` | `query`, `include_libraries?` | lokasi cocok + konteks | tanpa batas jumlah (ukuran dibatasi `AI_MAX_TOOL_CHARS`) dan `AI_TOOL_TIMEOUT` |
 | `get_class` | `name`, `format=java|smali` | kode | dipotong ke N token, ada penanda lanjut |
 | `get_method` | `class`, `method` | kode method | – |
 | `find_xrefs` | `class` + `member?` ATAU `string`, `limit?` | pemanggil/pengakses NYATA dari call graph bytecode; atau method pemakai string konstanta | tanpa batas jumlah |
 | `find_callees` | `class`, `method` | method dipanggil, field, string, class yang dibuat | tanpa batas jumlah |
 | `class_info` | `class` | super chain, interface, turunan, method (native ditandai), status komponen manifest | tanpa batas jumlah |
 | `find_paths` | `from_class`, `from_method?`, `to_class`, `to_method?`, `max_depth?`, `max_paths?`, `max_approx?` | jalur panggilan statis terbobot | tanpa batas kedalaman/node |
-| `list_strings` | `filter?`, `kind?` | string dan lokasi | 100 hasil |
+| `list_strings` | `filter?`, `kind?`, `limit?` | string dan lokasi | tanpa batas jumlah (ukuran dibatasi `AI_MAX_TOOL_CHARS`) |
 | `get_findings` | `category?` | temuan statis | – |
 | `read_file` | `path`, `start_line?`, `end_line?` | berkas teks apa pun (Java, **smali semua class**, resource, manifest) dengan nomor baris; path sama persis dengan format sitasi | ukuran dibatasi, ada penanda lanjut |
 | `list_files` | – | lampiran pengguna (`lampiran/<id>`) dan berkas buatan AI (`hasil_ai/<path>`) | – |
@@ -39,11 +39,11 @@ Validasi: semua path dinormalisasi dan harus berada di bawah akar yang diizinkan
 | ID | Kebutuhan | Prioritas |
 |----|-----------|-----------|
 | FR-5.1 | Chat per analisis, riwayat tersimpan | P0 |
-| FR-5.2 | Loop agent dengan tool calling, batas langkah (default 12) dan batas token per giliran | P0 |
+| FR-5.2 | Loop agent dengan tool calling, batas langkah (`AI_MAX_STEPS`, bawaan 100) dan batas total data tool per giliran (`AI_MAX_TURN_TOOL_CHARS`, bawaan 0 = tanpa batas) | P0 |
 | FR-5.3 | Streaming jawaban; tool call tampil sebagai langkah yang bisa dibuka | P0 |
 | FR-5.4 | Jawaban memuat sitasi `kelas#method` / `file:baris` yang bisa diklik untuk membuka di penjelajah kode | P0 |
 | FR-5.5 | Sistem memverifikasi sitasi seperti di FR-4.4 | P0 |
-| FR-5.6 | Model dapat dipilih per pesan (Flash default, Pro opsional) | P1 |
+| FR-5.6 | Model dapat dipilih per pesan; pilihannya hanya `AI_MODEL` dan `AI_MODEL_PRO` dari `.env` | P1 |
 | FR-5.7 | Tombol "jelaskan kode ini" pada class/method yang sedang dibuka | P1 |
 | FR-5.8 | Pencatatan biaya per sesi dan batas anggaran sesi | P0 |
 | FR-5.9 | Ekspor percakapan ke Markdown | P1 |
