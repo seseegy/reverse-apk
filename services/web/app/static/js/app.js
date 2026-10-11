@@ -6,10 +6,42 @@
   function $(sel, root) { return (root || document).querySelector(sel); }
   function $all(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
 
+  // Satu gaya angka untuk seluruh UI, sama dengan server (rvcore/fmt.py): ribuan titik, desimal koma (1.234,5).
+  var LOCALE = "id-ID";
+  function fmtNum(n, d) {
+    var v = Number(n);
+    if (!isFinite(v)) return "–";
+    d = d || 0;
+    return v.toLocaleString(LOCALE, { minimumFractionDigits: d, maximumFractionDigits: d });
+  }
+
   function fmtBytes(n) {
-    var units = ["B", "KB", "MB", "GB"], i = 0, v = n;
+    var units = ["B", "KB", "MB", "GB", "TB"], i = 0, v = n;
     while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
-    return (i === 0 ? v.toFixed(0) : v.toFixed(1)) + " " + units[i];
+    return fmtNum(v, i === 0 ? 0 : 1) + " " + units[i];
+  }
+
+  // Pesan untuk respons galat yang TIDAK membawa JSON dari aplikasi, mis. 413 dari Caddy (badan > 1 MB) atau 502 saat web dimulai ulang.
+  function statusMessage(status) {
+    if (status === 401) return "Sesi berakhir. Muat ulang halaman lalu masuk lagi.";
+    if (status === 403) return "Token keamanan tidak valid. Muat ulang halaman.";
+    if (status === 404) return "Tidak ditemukan.";
+    if (status === 413) return "Isi yang dikirim terlalu besar (ditolak server).";
+    if (status === 429) return "Terlalu banyak permintaan. Coba lagi sebentar lagi.";
+    if (status === 502 || status === 503 || status === 504) return "Server tidak tersedia saat ini (HTTP " + status + "). Coba lagi sebentar lagi.";
+    if (status >= 500) return "Galat di server (HTTP " + status + "). Coba lagi sebentar lagi.";
+    return "Permintaan gagal (HTTP " + status + ").";
+  }
+  // fetch() -> {ok, status, d}. Badan yang bukan JSON tidak lagi membuat pemanggil jatuh ke .catch ("Koneksi gagal"), yang
+  // seharusnya hanya untuk jaringan yang benar-benar putus: d.error diisi pesan yang sesuai status HTTP-nya.
+  function readJson(r) {
+    return r.text().then(function (t) {
+      var d = null;
+      try { d = t ? JSON.parse(t) : null; } catch (_) { d = null; }
+      if (!d || typeof d !== "object") d = {};
+      if (!r.ok && typeof d.error !== "string") d.error = statusMessage(r.status);
+      return { ok: r.ok, status: r.status, d: d };
+    });
   }
 
   function fmtDuration(sec) {
@@ -82,13 +114,13 @@
   $all("time[data-local]").forEach(function (el) {
     var d = new Date(el.getAttribute("datetime"));
     if (!isNaN(d)) {
-      el.textContent = d.toLocaleString();
+      el.textContent = d.toLocaleString(LOCALE);
       el.title = el.getAttribute("datetime");
     }
   });
   function localizeLogTime(el) {
     var d = new Date(parseFloat(el.getAttribute("data-ts")) * 1000);
-    if (!isNaN(d)) el.textContent = d.toLocaleTimeString();
+    if (!isNaN(d)) el.textContent = d.toLocaleTimeString(LOCALE);
   }
   $all("time[data-ts]").forEach(localizeLogTime);
 
@@ -448,7 +480,7 @@
       btn.disabled = true;
       fetch(btn.getAttribute("data-url"), { method: "POST", credentials: "same-origin",
                                            headers: { "X-CSRF-Token": csrf } })
-        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(readJson)
         .then(function (res) {
           btn.disabled = false;
           if (!res.ok) { out.hidden = false; out.textContent = res.d.error || "Gagal menampilkan nilai."; return; }
@@ -473,13 +505,13 @@
         var hit = !q || tr.textContent.toLowerCase().indexOf(q) >= 0;
         tr.hidden = !hit; if (hit) shown++;
       });
-      count.textContent = shown + " dari " + total.toLocaleString("id-ID") + (q ? " (disaring)" : "");
+      count.textContent = shown + " dari " + fmtNum(total) + (q ? " (disaring)" : "");
     }
     input.addEventListener("input", apply);
     if (allBtn) allBtn.addEventListener("click", function () {
       allBtn.disabled = true; allBtn.textContent = "Memuat…";
       fetch("/analyses/" + encodeURIComponent(root.getAttribute("data-analysis-id")) + "/decompile/errors", { credentials: "same-origin", cache: "no-store" })
-        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(readJson)
         .then(function (res) {
           if (!res.ok) { allBtn.textContent = res.d.error || "Gagal memuat"; allBtn.disabled = false; return; }
           while (body.firstChild) body.removeChild(body.firstChild);
@@ -606,7 +638,7 @@
       var q = Object.keys(params).map(function (k) { return k + "=" + encodeURIComponent(params[k]); }).join("&");
       return fetch(base + "/" + kind + "?" + q, { credentials: "same-origin", cache: "no-store" }).then(function (r) {
         if (r.status === 401) { location.reload(); return Promise.reject(new Error("auth")); }
-        return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || "Gagal"); return d; });
+        return readJson(r).then(function (res) { if (!res.ok) throw new Error(res.d.error); return res.d; });
       });
     }
     function setUrl() {
@@ -686,10 +718,10 @@
     function renderFile(d, token) {
       empty.hidden = true; view.hidden = false;
       while (view.firstChild) view.removeChild(view.firstChild);
-      if (d.binary) { metaEl.textContent = d.size + " B"; showMsg("Berkas biner (" + d.size.toLocaleString() + " byte) tidak ditampilkan."); return; }
+      if (d.binary) { metaEl.textContent = fmtBytes(d.size); showMsg("Berkas biner (" + fmtNum(d.size) + " byte) tidak ditampilkan."); return; }
       var lang = langOf(state.path), lines = d.text.split("\n"), idx = 0, st = { block: false };
       var lowTerms = state.terms.map(function (t) { return t.toLowerCase(); }).filter(Boolean);
-      metaEl.textContent = lines.length.toLocaleString() + " baris · " + lang + (d.truncated ? " · DIPOTONG di 2 MiB" : "");
+      metaEl.textContent = fmtNum(lines.length) + " baris · " + lang + (d.truncated ? " · DIPOTONG di 2 MiB" : "");
       var firstHit = 0;
       function batch() {
         if (token !== state.token) return;
@@ -1161,7 +1193,7 @@
         wrap.appendChild(addRows(shown, to)); shown = to;
         if (shown < allLines.length) {
           var b = document.createElement("button"); b.type = "button"; b.className = "btn btn-ghost btn-sm fview-more";
-          b.textContent = "Tampilkan " + Math.min(CHUNK, allLines.length - shown).toLocaleString("id-ID") + " baris berikutnya (sisa " + (allLines.length - shown).toLocaleString("id-ID") + ")";
+          b.textContent = "Tampilkan " + fmtNum(Math.min(CHUNK, allLines.length - shown)) + " baris berikutnya (sisa " + fmtNum(allLines.length - shown) + ")";
           b.addEventListener("click", more); wrap.appendChild(b);
         }
       }
@@ -1201,7 +1233,7 @@
       if (typeof dlg.showModal === "function") { if (!dlg.open) dlg.showModal(); } else dlg.setAttribute("open", "");
       if (i.media === "image") { showImage(u.raw); return; }
       fetch(u.text, { credentials: "same-origin", cache: "no-store" })
-        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(readJson)
         .then(function (res) {
           if (t !== tok) return;                              // penampil sudah dipakai untuk berkas lain / ditutup
           var d = res.d;
@@ -1211,7 +1243,7 @@
           if (d.image) { showImage(u.raw); return; }
           textRaw = d.text; allLines = textRaw.split("\n"); if (allLines.length > 1 && allLines[allLines.length - 1] === "") allLines.pop();
           lang = langOf(i.name); isMd = /\.(md|markdown)$/i.test(i.name);
-          E.note.textContent = allLines.length.toLocaleString("id-ID") + " baris" + (d.truncated ? " · pratinjau dibatasi " + fmtBytes(textRaw.length) + " dari " + fmtBytes(d.size) + "; Unduh untuk berkas lengkap" : "");
+          E.note.textContent = fmtNum(allLines.length) + " baris" + (d.truncated ? " · pratinjau dibatasi " + fmtBytes(textRaw.length) + " dari " + fmtBytes(d.size) + "; Unduh untuk berkas lengkap" : "");
           E.copy.hidden = false; copyLabel("Salin");
           E.modes.hidden = !isMd; mode = isMd ? "render" : "source";
           if (isMd) setMode("render"); else paint();
@@ -1409,8 +1441,8 @@
     function updateBudget(b) {
       if (!b) return;
       var set = function (sel, t) { var el = $(sel, root); if (el) el.textContent = t; };
-      set("[data-b-today]", Number(b.today).toFixed(3));
-      set("[data-b-idr]", Math.round(b.today_idr).toLocaleString("id-ID"));
+      set("[data-b-today]", fmtNum(b.today, 3));
+      set("[data-b-idr]", fmtNum(b.today_idr));
       var bar = $("[data-b-bar]", root), meter = $("[data-b-meter]", root);
       if (bar && b.today_limit) {
         var pct = Math.min(100, b.today / b.today_limit * 100);
@@ -1431,7 +1463,7 @@
       setPeekNote("Memuat…"); while (peekCode.firstChild) peekCode.removeChild(peekCode.firstChild);
       peek.hidden = false; peek.focus();
       fetch("/analyses/" + enc(aid) + "/code/file?root=" + parts.root + "&path=" + enc(parts.rel), { credentials: "same-origin", cache: "no-store" })
-        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(readJson)
         .then(function (res) {
           if (tok !== peekToken) return;                                  // sitasi lain sudah diklik
           if (!res.ok) { setPeekNote(res.d.error || "Berkas tidak dapat dimuat."); return; }
@@ -1529,7 +1561,7 @@
         if (xhr.status === 201 && d.id) {
           a.state = "ready"; a.id = d.id; a.media = d.media; a.raw = d.raw; a.size = d.size || a.size; a.isImage = d.media === "image"; a.xhr = null; a.pct = 100;
           paintAtt(a); refreshAtts();
-        } else attFail(a, d.error || "Gagal mengunggah (HTTP " + xhr.status + ").", xhr.status >= 500 || xhr.status === 0);
+        } else attFail(a, d.error || statusMessage(xhr.status), xhr.status >= 500 || xhr.status === 0);
       };
       xhr.onerror = function () { attFail(a, "Koneksi terputus saat mengunggah.", true); };
       xhr.ontimeout = xhr.onerror;
@@ -1699,7 +1731,7 @@
         if (toolsBox) { toolsBox.open = false; toolsBox.className = "msg-tools"; toolsSummary.textContent = d.tools + " langkah tool · " + fmtDur(Date.now() - t0); }
         var foot = addActions(asst, function () { return v.raw; });
         var meta = document.createElement("div"); meta.className = "msg-meta";
-        meta.textContent = d.steps + " langkah · giliran ≈ Rp" + Number(d.turn_idr).toFixed(2) + " · sesi ≈ Rp" + Number(d.session_idr).toFixed(2);
+        meta.textContent = d.steps + " langkah · giliran ≈ Rp" + fmtNum(d.turn_idr, 2) + " · sesi ≈ Rp" + fmtNum(d.session_idr, 2);
         foot.appendChild(meta);
         var notes = { max_steps: "Berhenti di batas langkah (AI_MAX_STEPS).", budget: "Anggaran habis.", cancelled: "Dihentikan.", error: "Terjadi galat.",
                       tool_budget: "Batas total data tool giliran ini tercapai; jawaban disusun dari yang sudah dibaca." };
@@ -1718,7 +1750,7 @@
           asst.insertBefore(n, foot);
         }
         updateBudget(d.budget);
-        statusEl.textContent = "Biaya giliran ≈ Rp" + Number(d.turn_idr).toFixed(2) + " · sesi ≈ Rp" + Number(d.session_idr).toFixed(2) + " · " + d.steps + " langkah";
+        statusEl.textContent = "Biaya giliran ≈ Rp" + fmtNum(d.turn_idr, 2) + " · sesi ≈ Rp" + fmtNum(d.session_idr, 2) + " · " + d.steps + " langkah";
         scrollDown(true);
       };
       v.abandon = function () { clearInterval(timer); if (live.parentNode) live.parentNode.removeChild(live); clearDrafts(); v.setTyping(false); };
@@ -1770,7 +1802,7 @@
       var v = newAssistantView(payload.model || root.getAttribute("data-default-model") || "");     // nama model langsung tampil (tidak menunggu jawaban selesai)
       fetch("/analyses/" + enc(aid) + "/chat/send", { method: "POST", credentials: "same-origin",
         headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify(payload) })
-        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(readJson)
         .then(function (res) {
           if (!res.ok) {
             v.abandon(); log.removeChild(v.asst); setBusy(false); statusEl.textContent = "";

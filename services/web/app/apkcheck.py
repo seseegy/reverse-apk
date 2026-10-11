@@ -12,6 +12,8 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from rvcore import fmt
+
 _DEX_RE = re.compile(r"^classes\d*\.dex$")
 _BOMB_ENTRY_MIN = 8 * 1024 * 1024  # rasio per-entri hanya dinilai untuk entri >= 8 MiB
 
@@ -40,13 +42,7 @@ class ApkInfo:
     dex_files: int
 
 
-def _fmt(n: int) -> str:
-    size = float(n)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{n} B"
+_fmt = fmt.size
 
 
 def validate_apk(path: Path, limits: Limits) -> ApkInfo:
@@ -74,7 +70,7 @@ def validate_apk(path: Path, limits: Limits) -> ApkInfo:
         if len(infos) > limits.max_entries:
             raise ApkRejected(
                 "too_many_entries",
-                f"Terlalu banyak entri di dalam arsip ({len(infos):,} > {limits.max_entries:,}).",
+                f"Terlalu banyak entri di dalam arsip ({fmt.num(len(infos))} > {fmt.num(limits.max_entries)}).",
             )
 
         seen: set[str] = set()
@@ -123,7 +119,7 @@ def validate_apk(path: Path, limits: Limits) -> ApkInfo:
         if archive_size and total / archive_size > limits.max_ratio:
             raise ApkRejected(
                 "zip_bomb",
-                f"Terdeteksi zip bomb: rasio kompresi total {total / archive_size:.0f}:1 "
+                f"Terdeteksi zip bomb: rasio kompresi total {fmt.num(total / archive_size)}:1 "
                 f"(batas {limits.max_ratio}:1).",
             )
 

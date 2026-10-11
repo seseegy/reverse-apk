@@ -12,7 +12,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-from rvcore import store
+from rvcore import fmt, store
 from rvcore.fsutil import resolve_under
 
 MAX_LINES_PER_STAGE = 60
@@ -105,7 +105,7 @@ class LogTail:
                 self._in_jadx_detail = False
                 n = int(m.group(1))
                 # info, bukan warn: peringatan penjelasnya satu saja, dari ringkasan akhir tahap (pipeline).
-                self._emit("info", f"jadx: {n:,} method gagal didekompilasi; rincian disusun ke kartu Hasil dekompilasi.")
+                self._emit("info", f"jadx: {fmt.num(n)} method gagal didekompilasi; rincian disusun ke kartu Hasil dekompilasi.")
                 return
             if _JADX_DETAIL.match(line):
                 self._in_jadx_detail = True

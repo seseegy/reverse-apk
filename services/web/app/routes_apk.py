@@ -653,16 +653,15 @@ async def chat_send(request: Request, analysis_id: AnalysisId) -> Response:
                 if any(r["media"] == "image" for r in rows) and not prices.supports_vision(eff_model):
                     return "no_vision", prices.labels.get(eff_model, eff_model)
                 title = title or f"Lampiran: {rows[0]['name']}"[:60]
-            if session_id is None:
-                sid = store.create_chat_session(conn, analysis_id, title)
-            else:
-                if store.get_chat_session(conn, analysis_id, session_id) is None:
-                    return "no_session", None
-                sid = session_id
+            if session_id is not None and store.get_chat_session(conn, analysis_id, session_id) is None:
+                return "no_session", None
+            # Anggaran dicek SEBELUM sesi baru dibuat: bila habis, tidak ada sesi kosong yang tertinggal di daftar.
+            # Sesi baru belum memakai apa pun, jadi cukup batas harian (session_id None); sesi lama dicek juga batas sesinya.
             try:
-                ai_budget.check(conn, cfg, sid)
+                ai_budget.check(conn, cfg, session_id)
             except Exception as exc:  # AIError(budget)
                 return "budget", str(getattr(exc, "message", exc))
+            sid = session_id if session_id is not None else store.create_chat_session(conn, analysis_id, title)
             return "ok", sid
 
     status, sid = await run_in_threadpool(prepare)

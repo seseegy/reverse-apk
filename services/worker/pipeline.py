@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from rvcore import store
+from rvcore import fmt, store
 from rvcore.db import connect, migrate
 from rvcore.fsutil import atomic_write_json, read_json_under, safe_rmtree, tree_stats
 from rvcore.paths import Layout
@@ -97,13 +97,7 @@ def _fmt_secs(seconds: int) -> str:
     return f"{seconds} detik"
 
 
-def _fmt_bytes(n: int) -> str:
-    size = float(n)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{n} B"
+_fmt_bytes = fmt.size          # pesan log & detail tahap tampil di UI: format sama dengan web (rvcore/fmt.py)
 
 
 class Run:
@@ -330,7 +324,7 @@ def _stage_tool(run: Run, stage: str, runner_stage: str, fatal: bool = True) -> 
 
     summary = ""
     if result.get("output_files") is not None:
-        summary = f"{result.get('output_files'):,} berkas, {_fmt_bytes(int(result.get('output_bytes') or 0))}"
+        summary = f"{fmt.num(result.get('output_files'))} berkas, {_fmt_bytes(int(result.get('output_bytes') or 0))}"
 
     if status == RESULT_OK:
         store.set_stage(run.conn, run.id, stage, store.OK, summary)

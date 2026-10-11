@@ -72,12 +72,12 @@
 
     <p class="dq-lead">
       {% if d.jadx_error_count %}
-      jadx melaporkan <strong>{{ '{:,}'.format(d.jadx_error_count) }} error</strong>{% if d.methods_listed %}
-      pada <strong>{{ '{:,}'.format(d.methods_listed) }} method</strong>{% endif %}{% if d.jadx_units %}
-      (<span class="mono">{{ '%.2f'|format(d.failed_pct) }}%</span> dari {{ '{:,}'.format(d.jadx_units) }} unit kerja jadx){% endif %}.
+      jadx melaporkan <strong>{{ d.jadx_error_count|num }} error</strong>{% if d.methods_listed %}
+      pada <strong>{{ d.methods_listed|num }} method</strong>{% endif %}{% if d.jadx_units %}
+      (<span class="mono">{{ d.failed_pct|num(2) }}%</span> dari {{ d.jadx_units|num }} unit kerja jadx){% endif %}.
       Class lainnya berhasil didekompilasi (sebagian dengan penanda peringatan, lihat "Mutu kode hasil" di bawah).
       {% else %}jadx tidak melaporkan error.{% endif %}
-      {% if d.smali_only %}<strong>{{ '{:,}'.format(d.smali_only) }} class</strong> aplikasi tidak dihasilkan jadx sama sekali (hanya ada sebagai smali).{% endif %}
+      {% if d.smali_only %}<strong>{{ d.smali_only|num }} class</strong> aplikasi tidak dihasilkan jadx sama sekali (hanya ada sebagai smali).{% endif %}
       Bagian yang gagal tetap bisa dibaca sebagai <strong>smali</strong> di tab Kode, dan asisten AI otomatis memakai smali untuk bagian itu.
     </p>
     <p class="hint muted">{{ d.blurb }} Beberapa error seperti ini umum pada aplikasi Kotlin/Compose atau yang melalui R8; jumlah kecil bukan tanda APK rusak.</p>
@@ -92,11 +92,11 @@
     {% endif %}
 
     <dl class="dq-stats">
-      <div><dt>Error jadx</dt><dd class="mono">{{ '{:,}'.format(d.jadx_error_count or 0) }}</dd><dd class="dq-cap">baris error di log (1 method bisa lebih dari 1)</dd></div>
-      <div><dt>Method terdaftar</dt><dd class="mono">{{ '{:,}'.format(d.methods_listed) }}</dd><dd class="dq-cap">method unik yang gagal, ada di daftar di bawah</dd></div>
-      <div><dt>Method tanpa Java</dt><dd class="mono">{{ '{:,}'.format(d.methods_not_decompiled) }}</dd><dd class="dq-cap">isinya diganti "Method not decompiled"</dd></div>
-      <div><dt>Class hanya smali</dt><dd class="mono">{{ '{:,}'.format(d.smali_only) }}</dd><dd class="dq-cap">tidak ada berkas Java sama sekali</dd></div>
-      <div><dt>Berkas bertanda peringatan</dt><dd class="mono">{{ '{:,}'.format(d.files_with_warn) }}</dd><dd class="dq-cap">Java ada, tetapi memuat komentar JADX WARN</dd></div>
+      <div><dt>Error jadx</dt><dd class="mono">{{ (d.jadx_error_count or 0)|num }}</dd><dd class="dq-cap">baris error di log (1 method bisa lebih dari 1)</dd></div>
+      <div><dt>Method terdaftar</dt><dd class="mono">{{ d.methods_listed|num }}</dd><dd class="dq-cap">method unik yang gagal, ada di daftar di bawah</dd></div>
+      <div><dt>Method tanpa Java</dt><dd class="mono">{{ d.methods_not_decompiled|num }}</dd><dd class="dq-cap">isinya diganti "Method not decompiled"</dd></div>
+      <div><dt>Class hanya smali</dt><dd class="mono">{{ d.smali_only|num }}</dd><dd class="dq-cap">tidak ada berkas Java sama sekali</dd></div>
+      <div><dt>Berkas bertanda peringatan</dt><dd class="mono">{{ d.files_with_warn|num }}</dd><dd class="dq-cap">Java ada, tetapi memuat komentar JADX WARN</dd></div>
     </dl>
 
     {% if d.categories %}
@@ -121,12 +121,12 @@
     <p class="hint muted">jadx menyisipkan komentar <span class="mono">/* JADX WARN */</span> di kode yang berhasil dibuat tetapi mutunya dipertanyakan.</p>
     <ul class="plain-list dq-markers">
       {% for m in d.markers %}
-      <li class="dq-marker dq-{{ m.tone }}"><span class="dq-tag">{{ m.label }}</span><span class="mono">{{ '{:,}'.format(m.n) }} berkas</span><span class="dq-marker-body">{{ m.arti }}</span></li>
+      <li class="dq-marker dq-{{ m.tone }}"><span class="dq-tag">{{ m.label }}</span><span class="mono">{{ m.n|num }} berkas</span><span class="dq-marker-body">{{ m.arti }}</span></li>
       {% endfor %}
     </ul>
     {% if d.warn_markers %}
     <details class="dq-more"><summary>Rincian jenis penanda ({{ d.warn_markers|length }})</summary>
-      <ul class="plain-list">{% for k, n in d.warn_markers.items() %}<li><span class="mono">{{ '{:,}'.format(n) }}</span> {{ k }}</li>{% endfor %}</ul>
+      <ul class="plain-list">{% for k, n in d.warn_markers.items() %}<li><span class="mono">{{ n|num }}</span> {{ k }}</li>{% endfor %}</ul>
     </details>
     {% endif %}
     {% endif %}
@@ -136,7 +136,7 @@
     <div class="dq-tools">
       <label for="dq-filter" class="sr-only">Saring daftar method</label>
       <input id="dq-filter" type="search" placeholder="Saring: nama class, method, atau jenis error…" autocomplete="off" data-dq-filter>
-      <span class="hint muted" role="status" aria-live="polite" data-dq-count>{{ d.errors|length }} dari {{ '{:,}'.format(d.errors_total) }}</span>
+      <span class="hint muted" role="status" aria-live="polite" data-dq-count>{{ d.errors|length }} dari {{ d.errors_total|num }}</span>
     </div>
     <div class="dq-tablewrap" tabindex="0" role="region" aria-labelledby="dq-list-title">
       <table class="dq-table">
@@ -149,7 +149,7 @@
       </table>
     </div>
     {% if d.errors_hidden %}
-    <p><button type="button" class="btn btn-ghost btn-sm" data-dq-all>Tampilkan semua ({{ '{:,}'.format(d.errors_total) }})</button></p>
+    <p><button type="button" class="btn btn-ghost btn-sm" data-dq-all>Tampilkan semua ({{ d.errors_total|num }})</button></p>
     {% endif %}
     {% if d.list_truncated %}<p class="hint muted">Daftar dibatasi 20.000 method; jumlah per jenis di atas tetap lengkap.</p>{% endif %}
     {% endif %}
@@ -171,7 +171,7 @@
       <h2 id="meta-title">Berkas</h2>
       <dl class="dl">
         <div><dt>Nama</dt><dd class="break">{{ an.filename_display }}</dd></div>
-        <div><dt>Ukuran</dt><dd class="mono">{{ an.size|bytes }} <span class="muted">({{ '{:,}'.format(an.size) }} B)</span></dd></div>
+        <div><dt>Ukuran</dt><dd class="mono">{{ an.size|bytes }} <span class="muted">({{ an.size|num }} B)</span></dd></div>
         <div><dt>SHA-256</dt><dd class="mono break">{{ an.sha256 }}</dd></div>
         <div><dt>MD5</dt><dd class="mono break">{{ an.md5 }}</dd></div>
         <div><dt>Diunggah</dt><dd>{{ time_el(an.apk_created_at) }}</dd></div>
@@ -187,7 +187,7 @@
         {% for a in artifacts %}
         <li>
           <span class="mono">{{ a.path }}/</span>
-          <span class="muted">{{ '{:,}'.format(a.files) }} berkas · {{ a.size|bytes }}</span>
+          <span class="muted">{{ a.files|num }} berkas · {{ a.size|bytes }}</span>
         </li>
         {% endfor %}
       </ul>

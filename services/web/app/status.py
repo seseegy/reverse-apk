@@ -13,6 +13,8 @@ from rq import Queue
 from rq.exceptions import NoSuchJobError
 from rq.job import Job
 
+from rvcore import fmt
+
 HEARTBEAT_KEY = "worker:heartbeat"
 RUNNER_HEARTBEAT_KEY = "runner:heartbeat"
 SELFTEST_KEY = "selftest:last"
@@ -48,13 +50,7 @@ class SystemStatus:
         return "Semua layanan normal"
 
 
-def _fmt_bytes(n: int) -> str:
-    size = float(n)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size < 1024 or unit == "TB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{n} B"
+_fmt_bytes = fmt.size
 
 
 def _check_redis(conn: redis.Redis) -> Check:
@@ -64,7 +60,7 @@ def _check_redis(conn: redis.Redis) -> Check:
     except redis.RedisError as exc:
         return Check("redis", "Redis", "error", f"tidak terjangkau ({type(exc).__name__})")
     ms = (time.perf_counter() - start) * 1000
-    return Check("redis", "Redis", "ok", f"terhubung ({ms:.1f} ms)")
+    return Check("redis", "Redis", "ok", f"terhubung ({fmt.num(ms, 1)} ms)")
 
 
 def _check_worker(conn: redis.Redis) -> Check:
