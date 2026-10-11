@@ -63,7 +63,7 @@
     <p class="muted">Hasil dekompilasi yang sudah ada dipakai ulang, jadi tidak perlu mendekompilasi lagi (biasanya hitungan detik hingga menit).</p>
     <form method="post" action="/analyses/{{ an.id }}/static" data-submit-lock class="btn-row">
       <input type="hidden" name="csrf" value="{{ csrf }}">
-      <button type="submit" class="btn btn-primary btn-sm">{{ icon('activity', 16) }}<span>Jalankan analisis statis</span></button>
+      <button type="submit" class="btn btn-primary btn-sm">{{ icon('play', 16) }}<span>Jalankan analisis statis</span></button>
     </form>
   </div>
 </div>

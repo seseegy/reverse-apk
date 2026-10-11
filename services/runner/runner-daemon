@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from rvcore import fmt
 from rvcore.fsutil import remove_unsafe_entries, safe_rmtree, tree_stats
 from rvcore.paths import SHA256_RE, Layout
 from rvcore.spool import (
@@ -336,7 +337,7 @@ def run_job(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
                 size, files, over = tree_stats(out, MAX_OUTPUT_BYTES, MAX_OUTPUT_FILES)
                 if over:
                     outcome = "output_limit"
-                    detail = (f"keluaran melebihi batas ({size // MIB} MiB atau {files:,} berkas); "
+                    detail = (f"keluaran melebihi batas ({fmt.num(size // MIB)} MiB atau {fmt.num(files)} berkas); "
                               "kemungkinan arsip berbahaya/zip bomb")
             if outcome:
                 say(f"[{job_id}] dihentikan: {outcome} — {detail}")
@@ -405,7 +406,7 @@ def run_job(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
     if rc == 0:
         return {**result, "status": RESULT_OK, "message": ""}
     n_err = jadx_error_count(log_path)
-    what = (f"{n_err:,} method gagal didekompilasi" if n_err else "sebagian method gagal didekompilasi")
+    what = (f"{fmt.num(n_err)} method gagal didekompilasi" if n_err else "sebagian method gagal didekompilasi")
     return {**result, "status": RESULT_WARN,
             "message": f"{what} (kode {rc}). Wajar untuk APK Kotlin/ber-obfuscate; bagian itu tetap bisa dibaca sebagai "
                        f"smali. Rincian ada di kartu Hasil dekompilasi."}

@@ -17,6 +17,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.responses import Response
 
 from rvcore import db as rvdb
+from rvcore import fmt as rvfmt
 from rvcore import store
 from rvcore.paths import Layout
 
@@ -108,14 +109,7 @@ def render(request: Request, name: str, context: dict, status_code: int = 200) -
 
 
 def fmt_bytes(n: int | float | None) -> str:
-    if n is None:
-        return "–"
-    size = float(n)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size < 1024 or unit == "TB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{n} B"
+    return rvfmt.size(n)
 
 
 def fmt_duration(seconds: float | None) -> str:
@@ -166,6 +160,7 @@ def code_url(analysis_id: int, file: str | None, line: int | None = None) -> str
 
 templates.env.globals["code_url"] = code_url
 templates.env.filters["bytes"] = fmt_bytes
+templates.env.filters["num"] = rvfmt.num          # {{ x|num }} 1.234 · {{ x|num(2) }} 1.234,50 · {{ x|num(None) }} 0,5
 templates.env.filters["duration"] = fmt_duration
 templates.env.filters["isoutc"] = iso_utc
 templates.env.filters["utc"] = fmt_utc

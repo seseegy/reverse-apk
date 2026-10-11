@@ -6,6 +6,7 @@ Tidak ada yang keluar ke jaringan: Redis 127.0.0.1:1 dan AI 127.0.0.1:9 menolak 
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
 import sys
@@ -100,11 +101,21 @@ def blocking_turns(monkeypatch):
 
 # ---------------------------------------------------------------- pembantu
 def query(sql: str, *params):
-    conn = sqlite3.connect(str(context.layout.db_path))
+    """Kueri langsung ke DB uji. isolation_level=None (autocommit) WAJIB: tanpa itu DELETE pembersihan fixture ter-rollback saat
+    koneksi ditutup, baris biaya menumpuk antar tes, dan hasil tes jadi bergantung urutan."""
+    conn = sqlite3.connect(str(context.layout.db_path), isolation_level=None)
     try:
         return conn.execute(sql, params).fetchall()
     finally:
         conn.close()
+
+
+def new_analysis(tag: str) -> int:
+    """Analisis baru yang bersih (tanpa berkas/sesi chat), agar tes tidak bergantung pada data yang dibuat tes lain."""
+    digest = hashlib.sha256(tag.encode()).hexdigest()
+    with closing(context.db()) as conn, tx(conn):
+        _apk_id, aid = store.create_apk_with_analysis(conn, sha256=digest, md5=digest[:32], filename=f"{tag}.apk", size=1, options={})
+    return aid
 
 
 def wait_for(predicate, timeout: float = 15.0, step: float = 0.05):

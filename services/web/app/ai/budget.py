@@ -9,7 +9,7 @@ from __future__ import annotations
 import sqlite3
 import time
 
-from rvcore import store
+from rvcore import fmt, store
 
 from .config import AIConfig
 from .pricing import PriceTable
@@ -37,10 +37,10 @@ def check(conn: sqlite3.Connection, cfg: AIConfig, session_id: int | None = None
     """Lempar AIError(kind='budget') bila batas harian/sesi sudah tercapai. 0 = tanpa batas."""
     s = snapshot(conn, cfg, session_id)
     if s["daily_exhausted"]:
-        raise AIError("budget", f"Anggaran harian habis ({s['today']:.3f} dari {cfg.daily_budget:g} kredit ≈ "
-                                f"Rp{cfg.idr(s['today']):,.0f}). Naikkan AI_DAILY_BUDGET_CREDITS atau coba lagi besok.")
+        raise AIError("budget", f"Anggaran harian habis ({fmt.num(s['today'], 3)} dari {fmt.num(cfg.daily_budget, None)} kredit ≈ "
+                                f"Rp{fmt.num(cfg.idr(s['today']))}). Naikkan AI_DAILY_BUDGET_CREDITS atau coba lagi besok.")
     if s["session_exhausted"]:
-        raise AIError("budget", f"Anggaran sesi chat habis ({s['session']:.3f} dari {cfg.session_budget:g} kredit). "
+        raise AIError("budget", f"Anggaran sesi chat habis ({fmt.num(s['session'], 3)} dari {fmt.num(cfg.session_budget, None)} kredit). "
                                 "Mulai sesi baru atau naikkan AI_SESSION_BUDGET_CREDITS.")
 
 

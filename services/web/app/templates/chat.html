@@ -38,7 +38,7 @@
           {% for ss in sessions %}
           <li{% if ss.id == session_id %} class="is-current"{% endif %}>
             <a href="/analyses/{{ an.id }}/chat?s={{ ss.id }}"{% if ss.id == session_id %} aria-current="page"{% endif %}>{{ ss.title or ('Sesi ' ~ ss.id) }}</a>
-            <span class="muted hint mono">Rp{{ (ss.cost_credits * cfg.credit_idr)|round(1) }}</span>
+            <span class="muted hint mono">Rp{{ (ss.cost_credits * cfg.credit_idr)|num(1) }}</span>
           </li>
           {% endfor %}
         </ul>
@@ -49,9 +49,9 @@
         {% if budget %}
         {% set pct = ((budget.today / budget.today_limit * 100) if budget.today_limit else 0) %}
         <div class="budget-line">Anggaran hari ini
-          <span class="muted">≈ Rp<span data-b-idr>{{ '{:,.0f}'.format(budget.today_idr) }}</span></span></div>
-        <div class="budget-nums"><strong class="mono" data-b-today>{{ '%.3f'|format(budget.today) }}</strong>
-          <span class="muted">/ <span data-b-limit>{{ '%g'|format(budget.today_limit) if budget.today_limit else '∞' }}</span> kredit</span></div>
+          <span class="muted">≈ Rp<span data-b-idr>{{ budget.today_idr|num }}</span></span></div>
+        <div class="budget-nums"><strong class="mono" data-b-today>{{ budget.today|num(3) }}</strong>
+          <span class="muted">/ <span data-b-limit>{{ budget.today_limit|num(None) if budget.today_limit else '∞' }}</span> kredit</span></div>
         {% if budget.today_limit %}
         <div class="meter{% if pct >= 90 %} is-bad{% elif pct >= 70 %} is-warn{% endif %}" data-b-meter aria-hidden="true"><span data-b-bar data-pct="{{ [pct, 100]|min|round(1) }}"></span></div>
         {% endif %}
@@ -121,12 +121,12 @@
           {% if models|length > 1 %}
           <label for="chat-model" class="sr-only">Model</label>
           <select id="chat-model" data-model>
-            {% for mo in models %}<option value="{{ mo.slug }}" data-vision="{{ 1 if mo.vision else 0 }}">{{ mo.label }} · {{ mo.role }}{% if mo.vision %} · gambar{% endif %} (~Rp{{ mo.idr_per_m }}/jt token)</option>{% endfor %}
+            {% for mo in models %}<option value="{{ mo.slug }}" data-vision="{{ 1 if mo.vision else 0 }}">{{ mo.label }} · {{ mo.role }}{% if mo.vision %} · gambar{% endif %} (~Rp{{ mo.idr_per_m|num(1) }}/jt token)</option>{% endfor %}
           </select>
           {% elif models %}<input type="hidden" data-model value="{{ models[0].slug }}" data-vision="{{ 1 if models[0].vision else 0 }}"><span class="muted hint mono">{{ models[0].label }}{% if models[0].vision %} · gambar{% endif %}</span>{% endif %}
           <span class="muted hint" role="status" aria-atomic="true" data-status></span>
           <button type="button" class="btn btn-ghost btn-sm" data-stop hidden>{{ icon('x', 16) }}<span>Berhenti</span></button>
-          <button type="submit" class="btn btn-primary" data-send>{{ icon('activity', 16) }}<span>Kirim</span></button>
+          <button type="submit" class="btn btn-primary" data-send>{{ icon('send', 16) }}<span>Kirim</span></button>
         </div>
       </form>
       <div class="dropzone" data-dropzone hidden aria-hidden="true">
