@@ -150,6 +150,39 @@ _MIGRATIONS: list[str] = [
     );
     CREATE INDEX chat_message_session ON chat_message(session_id, id)
     """,
+    # --- v4: lampiran pengguna + berkas buatan AI (isi berkas ada di disk: /data/files/<analysis_id>/{up,ai}/)
+    #   kind  'upload' = lampiran pengguna (path = nama acak di disk, `name` = nama tampilan)
+    #         'ai'     = dibuat AI lewat write_file (path = path relatif di folder ai/, mis. frida/hook.js)
+    #   pending=1: sudah diunggah tetapi belum dikirim bersama pesan; yang menggantung lama dibersihkan.
+    #   message_file mengaitkan berkas dengan pesan: 'attachment' (pesan pengguna) / 'output' (jawaban AI).
+    """
+    CREATE TABLE analysis_file (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        analysis_id INTEGER NOT NULL REFERENCES analysis(id) ON DELETE CASCADE,
+        kind        TEXT    NOT NULL CHECK (kind IN ('upload', 'ai')),
+        path        TEXT    NOT NULL,
+        name        TEXT    NOT NULL,
+        media       TEXT    NOT NULL DEFAULT 'binary' CHECK (media IN ('image', 'text', 'binary')),
+        mime        TEXT    NOT NULL DEFAULT '',
+        size        INTEGER NOT NULL DEFAULT 0,
+        sha256      TEXT    NOT NULL DEFAULT '',
+        revision    INTEGER NOT NULL DEFAULT 1,
+        pending     INTEGER NOT NULL DEFAULT 0,
+        created_at  REAL    NOT NULL,
+        updated_at  REAL    NOT NULL
+    );
+    CREATE UNIQUE INDEX analysis_file_path ON analysis_file(analysis_id, kind, path);
+    CREATE INDEX analysis_file_list ON analysis_file(analysis_id, kind, id);
+
+    CREATE TABLE message_file (
+        message_id INTEGER NOT NULL REFERENCES chat_message(id) ON DELETE CASCADE,
+        file_id    INTEGER NOT NULL REFERENCES analysis_file(id) ON DELETE CASCADE,
+        role       TEXT    NOT NULL CHECK (role IN ('attachment', 'output')),
+        revision   INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (message_id, file_id)
+    );
+    CREATE INDEX message_file_file ON message_file(file_id)
+    """,
 ]
 
 SCHEMA_VERSION = len(_MIGRATIONS)

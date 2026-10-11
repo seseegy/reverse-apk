@@ -35,6 +35,14 @@
 		import app_proxy
 	}
 
+	# Lampiran chat: berkas hingga ATTACH_MAX_MB (sama dengan batas di aplikasi; aplikasi yang memberi pesan galat jelas).
+	handle /api/files/upload {
+		request_body {
+			max_size {$ATTACH_MAX_MB}MiB
+		}
+		import app_proxy
+	}
+
 	# Semua rute lain: body kecil.
 	handle {
 		request_body {

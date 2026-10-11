@@ -7,6 +7,9 @@ Prinsip keamanan:
   * Akses berkas lewat codeindex (resolve_under + O_NOFOLLOW + allowlist akar); path jahat -> galat tool, tercatat.
   * Hasil dibatasi ukurannya (`max_tool_chars`) dan secret diredaksi sebelum kembali ke model.
   * Isi kode adalah DATA: hasil dibungkus delimiter yang jelas + pengingat bahwa itu bukan instruksi.
+
+Tool APK bersifat baca-saja. Satu-satunya yang MENULIS adalah write_file/edit_file, dan hanya ke folder berkas buatan AI milik analisis
+ini (hasil_ai/): path divalidasi ketat, hanya ekstensi teks, berkas tidak pernah dijalankan, kuota ditegakkan (lihat userfiles.py).
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from rvcore import store
 from . import redact as redact_mod
 from .config import AIConfig
 from .. import callgraph, codeindex, decompile
+from .. import userfiles as U
 
 
 class ToolError(Exception):
@@ -42,6 +46,26 @@ class ToolContext:
     db: Callable[[], Any]                      # fungsi pembuat koneksi SQLite
     redactor: redact_mod.Redactor = field(default_factory=redact_mod.Redactor)
     log: list[dict[str, Any]] = field(default_factory=list)   # jejak audit pemanggilan tool dalam giliran ini
+    files: Any = None                          # userfiles.FileStore (lampiran & berkas buatan AI); None = fitur berkas mati
+    vision: bool = False                       # model yang dipakai bisa melihat gambar?
+    written: list[dict[str, Any]] = field(default_factory=list)          # berkas yang ditulis AI pada giliran ini (urut kejadian)
+    pending_images: list[dict[str, Any]] = field(default_factory=list)   # gambar yang diminta lewat view_image, dikirim di pesan berikutnya
+    seen_images: set = field(default_factory=set)
+    inline_images: set = field(default_factory=set)   # id lampiran gambar yang sudah terkirim inline di pesan
+    _written_seen: int = 0
+
+    def take_written(self) -> list[dict[str, Any]]:
+        """Kejadian tulis-berkas baru sejak pemanggilan terakhir (untuk dikirim ke UI sebagai peristiwa 'file')."""
+        new = self.written[self._written_seen:]
+        self._written_seen = len(self.written)
+        return new
+
+    def final_outputs(self) -> list[dict[str, Any]]:
+        """Per berkas: kejadian TERAKHIR (revisi terbaru) pada giliran ini."""
+        latest: dict[int, dict[str, Any]] = {}
+        for w in self.written:
+            latest[w["id"]] = w
+        return list(latest.values())
 
 
 # ---------------------------------------------------------------- validasi argumen
@@ -540,26 +564,45 @@ def get_findings(ctx: ToolContext, args: dict) -> dict:
 _ROOT_PREFIXES = (("jadx/sources/", "java"), ("jadx/resources/", "jres"), ("apktool/", "smali"))
 
 
-def read_file(ctx: ToolContext, args: dict) -> dict:
-    """Baca berkas teks apa pun yang boleh dijelajahi, dengan PATH PERSIS seperti yang dipakai untuk sitasi.
+def _files(ctx: ToolContext):
+    if ctx.files is None:
+        raise ToolError("penyimpanan berkas tidak tersedia")
+    return ctx.files
 
-    jadx/sources/...java, jadx/resources/..., apktool/smali*/...smali, apktool/res/..., apktool/AndroidManifest.xml.
-    """
-    path = _str(args, "path").replace("\\", "/")
-    start = _int(args, "start_line", 1, 1)
-    end = _int(args, "end_line", 0, 0)
-    root, rel = "smali", path           # path tanpa awalan dianggap relatif terhadap apktool/ (kompatibel dengan get_resource lama)
-    for prefix, r in _ROOT_PREFIXES:
-        if path.startswith(prefix):
-            root, rel = r, path[len(prefix):]
-            break
-    data = codeindex.read_file(ctx.work, ctx.analysis_id, root, rel, max_bytes=None)
-    if data is None:
-        raise ToolError("berkas tidak ditemukan. Pakai path persis dari hasil tool lain, mis. jadx/sources/pkg/Kelas.java, "
-                        "apktool/smali_classes7/pkg/Kelas.smali, apktool/res/xml/network_security_config.xml, apktool/AndroidManifest.xml.")
-    if data.get("binary"):
-        raise ToolError("berkas biner tidak ditampilkan")
-    lines = data["text"].split("\n")
+
+def _user_file(ctx: ToolContext, path: str) -> Any | None:
+    """Baris DB untuk 'lampiran/<id|nama>' atau 'hasil_ai/<path>'; None bila path bukan jenis ini. ToolError bila tidak ditemukan."""
+    if not path.startswith((U.UPLOAD_PREFIX, U.AI_PREFIX)):
+        return None                      # path APK biasa: tidak menyentuh penyimpanan berkas sama sekali
+    _files(ctx)
+    with closing(ctx.db()) as conn:
+        if path.startswith(U.UPLOAD_PREFIX):
+            ref = path[len(U.UPLOAD_PREFIX):]
+            rows = store.list_files(conn, ctx.analysis_id, "upload")
+            if ref.isdigit():
+                hit = [r for r in rows if r["id"] == int(ref)]
+            else:
+                hit = [r for r in rows if r["name"] == ref]
+            if not hit:
+                names = ", ".join(f'lampiran/{r["id"]} ({r["name"][:40]})' for r in rows[-10:]) or "belum ada lampiran"
+                raise ToolError(f"lampiran tidak ditemukan. Yang ada: {names}. Panggil list_files untuk daftar lengkap.")
+            if len(hit) > 1:
+                raise ToolError("nama lampiran ambigu; pakai lampiran/<id> dari list_files")
+            return hit[0]
+        if path.startswith(U.AI_PREFIX):
+            try:
+                rel = U.clean_ai_path(path)
+            except U.FileError as exc:
+                raise ToolError(str(exc)) from None
+            row = store.find_file(conn, ctx.analysis_id, "ai", rel)
+            if row is None:
+                raise ToolError(f"{path} belum ada. Panggil list_files untuk melihat berkas buatan Anda.")
+            return row
+    return None
+
+
+def _page(ctx: ToolContext, path: str, text: str, start: int, end: int, truncated: bool) -> dict:
+    lines = text.split("\n")
     if start > len(lines):
         raise ToolError(f"berkas hanya {len(lines)} baris")
     last = min(end, len(lines)) if end else len(lines)
@@ -568,9 +611,153 @@ def read_file(ctx: ToolContext, args: dict) -> dict:
     chunk, cut = _clip("\n".join(lines[start - 1:last]), ctx.cfg.max_tool_chars)
     shown = chunk.count("\n") + 1
     return {"path": path, "total_baris": len(lines), "baris_mulai": start, "baris_akhir": start + shown - 1,
-            "dipotong": cut or (data["truncated"] and last == len(lines)),
+            "dipotong": cut or (truncated and last == len(lines)),
             "lanjut": f"panggil lagi dengan start_line={start + shown}" if cut else None,
             "isi": ctx.redactor.text(_numbered(chunk, start))}
+
+
+def read_file(ctx: ToolContext, args: dict) -> dict:
+    """Baca berkas teks apa pun yang boleh dijelajahi, dengan PATH PERSIS seperti yang dipakai untuk sitasi.
+
+    jadx/sources/...java, jadx/resources/..., apktool/smali*/...smali, apktool/res/..., apktool/AndroidManifest.xml,
+    serta lampiran pengguna (lampiran/<id>) dan berkas buatan AI sendiri (hasil_ai/<path>).
+    """
+    path = _str(args, "path").replace("\\", "/")
+    start = _int(args, "start_line", 1, 1)
+    end = _int(args, "end_line", 0, 0)
+    row = _user_file(ctx, path)
+    if row is not None:
+        fs = _files(ctx)
+        if row["media"] == "image":
+            raise ToolError("ini gambar: pakai view_image untuk melihatnya")
+        try:
+            raw = fs.read_bytes(row)
+        except U.FileError as exc:
+            raise ToolError(str(exc)) from None
+        if row["media"] == "binary" or b"\x00" in raw[:8192]:
+            head = raw[:256]
+            hexdump = "\n".join(f"{i:06x}  " + " ".join(f"{b:02x}" for b in head[i:i + 16]) for i in range(0, len(head), 16))
+            return {"path": path, "biner": True, "ukuran_byte": len(raw), "hex_awal": hexdump,
+                    "catatan": "berkas biner; hanya 256 byte awal yang ditampilkan"}
+        return _page(ctx, path, raw.decode("utf-8", errors="replace"), start, end, False)
+    root, rel = "smali", path           # path tanpa awalan dianggap relatif terhadap apktool/ (kompatibel dengan get_resource lama)
+    for prefix, r in _ROOT_PREFIXES:
+        if path.startswith(prefix):
+            root, rel = r, path[len(prefix):]
+            break
+    data = codeindex.read_file(ctx.work, ctx.analysis_id, root, rel, max_bytes=None)
+    if data is None:
+        raise ToolError("berkas tidak ditemukan. Pakai path persis dari hasil tool lain, mis. jadx/sources/pkg/Kelas.java, "
+                        "apktool/smali_classes7/pkg/Kelas.smali, apktool/res/xml/network_security_config.xml, apktool/AndroidManifest.xml; "
+                        "atau lampiran/<id>, hasil_ai/<path> (lihat list_files).")
+    if data.get("binary"):
+        raise ToolError("berkas biner tidak ditampilkan")
+    return _page(ctx, path, data["text"], start, end, bool(data["truncated"]))
+
+
+# ---------------------------------------------------------------- berkas: lampiran pengguna & buatan AI
+def _fmt(n: int) -> str:
+    return f"{n} B" if n < 1024 else f"{n / 1024:.1f} KB" if n < 1024 * 1024 else f"{n / (1024 * 1024):.1f} MB"
+
+
+def list_files_tool(ctx: ToolContext, args: dict) -> dict:
+    _files(ctx)
+    with closing(ctx.db()) as conn:
+        ups = store.list_files(conn, ctx.analysis_id, "upload")
+        ais = store.list_files(conn, ctx.analysis_id, "ai")
+    return {"lampiran": [{"id": r["id"], "nama": r["name"], "jenis": r["media"], "ukuran": _fmt(r["size"]),
+                          "baca_dengan": f'lampiran/{r["id"]}'} for r in ups],
+            "hasil_ai": [{"path": f'hasil_ai/{r["path"]}', "ukuran": _fmt(r["size"]), "revisi": r["revision"]} for r in ais],
+            "catatan": "lampiran = unggahan pengguna (read_file / view_image untuk gambar); hasil_ai = berkas yang Anda buat sendiri"}
+
+
+def _content_arg(args: dict, key: str, *, required: bool = True) -> str:
+    """Seperti _str tetapi TANPA strip: isi berkas (indentasi, baris baru akhir) harus utuh."""
+    v = args.get(key)
+    if v is None and not required:
+        return ""
+    if not isinstance(v, str):
+        raise ToolError(f"argumen '{key}' harus berupa teks")
+    return v
+
+
+def _record_write(ctx: ToolContext, res: dict, action: str) -> dict:
+    ctx.written.append({"id": res["id"], "path": res["path"], "name": res["name"], "size": res["size"], "revision": res["revision"],
+                        "created": bool(res.get("created")), "action": action, "link_revision": res["revision"]})
+    return {"ringkas": f'{"dibuat" if res.get("created") else "diperbarui"} hasil_ai/{res["path"]} · {res["lines"]} baris · {_fmt(res["size"])}',
+            "path": f'hasil_ai/{res["path"]}', "ukuran_byte": res["size"], "baris": res["lines"], "revisi": res["revision"],
+            "catatan": "Tersimpan di folder berkas analisis ini; pengguna melihat kartu unduhan di chat dan tab Berkas. "
+                       "Berkas TIDAK dijalankan. Gunakan edit_file untuk perbaikan kecil."}
+
+
+def write_file(ctx: ToolContext, args: dict) -> dict:
+    fs = _files(ctx)
+    path = _str(args, "path")
+    content = _content_arg(args, "content")
+    mode = _str(args, "mode", required=False, default="overwrite") or "overwrite"
+    try:
+        res = fs.write_ai(ctx.analysis_id, path, content, mode)
+    except U.FileError as exc:
+        raise ToolError(str(exc)) from None
+    return _record_write(ctx, res, mode)
+
+
+def edit_file(ctx: ToolContext, args: dict) -> dict:
+    fs = _files(ctx)
+    path = _str(args, "path")
+    old = _content_arg(args, "old_string")
+    new = _content_arg(args, "new_string", required=False)
+    try:
+        res = fs.edit_ai(ctx.analysis_id, path, old, new)
+    except U.FileError as exc:
+        raise ToolError(str(exc)) from None
+    return _record_write(ctx, res, "edit")
+
+
+def view_image(ctx: ToolContext, args: dict) -> dict:
+    """Minta gambar ditampilkan kepada model. Gambar dikirim sebagai pesan pengguna sesudah hasil tool (protokol tool hanya membawa teks)."""
+    path = _str(args, "path").replace("\\", "/")
+    if not ctx.vision:
+        raise ToolError("model yang sedang dipakai tidak bisa melihat gambar. Katakan kepada pengguna agar memilih model yang mendukung "
+                        "gambar (lihat penanda 'vision' di config/ai_models.json).")
+    max_bytes = ctx.cfg.max_image_bytes
+    name, data = path, None
+    row = _user_file(ctx, path)
+    if row is not None:
+        fs = _files(ctx)
+        if row["media"] != "image":
+            raise ToolError("berkas ini bukan gambar (png/jpeg/gif/webp); pakai read_file")
+        if row["id"] in ctx.inline_images:
+            return {"catatan": f'gambar "{row["name"]}" SUDAH ada di pesan pengguna (bagian gambar pada pesan itu); lihat langsung di sana, '
+                               "tidak perlu view_image."}
+        if row["size"] > max_bytes:
+            raise ToolError(f"gambar {_fmt(row['size'])} melebihi batas AI_MAX_IMAGE_MB ({_fmt(max_bytes)})")
+        try:
+            data = fs.read_bytes(row)
+        except U.FileError as exc:
+            raise ToolError(str(exc)) from None
+        name = row["name"]
+    else:
+        for prefix, r in _ROOT_PREFIXES:
+            if path.startswith(prefix):
+                data = codeindex.read_bytes(ctx.work, ctx.analysis_id, r, path[len(prefix):], max_bytes)
+                break
+        if data is None:
+            raise ToolError("gambar tidak ditemukan atau terlalu besar. Pakai lampiran/<id>, atau path resource seperti "
+                            "apktool/res/drawable-xxhdpi/ic_launcher.png")
+        name = path.rsplit("/", 1)[-1]
+    kind = U.sniff_image(data[:16])
+    if kind is None:
+        raise ToolError("berkas ini bukan gambar yang didukung (png/jpeg/gif/webp)")
+    key = (path, len(data))
+    if key in ctx.seen_images:
+        return {"catatan": "gambar ini sudah Anda minta pada giliran ini; lihat pesan pengguna sebelumnya"}
+    ctx.seen_images.add(key)
+    import base64
+    ctx.pending_images.append({"name": name, "path": path,
+                               "url": f"data:{U._IMAGE_MIME[kind]};base64," + base64.b64encode(data).decode("ascii")})
+    return {"ringkas": f"melihat {name} ({_fmt(len(data))})", "nama": name, "ukuran": _fmt(len(data)), "format": kind,
+            "catatan": "Gambar akan muncul di pesan berikutnya (sebagai pesan pengguna). Lanjutkan analisis setelah melihatnya."}
 
 
 # ---------------------------------------------------------------- registri & skema untuk model
@@ -627,17 +814,40 @@ TOOLS: dict[str, tuple[Callable[[ToolContext, dict], dict], dict]] = {
                                     "properties": {"category": {"type": "string", "enum": list(store.FINDING_CATEGORIES)}}}),
     "read_file": (read_file, {"description": "Baca berkas teks APA PUN dengan rentang baris, memakai path persis seperti sitasi: "
                                              "jadx/sources/pkg/A.java, apktool/smali_classes7/pkg/A.smali (smali SEMUA class, termasuk yang "
-                                             "tidak dihasilkan jadx), apktool/res/..., apktool/AndroidManifest.xml. class_info memberi path smali.",
+                                             "tidak dihasilkan jadx), apktool/res/..., apktool/AndroidManifest.xml. class_info memberi path smali. "
+                                             "Juga lampiran pengguna (lampiran/<id>, besar dibaca bertahap) dan berkas buatan Anda (hasil_ai/<path>).",
                               "properties": {"path": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}},
                               "required": ["path"]}),
+    "list_files": (list_files_tool, {"description": "Daftar lampiran pengguna (id, nama, jenis, ukuran) dan berkas buatan Anda (hasil_ai/...) pada analisis ini.",
+                                     "properties": {}}),
+    "write_file": (write_file, {"description": "BUAT atau ganti berkas teks/kode (py, js, md, json, yaml, sh, java, kt, smali, html, sql, ...) di folder "
+                                               "berkas analisis ini. Pengguna melihat kartu unduhan di chat dan tab Berkas. Berkas TIDAK dijalankan. "
+                                               "Berkas besar: tulis bagian pertama dengan mode=overwrite lalu lanjutkan dengan mode=append (satu panggilan "
+                                               "dibatasi panjang keluaran model). Nama: huruf/angka/_-.+ tanpa spasi, boleh berfolder (frida/hook.js).",
+                                "properties": {"path": {"type": "string", "description": "mis. frida/hook_login.js atau laporan/ringkasan.md"},
+                                               "content": {"type": "string", "description": "isi lengkap berkas (indentasi & baris baru dipertahankan)"},
+                                               "mode": {"type": "string", "enum": ["overwrite", "append", "create"],
+                                                        "description": "overwrite (bawaan): buat/ganti; append: sambung di akhir; create: gagal bila sudah ada"}},
+                                "required": ["path", "content"]}),
+    "edit_file": (edit_file, {"description": "Ganti SATU potongan teks persis (old_string) di berkas buatan Anda dengan new_string. Gagal bila old_string "
+                                             "tidak ada atau muncul lebih dari sekali (perluas dengan baris sekitar). Lebih hemat daripada menulis ulang.",
+                              "properties": {"path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"}},
+                              "required": ["path", "old_string"]}),
+    "view_image": (view_image, {"description": "LIHAT sebuah gambar: lampiran pengguna (lampiran/<id>) atau gambar dari APK (mis. "
+                                               "apktool/res/drawable-xxhdpi/ic_launcher.png, jadx/resources/...). Gambar muncul di pesan berikutnya. "
+                                               "Hanya jika model mendukung gambar.",
+                                "properties": {"path": {"type": "string"}}, "required": ["path"]}),
 }
 
 
-def schemas() -> list[dict]:
+VISION_ONLY = frozenset({"view_image"})     # tidak ditawarkan ke model yang tidak bisa melihat gambar
+
+
+def schemas(vision: bool = True) -> list[dict]:
     return [{"type": "function", "function": {
         "name": name, "description": spec["description"],
         "parameters": {"type": "object", "properties": spec["properties"], "required": spec.get("required", []),
-                       "additionalProperties": False}}} for name, (_fn, spec) in TOOLS.items()]
+                       "additionalProperties": False}}} for name, (_fn, spec) in TOOLS.items() if vision or name not in VISION_ONLY]
 
 
 def run_tool(ctx: ToolContext, name: str, raw_args: str) -> tuple[str, bool]:
@@ -652,7 +862,9 @@ def run_tool(ctx: ToolContext, name: str, raw_args: str) -> tuple[str, bool]:
         try:
             args = json.loads(raw_args) if raw_args.strip() else {}
         except ValueError:
-            raise ToolError("argumen bukan JSON yang valid") from None
+            hint = (" (kemungkinan terpotong karena batas panjang keluaran model: tulis berkas dalam beberapa bagian, mulai dengan mode "
+                    "overwrite lalu mode append)") if name in ("write_file", "edit_file") else ""
+            raise ToolError("argumen bukan JSON yang valid" + hint) from None
         if not isinstance(args, dict):
             raise ToolError("argumen harus berupa objek JSON")
         result = TOOLS[name][0](ctx, args)

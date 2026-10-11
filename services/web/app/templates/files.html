@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_parts.html" import fileicon, fileattrs, time_el %}
+{% set title = an.app_label or an.filename_display %}
+{% block title %}Berkas · {{ title }} · reverse-apk{% endblock %}
+
+{% block header %}{% include "_header.html" %}{% endblock %}
+
+{% macro frow(f, kind) -%}
+{%- set dir = (f.path.rsplit('/', 1)[0] ~ '/') if (f.path and '/' in f.path) else '' -%}
+<li class="frow" data-frow="{{ f.id }}">
+  {% if f.raw %}
+  <button type="button" class="frow-thumb" {{ fileattrs(f) }} aria-label="Lihat gambar {{ f.name }}"><img src="{{ f.raw }}" alt="" loading="lazy"></button>
+  {% else %}
+  <span class="frow-ic">{{ fileicon(f.name, f.media, 22) }}</span>
+  {% endif %}
+  <div class="frow-main">
+    <button type="button" class="frow-name frow-link mono" {{ fileattrs(f) }}><span class="fcard-dir">{{ dir }}</span>{{ f.name }}</button>
+    <span class="frow-meta muted hint">
+      {{ f.size|bytes }}{% if f.revision > 1 %} · revisi {{ f.revision }}{% endif %} · {{ time_el(f.updated_at) }}
+    </span>
+  </div>
+  <div class="frow-actions">
+    <button type="button" class="btn btn-ghost btn-sm" {{ fileattrs(f) }} aria-label="Lihat {{ f.name }}">{{ icon('eye', 16) }}<span>Lihat</span></button>
+    <a class="btn btn-ghost btn-sm" href="{{ f.download }}" download aria-label="Unduh {{ f.name }}">{{ icon('download', 16) }}<span>Unduh</span></a>
+    <form method="post" action="/analyses/{{ an.id }}/files/{{ f.id }}/delete" data-confirm="Hapus {{ f.name }}? Tindakan ini tidak bisa dibatalkan.">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit" class="btn btn-danger btn-sm" aria-label="Hapus {{ f.name }}">{{ icon('trash', 16) }}<span>Hapus</span></button>
+    </form>
+  </div>
+</li>
+{%- endmacro %}
+
+{% block content %}
+<div class="container page container-wide">
+  <a class="back-link" href="/">{{ icon('arrow-left', 16) }}<span>Semua APK</span></a>
+  {% include "_analysis_head.html" %}
+
+  <section class="card" aria-labelledby="files-title" data-files data-analysis-id="{{ an.id }}">
+    <div class="files-head">
+      <div>
+        <h2 id="files-title">Berkas</h2>
+        <p class="muted hint">Lampiran dari chat dan berkas yang dibuat asisten untuk APK ini. Tersimpan terpisah dari hasil dekompilasi: <strong>tidak hilang saat “Analisis ulang”</strong>, dan ikut terhapus bersama APK.</p>
+      </div>
+      <div class="files-quota" role="group" aria-label="Pemakaian penyimpanan berkas">
+        {% set pct = (used / quota * 100) if quota else 0 %}
+        <div class="budget-line"><span>{{ count }} berkas</span><span class="mono">{{ used|bytes }}{% if quota %} / {{ quota|bytes }}{% endif %}</span></div>
+        {% if quota %}<div class="meter{% if pct >= 90 %} is-bad{% elif pct >= 70 %} is-warn{% endif %}" aria-hidden="true"><span data-pct="{{ 1 if (used and pct < 1) else [pct, 100]|min|round(1) }}"></span></div>{% endif %}
+      </div>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="ai-files-title">
+    <div class="files-head">
+      <h2 id="ai-files-title">Dibuat asisten <span class="count-pill">{{ ai_files|length }}</span></h2>
+      {% if ai_files %}<a class="btn btn-ghost btn-sm" href="/analyses/{{ an.id }}/files/download.zip?kind=ai" download>{{ icon('archive', 16) }}<span>Unduh semua (.zip)</span></a>{% endif %}
+    </div>
+    {% if ai_files %}
+    <ul class="flist plain-list">{% for f in ai_files %}{{ frow(f, 'ai') }}{% endfor %}</ul>
+    {% else %}
+    <div class="files-empty">
+      <span class="empty-icon">{{ icon('file-code', 28) }}</span>
+      <p><strong>Belum ada berkas buatan asisten.</strong></p>
+      <p class="muted">Minta lewat Chat, mis. “buatkan skrip Frida untuk hook fungsi login” atau “tulis laporan alur login dalam Markdown”. Berkas yang dibuat (py, js, md, json, dan lainnya) muncul di sini dan di bawah jawabannya.</p>
+      <a class="btn btn-primary btn-sm" href="/analyses/{{ an.id }}/chat">{{ icon('activity', 16) }}<span>Buka Chat</span></a>
+    </div>
+    {% endif %}
+  </section>
+
+  <section class="card" aria-labelledby="up-files-title">
+    <div class="files-head">
+      <h2 id="up-files-title">Lampiran Anda <span class="count-pill">{{ uploads|length }}</span></h2>
+      {% if uploads %}<a class="btn btn-ghost btn-sm" href="/analyses/{{ an.id }}/files/download.zip?kind=upload" download>{{ icon('archive', 16) }}<span>Unduh semua (.zip)</span></a>{% endif %}
+    </div>
+    {% if uploads %}
+    <ul class="flist plain-list">{% for f in uploads %}{{ frow(f, 'upload') }}{% endfor %}</ul>
+    {% else %}
+    <div class="files-empty">
+      <span class="empty-icon">{{ icon('paperclip', 28) }}</span>
+      <p><strong>Belum ada lampiran.</strong></p>
+      <p class="muted">Di Chat, klik <em>Lampirkan</em>, seret berkas ke percakapan, atau tempel tangkapan layar (Ctrl+V). Maks {{ (max_file / 1048576)|round|int }} MB per berkas.</p>
+    </div>
+    {% endif %}
+  </section>
+  {% include "_fileviewer.html" %}
+</div>
+{% endblock %}

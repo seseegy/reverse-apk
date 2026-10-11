@@ -26,6 +26,7 @@ services:
     environment:
       APP_DOMAIN: ${APP_DOMAIN:?isi APP_DOMAIN di .env}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-200}
+      ATTACH_MAX_MB: ${ATTACH_MAX_MB:-25}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -54,6 +55,10 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?jalankan `make init`}
       DATA_DIR: /data
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-200}
+      # --- Lampiran chat & berkas buatan AI (volume `files`)
+      ATTACH_MAX_MB: ${ATTACH_MAX_MB:-25}
+      FILES_QUOTA_MB: ${FILES_QUOTA_MB:-1024}
+      FILES_MAX_COUNT: ${FILES_MAX_COUNT:-2000}
       MIN_FREE_GB: ${MIN_FREE_GB:-15}
       JOB_TIMEOUT: ${JOB_TIMEOUT:-2700}
       # --- AI (M4). Kunci hanya masuk ke service web; tidak pernah ke browser, worker, atau runner.
@@ -70,6 +75,8 @@ services:
       AI_MAX_TOOL_CHARS: ${AI_MAX_TOOL_CHARS:-14000}
       AI_MAX_TURN_TOOL_CHARS: ${AI_MAX_TURN_TOOL_CHARS:-0}
       AI_TOOL_TIMEOUT: ${AI_TOOL_TIMEOUT:-60}
+      AI_MAX_IMAGE_MB: ${AI_MAX_IMAGE_MB:-10}
+      AI_INLINE_ATTACH_CHARS: ${AI_INLINE_ATTACH_CHARS:-16000}
       AI_REDACT_SECRETS: ${AI_REDACT_SECRETS:-1}
       AI_DAY_OFFSET_HOURS: ${AI_DAY_OFFSET_HOURS:-7}
       AI_MODELS_FILE: /config/ai_models.json
@@ -78,6 +85,7 @@ services:
     volumes:
       - uploads:/data/uploads
       - work:/data/work
+      - files:/data/files
       - db:/data/db
       - ./config:/config:ro
     networks: [edge, backend]
@@ -207,6 +215,7 @@ networks:
 volumes:
   uploads:   # APK asli (<sha256>.apk); web rw, worker & runner ro
   work:      # hasil per analisis (jadx/, apktool/, logs/, manifest.json)
+  files:     # lampiran chat (up/) + berkas buatan AI (ai/) per analisis; HANYA web yang memasangnya, dan tidak ikut terhapus saat "Analisis ulang"
   db:        # SQLite (WAL); hanya web & worker — runner TIDAK punya akses
   spool:     # antrean berkas worker -> runner; hanya worker & runner
   redisdata:

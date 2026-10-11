@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
+{% from "_parts.html" import fileicon, attachments, fcard %}
 {% set title = an.app_label or an.filename_display %}
 {% block title %}Chat · {{ title }} · reverse-apk{% endblock %}
 
@@ -23,7 +24,8 @@
   </section>
   {% else %}
   <section class="chat-app" data-chat data-analysis-id="{{ an.id }}" data-csrf="{{ csrf }}"
-           data-session-id="{{ session_id or '' }}" data-ready="{{ 'true' if has_index else 'false' }}">
+           data-session-id="{{ session_id or '' }}" data-ready="{{ 'true' if has_index else 'false' }}"
+           data-max-file="{{ file_limits.max_file_bytes }}">
 
     <aside class="chat-side">
       <a class="btn btn-primary btn-sm" href="/analyses/{{ an.id }}/chat">{{ icon('refresh', 16) }}<span>Sesi baru</span></a>
@@ -50,12 +52,14 @@
         <div class="budget-nums"><strong class="mono" data-b-today>{{ '%.3f'|format(budget.today) }}</strong>
           <span class="muted">/ <span data-b-limit>{{ '%g'|format(budget.today_limit) if budget.today_limit else '∞' }}</span> kredit</span></div>
         {% if budget.today_limit %}
-        <div class="meter{% if pct >= 90 %} is-bad{% elif pct >= 70 %} is-warn{% endif %}" data-b-meter aria-hidden="true"><span data-b-bar style="width: {{ [pct, 100]|min|round(1) }}%"></span></div>
+        <div class="meter{% if pct >= 90 %} is-bad{% elif pct >= 70 %} is-warn{% endif %}" data-b-meter aria-hidden="true"><span data-b-bar data-pct="{{ [pct, 100]|min|round(1) }}"></span></div>
         {% endif %}
         {% endif %}
       </div>
       <p class="muted hint">Potongan kode yang Anda tanyakan dikirim ke provider AI. Secret diredaksi lebih dulu
-        {% if cfg.redact_secrets %}(aktif){% else %}<strong>(NONAKTIF)</strong>{% endif %}.</p>
+        {% if cfg.redact_secrets %}(aktif){% else %}<strong>(NONAKTIF)</strong>{% endif %}. Teks lampiran ikut diredaksi; <strong>gambar dikirim apa adanya</strong>,
+        jadi jangan lampirkan gambar berisi rahasia.</p>
+      <a class="btn btn-ghost btn-sm" href="/analyses/{{ an.id }}/files">{{ icon('folder', 16) }}<span>Berkas{% if files_count %} ({{ files_count }}){% endif %}</span></a>
 
       {% if session_id %}
       <div class="btn-row">
@@ -79,6 +83,7 @@
         {% for m in messages %}
         <article class="msg msg-{{ m.role }}" data-role="{{ m.role }}">
           <header class="msg-head">{{ 'Anda' if m.role == 'user' else 'Asisten' }}{% if m.model %} <span class="muted mono">· {{ m.model }}</span>{% endif %}</header>
+          {% if m.attachments %}{{ attachments(m.attachments) }}{% endif %}
           {% if m.tool_calls %}
           <details class="msg-tools"><summary>{{ m.tool_calls|length }} langkah tool</summary>
             <ul class="plain-list">
@@ -87,6 +92,7 @@
             </ul></details>
           {% endif %}
           <div class="msg-body" data-md data-citations='{{ m.citations|tojson|forceescape }}'>{{ m.content }}</div>
+          {% if m.outputs %}<div class="fcards" aria-label="Berkas yang dibuat asisten">{% for f in m.outputs %}{{ fcard(f) }}{% endfor %}</div>{% endif %}
         </article>
         {% endfor %}
       </div>
@@ -103,21 +109,29 @@
       {% endif %}
 
       <form class="chat-form" data-form novalidate>
+        <div class="composer-atts" data-atts role="list" aria-label="Lampiran yang akan dikirim" hidden></div>
+        <p class="composer-warn" data-att-warn role="alert" hidden></p>
         <label for="chat-text" class="sr-only">Pesan</label>
-        <textarea id="chat-text" rows="1" placeholder="Tanya tentang kode APK ini…" data-input aria-describedby="chat-keys"></textarea>
-        <p class="keys hint muted" id="chat-keys"><kbd>Enter</kbd> kirim · <kbd>Shift</kbd>+<kbd>Enter</kbd> baris baru · <kbd>Esc</kbd> berhenti</p>
+        <textarea id="chat-text" rows="1" placeholder="Tanya tentang kode APK ini, atau lampirkan gambar/berkas…" data-input aria-describedby="chat-keys"></textarea>
+        <p class="keys hint muted" id="chat-keys"><kbd>Enter</kbd> kirim · <kbd>Shift</kbd>+<kbd>Enter</kbd> baris baru · <kbd>Esc</kbd> berhenti · seret atau tempel (Ctrl+V) berkas/gambar untuk melampirkan</p>
         <div class="chat-controls">
+          <input type="file" multiple data-file hidden tabindex="-1" aria-hidden="true">
+          <button type="button" class="btn btn-ghost btn-sm btn-attach" data-attach aria-label="Lampirkan berkas atau gambar" title="Lampirkan berkas atau gambar (maks {{ (file_limits.max_file_bytes / 1048576)|round|int }} MB per berkas)">{{ icon('paperclip', 16) }}<span>Lampirkan</span></button>
           {% if models|length > 1 %}
           <label for="chat-model" class="sr-only">Model</label>
           <select id="chat-model" data-model>
-            {% for mo in models %}<option value="{{ mo.slug }}">{{ mo.label }} · {{ mo.role }} (~Rp{{ mo.idr_per_m }}/jt token)</option>{% endfor %}
+            {% for mo in models %}<option value="{{ mo.slug }}" data-vision="{{ 1 if mo.vision else 0 }}">{{ mo.label }} · {{ mo.role }}{% if mo.vision %} · gambar{% endif %} (~Rp{{ mo.idr_per_m }}/jt token)</option>{% endfor %}
           </select>
-          {% elif models %}<input type="hidden" data-model value="{{ models[0].slug }}"><span class="muted hint mono">{{ models[0].label }}</span>{% endif %}
+          {% elif models %}<input type="hidden" data-model value="{{ models[0].slug }}" data-vision="{{ 1 if models[0].vision else 0 }}"><span class="muted hint mono">{{ models[0].label }}{% if models[0].vision %} · gambar{% endif %}</span>{% endif %}
           <span class="muted hint" role="status" aria-atomic="true" data-status></span>
           <button type="button" class="btn btn-ghost btn-sm" data-stop hidden>{{ icon('x', 16) }}<span>Berhenti</span></button>
           <button type="submit" class="btn btn-primary" data-send>{{ icon('activity', 16) }}<span>Kirim</span></button>
         </div>
       </form>
+      <div class="dropzone" data-dropzone hidden aria-hidden="true">
+        <div class="dropzone-box">{{ icon('upload', 28) }}<strong>Lepas untuk melampirkan</strong>
+          <span class="muted">Gambar, log, kode, apa saja. Maks {{ (file_limits.max_file_bytes / 1048576)|round|int }} MB per berkas.</span></div>
+      </div>
     </section>
 
     <aside class="peek" data-peek hidden role="dialog" aria-modal="false" aria-labelledby="peek-title" tabindex="-1">
@@ -130,6 +144,7 @@
       <div class="peek-code" data-peek-code tabindex="0" role="region" aria-label="Cuplikan kode"></div>
     </aside>
   </section>
+  {% include "_fileviewer.html" %}
   {% endif %}
 </div>
 {% endblock %}

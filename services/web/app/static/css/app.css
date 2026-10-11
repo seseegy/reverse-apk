@@ -842,3 +842,148 @@ select:hover { border-color: var(--color-muted-foreground); }
 .dq-table td:nth-child(1) { min-width: 18rem; } .dq-table td:nth-child(2) { white-space: nowrap; } .dq-table td:nth-child(3) { min-width: 14rem; }
 .dq-table tr[hidden] { display: none; }
 @media (max-width: 760px) { .dq-marker { grid-template-columns: 1fr; gap: var(--space-1); } }
+
+
+/* =====================================================================
+   Lampiran, berkas buatan AI, penampil berkas, halaman Berkas.
+   Kelas: att* / composer-* (kotak pesan), msg-atts / att-img / file-chip (gelembung pesan), fcard* (kartu hasil AI),
+   fview* (penampil modal), files-* / flist / frow* (halaman Berkas).
+   ===================================================================== */
+.chat-main { position: relative; }
+.btn-attach { margin-right: auto; }
+.chat-controls .btn-attach + select, .chat-controls .btn-attach + .hint { margin-left: 0; }
+
+/* --- kotak pesan: chip lampiran */
+.composer-atts { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.att { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-2); width: min(17rem, 100%);
+  padding: 6px var(--space-2) 6px 6px; background: var(--color-muted); border: 1px solid var(--color-border); border-radius: 10px;
+  transition: border-color 150ms ease, background-color 150ms ease; }
+.att.is-uploading { border-color: var(--color-border-control); }
+.att.is-error { border-color: var(--text-danger); background: rgba(239, 68, 68, 0.1); }
+.att-thumb { width: 44px; height: 44px; border-radius: 8px; overflow: hidden; display: grid; place-items: center; background: var(--code-bg);
+  color: var(--color-muted-foreground); }
+.att.is-error .att-thumb { color: var(--text-danger); }
+.att-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.att-body { display: grid; gap: 2px; min-width: 0; }
+.att-name { font-size: 0.85rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-sub { font-size: 0.75rem; color: var(--color-muted-foreground); overflow-wrap: anywhere; line-height: 1.3; }
+.att.is-error .att-sub { color: var(--text-danger); }
+.att-bar { display: block; height: 4px; border-radius: 2px; background: var(--code-bg); overflow: hidden; }
+.att-bar > span { display: block; height: 100%; width: 0; background: var(--color-accent); transition: width 150ms linear; }
+.att-x, .att-btn { border: 0; background: transparent; color: var(--color-muted-foreground); cursor: pointer; border-radius: 6px; font: inherit;
+  transition: background-color 150ms ease, color 150ms ease; }
+.att-x { width: 32px; height: 32px; display: grid; place-items: center; }
+.att-btn { font-size: 0.8rem; padding: 4px 8px; text-decoration: underline; }
+.att-x:hover, .att-btn:hover { background: var(--code-bg); color: var(--color-foreground); }
+.att-x:focus-visible, .att-btn:focus-visible, .att-img:focus-visible, .file-chip:focus-visible, .frow-link:focus-visible, .frow-thumb:focus-visible, .fview-imgbtn:focus-visible {
+  outline: 2px solid var(--color-ring); outline-offset: 2px; }
+.composer-warn { margin: 0; padding: var(--space-2) var(--space-3); font-size: 0.85rem; color: var(--text-warn); border-left: 3px solid var(--text-warn);
+  background: rgba(245, 158, 11, 0.08); border-radius: 0 var(--radius) var(--radius) 0; }
+
+/* --- zona lepas */
+.dropzone { position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; pointer-events: none; border-radius: 12px;
+  background: rgba(15, 23, 42, 0.86); border: 2px dashed var(--color-accent); backdrop-filter: blur(2px); }
+.dropzone-box { display: grid; justify-items: center; gap: var(--space-1); text-align: center; padding: var(--space-4); color: var(--color-accent); }
+.dropzone-box strong { color: var(--color-foreground); font-size: 1.05rem; }
+
+/* --- lampiran di gelembung pesan pengguna */
+.msg-atts { display: flex; flex-wrap: wrap; gap: var(--space-2); justify-content: flex-end; }
+.att-img { padding: 0; border: 1px solid var(--color-border-control); border-radius: 10px; overflow: hidden; cursor: zoom-in; background: var(--code-bg);
+  width: 9rem; height: 9rem; transition: border-color 150ms ease; }
+.att-img:hover { border-color: var(--color-foreground); }
+.att-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.file-chip { display: inline-flex; align-items: center; gap: var(--space-2); max-width: 100%; padding: 6px var(--space-3); min-height: 36px; border-radius: 8px;
+  border: 1px solid var(--color-border-control); background: var(--code-bg); color: var(--color-foreground); font: inherit; font-size: 0.85rem; cursor: pointer;
+  transition: border-color 150ms ease, background-color 150ms ease; }
+.file-chip:hover { border-color: var(--color-foreground); background: var(--color-muted); }
+.file-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 20ch; font-family: var(--font-mono); font-size: 0.8rem; }
+
+/* --- kartu berkas buatan AI */
+.fcards { display: grid; gap: var(--space-2); margin-top: var(--space-3); max-width: 46rem; }
+.fcard { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-3);
+  background: var(--code-bg); border: 1px solid var(--color-border); border-left: 3px solid var(--color-accent); border-radius: var(--radius); }
+.fcard-ic { color: var(--color-accent); display: grid; place-items: center; }
+.fcard-main { display: grid; gap: 2px; min-width: 0; }
+.fcard-name { font-size: 0.9rem; font-weight: 600; overflow-wrap: anywhere; line-height: 1.35; }
+.fcard-dir { color: var(--color-muted-foreground); font-weight: 400; }
+.fcard-meta { font-size: 0.78rem; }
+.fcard-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; justify-content: flex-end; }
+.fcard-actions .btn { min-height: 32px; }
+
+/* --- penampil berkas (modal) */
+.fview { width: min(1000px, calc(100vw - 32px)); max-width: none; height: fit-content; min-height: 16rem; max-height: min(86vh, 900px); max-height: min(86dvh, 900px); padding: 0; margin: auto;
+  border: 1px solid var(--color-border-control); border-radius: 12px; background: var(--color-card); color: var(--color-foreground);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6); overflow: hidden; }
+.fview[open] { display: flex; }
+.fview::backdrop { background: rgba(2, 6, 23, 0.74); backdrop-filter: blur(3px); }
+.fview-box { display: flex; flex-direction: column; width: 100%; min-height: 0; min-width: 0; }
+.fview-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-3);
+  padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--color-border); }
+.fview-title { display: flex; align-items: center; gap: var(--space-3); flex: 1 1 16rem; min-width: 0; }
+.fview-title h2 { margin: 0; font-size: 0.95rem; font-weight: 600; overflow-wrap: anywhere; line-height: 1.35; }
+.fview-ic { color: var(--color-accent); display: grid; place-items: center; flex: none; }
+.fview-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.fview-note { margin: 0; padding: var(--space-1) var(--space-4); }
+.fview-note:empty { display: none; }
+.fview-body { flex: 1 1 auto; min-height: 8rem; overflow: auto; background: var(--code-bg); font-family: var(--font-mono); font-size: 13px; line-height: 1.55; padding: var(--space-2) 0; }
+.fview-body:focus-visible { outline: 2px solid var(--color-ring); outline-offset: -2px; }
+.fview-code .pl { grid-template-columns: 6ch minmax(0, 1fr); }
+.fview-more { margin: var(--space-3) var(--space-4); }
+.fview-md { padding: var(--space-3) var(--space-5); font-family: var(--font-sans); font-size: 0.98rem; max-width: 84ch; }
+.fview-empty { padding: var(--space-5); margin: 0; font-family: var(--font-sans); font-size: 0.95rem; }
+.fview-imgbtn { display: block; width: 100%; padding: var(--space-3); border: 0; background: transparent; cursor: zoom-in; }
+.fview-img { display: block; max-width: 100%; max-height: calc(86dvh - 8.5rem); margin: 0 auto; object-fit: contain; border-radius: 6px; background: #000; }
+.fview-body.is-actual .fview-imgbtn { cursor: zoom-out; width: max-content; min-width: 100%; }
+.fview-body.is-actual .fview-img { max-width: none; max-height: none; margin: 0; }
+.seg { display: inline-flex; border: 1px solid var(--color-border-control); border-radius: var(--radius); overflow: hidden; }
+.seg button { min-height: 32px; padding: 2px var(--space-3); border: 0; background: transparent; color: var(--color-muted-foreground); font: inherit; font-size: 0.85rem; cursor: pointer;
+  transition: background-color 150ms ease, color 150ms ease; }
+.seg button:hover { background: var(--color-muted); }
+.seg button[aria-pressed="true"] { background: var(--color-muted); color: var(--color-foreground); font-weight: 600; box-shadow: inset 0 -2px var(--color-accent); }
+.seg button:focus-visible { outline: 2px solid var(--color-ring); outline-offset: -2px; }
+
+/* --- halaman Berkas */
+.files-head { display: flex; flex-wrap: wrap; gap: var(--space-3) var(--space-5); justify-content: space-between; align-items: flex-start; }
+.files-head h2 { margin: 0; display: flex; align-items: center; gap: var(--space-2); }
+.files-head p { margin: var(--space-1) 0 0; max-width: 62ch; }
+.files-quota { display: grid; gap: 6px; flex: 0 1 22rem; min-width: 14rem; font-size: 0.85rem; }
+.flist { display: grid; gap: var(--space-2); margin-top: var(--space-3); }
+.flist > .frow { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-3);
+  background: var(--code-bg); border: 1px solid var(--color-border); border-radius: var(--radius); }
+.frow-ic, .frow-thumb { width: 44px; height: 44px; border-radius: 8px; display: grid; place-items: center; overflow: hidden; padding: 0; border: 0;
+  background: var(--color-muted); color: var(--color-muted-foreground); }
+.frow-thumb { cursor: zoom-in; }
+.frow-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.frow-main { display: grid; gap: 2px; min-width: 0; }
+.frow-link { background: none; border: 0; padding: 0; color: var(--color-foreground); text-align: left; cursor: pointer; font-size: 0.9rem; font-weight: 600;
+  overflow-wrap: anywhere; line-height: 1.35; }
+.frow-link:hover { text-decoration: underline; }
+.frow-meta { font-size: 0.78rem; }
+.frow-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); justify-content: flex-end; }
+.frow-actions form { display: inline-flex; margin: 0; }
+.files-empty { display: grid; gap: var(--space-2); justify-items: start; padding: var(--space-3) 0 var(--space-1); }
+.files-empty p { margin: 0; max-width: 62ch; }
+
+@media (max-width: 760px) {
+  .fcard { grid-template-columns: auto minmax(0, 1fr); }
+  .fcard-actions { grid-column: 1 / -1; justify-content: flex-start; }
+  .flist > .frow { grid-template-columns: 44px minmax(0, 1fr); }
+  .frow-actions { grid-column: 1 / -1; justify-content: flex-start; }
+  .att { width: 100%; }
+  .att-img { width: 7rem; height: 7rem; }
+  .btn-attach span { display: none; }
+  .btn-attach { min-width: 44px; padding-inline: var(--space-3); }
+  .fview { width: 100vw; height: 100vh; height: 100dvh; max-height: none; border-radius: 0; border: 0; }
+  .fview[open] { height: 100dvh; }
+  .fview-md { padding: var(--space-3) var(--space-4); }
+}
+@media (pointer: coarse), (max-width: 760px) {
+  .att-x { width: 44px; height: 44px; }
+  .seg button { min-height: 44px; }
+  .fcard-actions .btn, .fview .btn-sm { min-height: 44px; }
+}
+
+/* Composer: kolom grid tidak boleh melebar mengikuti opsi <select> yang panjang (di layar sempit halaman jadi bisa digeser ke samping). */
+.chat-form { grid-template-columns: minmax(0, 1fr); }
+.chat-form > * { min-width: 0; }
+.chat-controls select { min-width: 0; flex: 1 1 12rem; text-overflow: ellipsis; }

@@ -26,8 +26,14 @@ Memberi pengguna antarmuka tanya-jawab ke kode APK. Model menelusuri kode sendir
 | `list_strings` | `filter?`, `kind?` | string dan lokasi | 100 hasil |
 | `get_findings` | `category?` | temuan statis | – |
 | `read_file` | `path`, `start_line?`, `end_line?` | berkas teks apa pun (Java, **smali semua class**, resource, manifest) dengan nomor baris; path sama persis dengan format sitasi | ukuran dibatasi, ada penanda lanjut |
+| `list_files` | – | lampiran pengguna (`lampiran/<id>`) dan berkas buatan AI (`hasil_ai/<path>`) | – |
+| `write_file` | `path`, `content`, `mode=overwrite|append|create` | menulis berkas teks/kode ke folder berkas analisis (lihat "Lampiran & berkas buatan AI") | ekstensi teks saja, ukuran/kuota dari `.env` |
+| `edit_file` | `path`, `old_string`, `new_string?` | mengganti SATU potongan persis di berkas buatan AI | gagal bila `old_string` tidak unik |
+| `view_image` | `path` | melihat gambar lampiran (`lampiran/<id>`) atau gambar di APK (`apktool/res/...png`); hanya ditawarkan ke model bertanda `vision` | gambar ≤ `AI_MAX_IMAGE_MB` |
 
-Validasi: semua path dinormalisasi dan harus berada di bawah `work/<analysis_id>/`; tolak `..`, symlink keluar, dan berkas biner besar.
+`read_file` juga membaca `lampiran/<id|nama>` dan `hasil_ai/<path>`.
+
+Validasi: semua path dinormalisasi dan harus berada di bawah akar yang diizinkan (`work/<analysis_id>/` untuk APK, `files/<analysis_id>/` untuk lampiran/berkas AI); tolak `..`, symlink keluar, dan berkas biner besar.
 
 ## Kebutuhan fungsional
 | ID | Kebutuhan | Prioritas |
@@ -42,6 +48,10 @@ Validasi: semua path dinormalisasi dan harus berada di bawah `work/<analysis_id>
 | FR-5.8 | Pencatatan biaya per sesi dan batas anggaran sesi | P0 |
 | FR-5.9 | Ekspor percakapan ke Markdown | P1 |
 | FR-5.10 | Saran pertanyaan awal berdasar temuan ("Bagaimana alur login?", "Di mana kunci enkripsi dibuat?") | P1 |
+| FR-5.11 | Pengguna melampirkan berkas/gambar di chat (tombol, seret-lepas, tempel tangkapan layar), dengan progres unggah dan pratinjau | P0 |
+| FR-5.12 | AI membaca gambar (lampiran dan gambar dalam APK) pada model yang mendukung; model tanpa dukungan ditolak jelas, bukan gambar dibuang diam-diam | P0 |
+| FR-5.13 | AI membuat berkas sungguhan (py, js, md, json, ...) di folder khusus per APK; tampil sebagai kartu Lihat/Unduh di jawaban dan di tab **Berkas**, unduh ZIP | P0 |
+| FR-5.14 | Berkas pengguna/AI bertahan saat "Analisis ulang" dan terhapus bersama APK; kuota ukuran & jumlah per APK | P0 |
 
 ## Skill dalam chat
 - Skill `apk-analyst` (04, FR-4.22) dimuat sebagai bagian konteks sistem: metodologi triase, daftar kata kunci pencarian (login, sign, encrypt, token, root, certificate, okhttp, webview), dan checklist pemeriksaan.
@@ -65,7 +75,7 @@ Permintaan untuk menyerang layanan pihak ketiga (mis. mengeksploitasi endpoint y
 
 ## Keputusan M4 (chat agent)
 - **Tab Chat** per analisis; sesi, riwayat, dan biaya tersimpan (`chat_session`, `chat_message`, `ai_call`). Satu giliran aktif per sesi; tombol **Berhenti** membatalkan di tengah streaming.
-- **14 tool baca-saja** (`services/web/app/ai/tools.py`): `get_overview`, `get_manifest`, `list_packages`, `list_classes`, `search_code`, `get_class`, `get_method`, `find_xrefs`, `find_callees`, `class_info`, `find_paths`, `list_strings`, `get_findings`, `read_file`. `analysis_id` terikat pada sesi (model tidak bisa menyebutnya); argumen divalidasi; nama tool di luar daftar ditolak.
+- **14 tool baca-saja** (`services/web/app/ai/tools.py`): `get_overview`, `get_manifest`, `list_packages`, `list_classes`, `search_code`, `get_class`, `get_method`, `find_xrefs`, `find_callees`, `class_info`, `find_paths`, `list_strings`, `get_findings`, `read_file`; ditambah `list_files`, `write_file`, `edit_file`, `view_image` (lihat "Lampiran & berkas buatan AI"). `analysis_id` terikat pada sesi (model tidak bisa menyebutnya); argumen divalidasi; nama tool di luar daftar ditolak.
 - **Call graph nyata (FR-3.12)**: `find_xrefs` bukan lagi pencarian teks. Analyzer membaca smali (`analyzer/callgraph.py`) dan menyimpan hierarki class, method, field, panggilan, akses field, `new-instance`/`const-class`, dan string konstanta ke `index.sqlite` (tabel `cls`, `impl`, `msym`, `fsym`, `call`, `fref`, `cref`, `sref`; `meta.callgraph` = complete|partial|failed). Isi `invoke` hanya dibaca untuk class aplikasi; pustaka cukup kepala class-nya. Pemanggil dilaporkan dengan hubungan `langsung` / `lewat subclass` / `lewat supertype`.
 - **`find_paths` jujur soal tebakan**: edge `langsung` (invoke nyata) berbobot 1; `dispatch` (override), `intent` (const-class ke komponen), dan `callback` (instance lambda/listener dibuat di method itu) adalah PERKIRAAN, berbobot lebih mahal dan dibatasi `max_approx` (bawaan 2; 0 = hanya invoke nyata). Dispatch ke >8 implementer dilewati (terlalu ambigu). Tidak ada jalur ≠ tidak terjangkau.
 - **Tidak terlihat dari call graph**: refleksi, JNI, callback yang dipanggil framework, kode dinamis, dan isi pustaka pihak ketiga. Batas ini ikut dikirim di setiap hasil tool dan ada di prompt sistem. Analisis lama (indeks sebelum v2) perlu "Jalankan ulang analisis statis".
@@ -80,6 +90,17 @@ Permintaan untuk menyerang layanan pihak ketiga (mis. mengeksploitasi endpoint y
 
 - **Class yang tidak dihasilkan jadx** (mis. satu dex gagal didekompilasi, `smali_classes7`): `get_class`/`get_method` otomatis jatuh ke smali dan mengatakannya (`format: smali`, nomor baris = baris berkas smali, bisa disitir `apktool/smali_classes7/pkg/A.smali:123`); `read_file` membaca path apa pun persis seperti sitasi; `list_classes` memuat `hanya_smali`. Analyzer memindai smali class-class itu (secret, URL, string) dan mengindeksnya ke `search_code`, serta menambah temuan `coverage.jadx_missing_classes`. Artefak desugar (`$$ExternalSyntheticLambda`) dan stub `android/`/`java/` tidak dihitung sebagai hilang.
 - **Pembacaan terhadap hasil kerja model sendiri**: bila `get_method` menemukan `Method not decompiled`, smali method itu diberikan sebagai gantinya.
+
+## Lampiran & berkas buatan AI
+**Penyimpanan.** Volume terpisah `files`, hanya dipasang di `web` (runner yang mem-parsing APK tak tepercaya dan worker tidak punya akses). Tata letak: `files/<analysis_id>/up/<token-acak>` untuk lampiran (nama asli HANYA di DB) dan `files/<analysis_id>/ai/<path>` untuk buatan AI. Metadata di tabel `analysis_file` + `message_file` (migrasi v4). Karena bukan di `work/<id>`, "Analisis ulang" tidak menghapusnya (diverifikasi di stack nyata); `ON DELETE CASCADE` + `rmtree` membersihkannya saat APK dihapus. Menghapus sesi chat TIDAK menghapus berkas (tampil di tab Berkas).
+
+**Unggah.** `POST /api/files/upload?analysis=<id>` dengan badan mentah (bukan multipart, alasan sama dengan `/api/uploads`), nama di header `X-File-Name`, CSRF di `X-CSRF-Token`. Jenis berkas ditentukan dari ISI (magic bytes), bukan ekstensi/Content-Type klien: png/jpeg/gif/webp = gambar; teks (UTF-8 atau hampir tanpa karakter kontrol) = teks; sisanya biner. SVG/HTML diperlakukan sebagai teks dan tidak pernah disajikan inline. Unggahan yang tidak pernah dikirim (pending) dibersihkan setelah 6 jam.
+
+**Yang dilihat model.** Gambar → bagian `image_url` bila model bertanda `"vision": true` di `config/ai_models.json` (perkiraan dari nama; `make ai-check` membuktikannya dengan satu permintaan kecil per model). Teks ≤ `AI_INLINE_ATTACH_CHARS` disertakan langsung; yang lebih besar dibaca lewat `read_file lampiran/<id>`. Biner: metadata + hex awal. Isi lampiran dibungkus `<lampiran>` (tag penutup dinetralkan), diperlakukan sebagai DATA tak tepercaya, dan teksnya melewati redaksi secret; **gambar tidak bisa diredaksi** (peringatan di UI). Pesan lama disusun ulang dengan fungsi yang sama saat riwayat dikirim, jadi model melihatnya persis seperti pertama kali. `view_image` pada gambar yang sudah inline tidak mengirimnya dua kali.
+
+**Menulis berkas.** Satu-satunya tool yang menulis. Path dari model divalidasi ketat (`userfiles.clean_ai_path`: tanpa `..`/absolut/titik awal/spasi, maks 5 tingkat, ekstensi teks saja; 80 ribu masukan acak/mutasi di-fuzz), ditulis atomik (tmp + fsync + `os.replace`), tidak mengikuti symlink, dan tidak pernah dijalankan. Berkas besar ditulis bertahap (`mode=append`) karena satu panggilan dibatasi `AI_MAX_OUTPUT_TOKENS`; JSON argumen yang terpotong menghasilkan petunjuk itu. Path sama = revisi baru.
+
+**Batas (semua dari `.env`, infrastruktur, bukan batas kemampuan AI):** `ATTACH_MAX_MB` (25; juga dipakai Caddy), `FILES_QUOTA_MB` (1024), `FILES_MAX_COUNT` (2000), `AI_MAX_IMAGE_MB` (10; gambar lebih besar tetap tersimpan, hanya tidak dikirim ke model), `AI_INLINE_ATTACH_CHARS` (16000). Tampilan UI: pratinjau teks 512 KB dan 1500 baris per potongan hanyalah batas tampilan (berkas utuh tetap bisa diunduh).
 
 ## UI/UX chat (peningkatan)
 - **Lini masa langkah tool** dengan label manusiawi ("Baca LoginActivity (smali)", "Cari pemakai Cipher.doFinal"), status (centang/silang/berputar), ringkasan hasil, dan durasi per langkah; terlipat setelah selesai ("11 langkah tool · 38 dtk").
@@ -102,7 +123,7 @@ Permintaan untuk menyerang layanan pihak ketiga (mis. mengeksploitasi endpoint y
 
 ## Batasan
 - Kualitas jawaban bergantung model; sitasi diverifikasi tetapi *kesimpulan* model tidak. Perlakukan sebagai petunjuk, bukan bukti.
-- Riwayat dibatasi (24 pesan / 60 ribu karakter); hasil tool dari giliran lama tidak dikirim ulang.
+- Seluruh riwayat teks dikirim (tanpa pemangkasan; anggaran `.env` yang menjaga biaya); hasil tool dari giliran lama tidak dikirim ulang. Gambar di riwayat ikut dikirim lagi tiap giliran (menambah token).
 - Belum ada: ekspor PDF, tombol "jelaskan kode ini" di penampil kode (FR-5.7), memori lintas sesi.
 
 ## Pertanyaan terbuka

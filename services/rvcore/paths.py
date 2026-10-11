@@ -3,6 +3,8 @@
     /data/uploads/<sha256>.apk        APK asli (read-only setelah tervalidasi)
     /data/uploads/.tmp/               unggahan yang sedang berjalan
     /data/work/<analysis_id>/         hasil: apktool/ jadx/ logs/ manifest.json
+    /data/files/<analysis_id>/up/     lampiran pengguna di chat (nama disimpan acak; nama asli hanya di DB)
+    /data/files/<analysis_id>/ai/     berkas buatan AI (py, js, md, ...); hanya web yang menulis di sini
     /data/db/app.sqlite               basis data (SQLite, mode WAL)
     /data/spool/                      antrean berkas worker -> runner (lihat spool.py)
 
@@ -25,6 +27,10 @@ class Layout:
         self.uploads = root / "uploads"
         self.uploads_tmp = self.uploads / ".tmp"
         self.work = root / "work"
+        # Volume terpisah dari `work`: "Analisis ulang" menghapus work/<id>, sedangkan berkas pengguna/AI harus bertahan.
+        # Hanya web yang memasangnya (runner yang memproses APK tak tepercaya tidak punya akses).
+        self.files = root / "files"
+        self.files_tmp = self.files / ".tmp"
         self.db_dir = root / "db"
         self.db_path = self.db_dir / "app.sqlite"
         self.spool = root / "spool"
@@ -37,3 +43,6 @@ class Layout:
     def work_dir(self, analysis_id: int) -> Path:
         # int() menolak string berisi '/' atau '..' sebelum menjadi bagian path.
         return self.work / str(int(analysis_id))
+
+    def files_dir(self, analysis_id: int) -> Path:
+        return self.files / str(int(analysis_id))

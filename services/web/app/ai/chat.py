@@ -65,9 +65,15 @@ class TurnRegistry:
 REGISTRY = TurnRegistry()
 
 
+def file_view(f: dict[str, Any]) -> dict[str, Any]:
+    """Bentuk ringkas berkas untuk UI (peristiwa SSE 'file' / 'final')."""
+    return {"id": f["id"], "path": f.get("path"), "name": f["name"], "size": f["size"], "revision": f.get("link_revision", f.get("revision", 1)),
+            "created": bool(f.get("created")), "media": f.get("media", "text")}
+
+
 def run_in_thread(turn: Turn, *, cfg: AIConfig, prices: PriceTable, analysis_id: int, work, db, session_id: int,
-                  user_text: str, model: str | None) -> threading.Thread:
-    """Mulai giliran di thread. Pesan pengguna disimpan SEBELUM memanggil AI; jawaban disimpan sesudahnya."""
+                  user_text: str, model: str | None, files=None, attachment_ids: list[int] | None = None) -> threading.Thread:
+    """Mulai giliran di thread. Pesan pengguna (+ lampiran) disimpan SEBELUM memanggil AI; jawaban disimpan sesudahnya."""
 
     def emit(event: str, data: dict[str, Any]) -> None:
         try:
@@ -79,21 +85,27 @@ def run_in_thread(turn: Turn, *, cfg: AIConfig, prices: PriceTable, analysis_id:
         try:
             with closing(db()) as conn:
                 rows = store.get_chat_messages(conn, session_id)
-                history = [{"role": r["role"], "content": r["content"]} for r in rows]
-                store.add_chat_message(conn, session_id, "user", user_text)
-            ctx = T.ToolContext(analysis_id, work, cfg, db, Redactor(cfg.redact_secrets))
+                fmap = store.files_for_messages(conn, [r["id"] for r in rows])
+                history = [{"role": r["role"], "content": r["content"],
+                            "attachments": [f for f in fmap.get(r["id"], []) if f["role"] == "attachment"],
+                            "outputs": [f for f in fmap.get(r["id"], []) if f["role"] == "output"]} for r in rows]
+                uid = store.add_chat_message(conn, session_id, "user", user_text)
+                attached = [dict(f) for f in store.attach_uploads(conn, uid, analysis_id, attachment_ids or [])]
+            ctx = T.ToolContext(analysis_id, work, cfg, db, Redactor(cfg.redact_secrets), files=files)
             res = agent.run_turn(client=Client(cfg), cfg=cfg, prices=prices, ctx=ctx, history=history, user_text=user_text,
-                                 model=model, session_id=session_id, emit=emit, cancel=turn.cancel)
+                                 model=model, session_id=session_id, emit=emit, cancel=turn.cancel, attachments=attached)
             content = res.content or (res.error or "(tidak ada jawaban)")
+            outputs = ctx.final_outputs()
             with closing(db()) as conn:
-                store.add_chat_message(conn, session_id, "assistant", content, tool_calls=res.tool_calls,
-                                       citations=res.citations, model=res.model)
+                mid = store.add_chat_message(conn, session_id, "assistant", content, tool_calls=res.tool_calls,
+                                             citations=res.citations, model=res.model)
+                store.link_outputs(conn, mid, [(o["id"], o["revision"]) for o in outputs])
                 spent = store.ai_spent(conn, session_id=session_id)
                 snap = ai_budget.snapshot(conn, cfg, session_id)
             emit("final", {"content": content, "stopped": res.stopped, "error": res.error, "steps": res.steps,
                            "citations": res.citations, "cost_credits": res.cost_credits, "session_credits": spent,
                            "session_idr": cfg.idr(spent), "turn_idr": cfg.idr(res.cost_credits),
-                           "tools": len(res.tool_calls),
+                           "tools": len(res.tool_calls), "files": [file_view(o) for o in outputs],
                            "budget": {"today": snap["today"], "today_limit": snap["today_limit"], "today_idr": snap["today_idr"]}})
         except Exception as exc:  # noqa: BLE001 - giliran tidak boleh meninggalkan klien menunggu selamanya
             emit("final", {"content": "", "stopped": "error", "error": f"Galat internal ({type(exc).__name__}).",

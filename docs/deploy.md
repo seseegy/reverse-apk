@@ -111,12 +111,15 @@ lebih besar gagal di tepi; gunakan "DNS only" untuk host ini atau naikkan paket.
 |--------|-----|--------------|
 | `uploads` | APK asli `<sha256>.apk` (read-only setelah tervalidasi) | web (rw), worker & runner (ro) |
 | `work` | hasil per analisis: `jadx/`, `apktool/`, `logs/`, `manifest.json` | web, worker, runner |
+| `files` | lampiran chat (`up/`) dan berkas buatan AI (`ai/`) per analisis; tidak hilang saat "Analisis ulang" | **hanya web** |
 | `db` | SQLite (mode WAL) | web, worker — **runner tidak punya akses** |
 | `spool` | antrean berkas worker → runner | worker, runner |
 
 SQLite mode WAL membutuhkan filesystem lokal host (volume Docker biasa). Jangan memetakan `db` ke NFS/SMB.
 Hasil dekompilasi bisa besar (puluhan–ratusan MB per APK): pantau kartu **Disk data** di dashboard.
 Upload ditolak otomatis bila sisa disk < `MIN_FREE_GB` (bawaan 15 GB).
+
+**Lampiran & berkas AI.** Batas dari `.env`: `ATTACH_MAX_MB` (per berkas, bawaan 25), `FILES_QUOTA_MB` (total per APK, 1024), `FILES_MAX_COUNT` (2000), `AI_MAX_IMAGE_MB` (10). `ATTACH_MAX_MB` juga dibaca Caddy, jadi setelah mengubahnya jalankan `docker compose up -d caddy web`. Volume `files` baru dibuat otomatis oleh `make up`; backup ikut volume ini bila Anda ingin menyimpan hasil kerja AI. Berkas dihapus bersama APK-nya. Tombol gambar hanya aktif untuk model bertanda `"vision": true` di `config/ai_models.json`; jalankan `make ai-check` untuk membuktikan model Anda benar-benar bisa melihat gambar.
 
 ## Operasi harian
 | Tujuan | Perintah |

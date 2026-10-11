@@ -20,6 +20,12 @@
     return s + " d";
   }
 
+  // Lebar bilah dari data-pct. Atribut style="" inline DIBLOKIR CSP (style-src 'self'); mengubah style lewat CSSOM tidak.
+  $all("[data-pct]").forEach(function (el) {
+    var v = parseFloat(el.getAttribute("data-pct"));
+    if (isFinite(v)) el.style.width = Math.max(0, Math.min(100, v)) + "%";
+  });
+
   // ------------------------------------------------------------------ login & umum
 
   // Tampilkan/sembunyikan password. Nama aksesibel tetap; status lewat aria-pressed.
@@ -508,10 +514,26 @@
     xml: /<!--|-->|<\/?[\w:.\-]+|\/?>|[\w:.\-]+(?==)|"[^"]*"|'[^']*'/g
   };
 
+  var KW_SCRIPT = {
+    py: new Set(("False None True and as assert async await break class continue def del elif else except finally for from global if import in is " +
+      "lambda nonlocal not or pass raise return try while with yield self").split(" ")),
+    js: new Set(("async await break case catch class const continue debugger default delete do else export extends finally for function if import in " +
+      "instanceof let new of return static super switch this throw try typeof var void while with yield true false null undefined").split(" ")),
+    sh: new Set("if then else elif fi for while do done case esac function in echo export local return exit set unset source".split(" "))
+  };
+  TOKEN_RE.py = /#[^\n]*|"""|'''|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\b\d[\w.]*\b|@\w+|\b[A-Za-z_]\w*\b/g;
+  TOKEN_RE.js = /\/\/[^\n]*|\/\*|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`|\b\d[\w.]*\b|\b[A-Za-z_$][\w$]*\b/g;
+  TOKEN_RE.sh = /#[^\n]*|"(?:[^"\\]|\\.)*"|'[^']*'|\$\{?\w+\}?|\b[A-Za-z_]\w*\b/g;
+  TOKEN_RE.json = /"(?:[^"\\]|\\.)*"|-?\b\d[\d.eE+-]*\b|\b(?:true|false|null)\b/g;
+
   function langOf(path) {
     if (/\.smali$/.test(path)) return "smali";
     if (/\.(xml|html|svg)$/.test(path) || /AndroidManifest/.test(path)) return "xml";
-    if (/\.java$/.test(path)) return "java";
+    if (/\.(java|kt|kts)$/.test(path)) return "java";
+    if (/\.(py|pyi)$/.test(path)) return "py";
+    if (/\.(js|mjs|cjs|ts|tsx|jsx)$/.test(path)) return "js";
+    if (/\.(sh|bash|zsh)$/.test(path)) return "sh";
+    if (/\.(json|jsonl)$/.test(path)) return "json";
     return "plain";
   }
 
@@ -547,6 +569,17 @@
       } else if (lang === "smali") {
         if (t[0] === "#") cls = "tk-c"; else if (t[0] === '"') cls = "tk-s"; else if (t[0] === ".") cls = "tk-k";
         else if (/^[vp]\d+$/.test(t)) cls = "tk-n"; else if (t[0] === "L") cls = "tk-t"; else if (/^0x/.test(t)) cls = "tk-n"; else cls = "tk-k";
+      } else if (lang === "json") {
+        if (t[0] === '"') cls = /^\s*:/.test(text.slice(m.index + t.length)) ? "tk-a" : "tk-s";
+        else if (/^-?\d/.test(t)) cls = "tk-n"; else cls = "tk-k";
+      } else if (lang === "py" || lang === "js" || lang === "sh") {
+        if (t === "/*") { var e4 = text.indexOf("*/", m.index + 2); if (e4 < 0) { put(text.slice(i), "tk-c"); state.block = true; return frag; } t = text.slice(m.index, e4 + 2); re.lastIndex = e4 + 2; cls = "tk-c"; }
+        else if (t[0] === "#" || (t[0] === "/" && t[1] === "/")) cls = "tk-c";
+        else if (t[0] === '"' || t[0] === "'" || t[0] === "`") cls = "tk-s";
+        else if (t[0] === "@" || t[0] === "$") cls = "tk-a";
+        else if (/^\d/.test(t)) cls = "tk-n";
+        else if (KW_SCRIPT[lang].has(t)) cls = "tk-k";
+        else if (/^[A-Z]/.test(t)) cls = "tk-t";
       } else {
         if (t === "<!--") { var e3 = text.indexOf("-->", m.index + 4); if (e3 < 0) { put(text.slice(i), "tk-c"); state.block = true; return frag; } t = text.slice(m.index, e3 + 3); re.lastIndex = e3 + 3; cls = "tk-c"; }
         else if (t[0] === "<" || t[0] === "/" || t[0] === ">") cls = "tk-k";
@@ -783,7 +816,16 @@
     x: [["line", { x1: 18, y1: 6, x2: 6, y2: 18 }], ["line", { x1: 6, y1: 6, x2: 18, y2: 18 }]],
     spinner: [["path", { d: "M21 12a9 9 0 1 1-6.22-8.56" }]],
     dot: [["circle", { cx: 12, cy: 12, r: 3 }]],
-    copy: [["rect", { x: 9, y: 9, width: 13, height: 13, rx: 2, ry: 2 }], ["path", { d: "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" }]]
+    copy: [["rect", { x: 9, y: 9, width: 13, height: 13, rx: 2, ry: 2 }], ["path", { d: "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" }]],
+    paperclip: [["path", { d: "m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" }]],
+    image: [["rect", { x: 3, y: 3, width: 18, height: 18, rx: 2, ry: 2 }], ["circle", { cx: 9, cy: 9, r: 2 }], ["path", { d: "m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" }]],
+    download: [["path", { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }], ["polyline", { points: "7 10 12 15 17 10" }], ["line", { x1: 12, y1: 15, x2: 12, y2: 3 }]],
+    eye: [["path", { d: "M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" }], ["circle", { cx: 12, cy: 12, r: 3 }]],
+    file: [["path", { d: "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" }], ["path", { d: "M14 2v4a2 2 0 0 0 2 2h4" }]],
+    "file-code": [["path", { d: "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" }], ["path", { d: "M14 2v4a2 2 0 0 0 2 2h4" }], ["path", { d: "m10 13-2 2 2 2" }], ["path", { d: "m14 17 2-2-2-2" }]],
+    "file-text": [["path", { d: "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" }], ["path", { d: "M14 2v4a2 2 0 0 0 2 2h4" }], ["path", { d: "M10 9H8" }], ["path", { d: "M16 13H8" }], ["path", { d: "M16 17H8" }]],
+    archive: [["rect", { x: 2, y: 3, width: 20, height: 5, rx: 1 }], ["path", { d: "M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" }], ["path", { d: "M10 12h4" }]],
+    alert: [["path", { d: "M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" }], ["line", { x1: 12, y1: 9, x2: 12, y2: 13 }], ["line", { x1: 12, y1: 17, x2: 12.01, y2: 17 }]]
   };
   function svgIcon(name, size, spin) {
     var s = document.createElementNS(SVG_NS, "svg");
@@ -1003,7 +1045,11 @@
     find_paths: function (a) { return "Jalur " + shortCls(a.from_class) + (a.from_method ? "." + a.from_method : "") + " → " + shortCls(a.to_class) + (a.to_method ? "." + a.to_method : ""); },
     list_strings: function (a) { return "Daftar string" + (a.kind ? " " + a.kind : "") + (a.filter ? " “" + a.filter + "”" : ""); },
     get_findings: function (a) { return "Temuan statis" + (a.category ? " (" + a.category + ")" : ""); },
-    read_file: function (a) { return "Baca " + baseName(a.path) + (a.start_line ? ":" + a.start_line + (a.end_line ? "-" + a.end_line : "") : ""); }
+    read_file: function (a) { return "Baca " + baseName(a.path) + (a.start_line ? ":" + a.start_line + (a.end_line ? "-" + a.end_line : "") : ""); },
+    list_files: function () { return "Daftar berkas & lampiran"; },
+    write_file: function (a) { return (a.mode === "append" ? "Sambung " : "Tulis ") + baseName(a.path); },
+    edit_file: function (a) { return "Ubah " + baseName(a.path); },
+    view_image: function (a) { return "Lihat gambar " + baseName(a.path); }
   };
   function toolLabel(name, argsText) {
     var a = null;
@@ -1041,6 +1087,173 @@
     return api;
   }
 
+  // ------------------------------------------------------------------ berkas: ikon, penampil, kartu (chat & halaman Berkas)
+  // Teks berkas/AI SELALU lewat textContent. Berkas tidak pernah dirender sebagai HTML; hanya gambar raster yang ditampilkan lewat <img>.
+  var CODE_EXT = /\.(py|pyi|js|mjs|cjs|ts|tsx|jsx|sh|bash|java|kt|kts|smali|c|h|cc|cpp|go|rs|rb|php|lua|swift|dart|sql|gradle|ps1|bat|json|ya?ml|xml|html|css|toml|ini)$/i;
+  function fileKind(name, media) {
+    if (media === "image") return "image";
+    if (/\.(zip|apk|tar|gz|tgz|7z|rar|jar)$/i.test(name)) return "archive";
+    if (CODE_EXT.test(name)) return "file-code";
+    return media === "text" ? "file-text" : "file";
+  }
+  function fileUrls(aid, id) {
+    var b = "/analyses/" + enc(aid) + "/files/" + enc(id);
+    return { text: b + "/text", raw: b + "/raw", download: b + "/download", del: b + "/delete" };
+  }
+  function fileInfoFrom(el, aid) {
+    var g = function (k) { return el.getAttribute("data-file-" + k); };
+    return { aid: aid, id: g("id"), name: g("name") || "berkas", media: g("media") || "binary", size: parseInt(g("size"), 10) || 0,
+             rev: parseInt(g("rev"), 10) || 1, path: g("path") || "" };
+  }
+  var fviewApi = null;
+  function fileViewer() {
+    if (fviewApi) return fviewApi;
+    var dlg = $("[data-fview]");
+    if (!dlg) return null;
+    var E = { ic: $("[data-fview-ic]", dlg), name: $("[data-fview-name]", dlg), meta: $("[data-fview-meta]", dlg), note: $("[data-fview-note]", dlg),
+              body: $("[data-fview-body]", dlg), copy: $("[data-fview-copy]", dlg), dl: $("[data-fview-download]", dlg),
+              close: $("[data-fview-close]", dlg), modes: $("[data-fview-modes]", dlg) };
+    var tok = 0, opener = null, info = null, textRaw = "", mode = "source", isMd = false, shown = 0, allLines = [], lang = "plain", hlState = { block: false };
+    var CHUNK = 1500;                                       // baris per potongan tampilan (hanya agar DOM tetap ringan)
+
+    function clearBody() { while (E.body.firstChild) E.body.removeChild(E.body.firstChild); }
+    function copyLabel(t) { var sp = $("span", E.copy); if (sp) sp.textContent = t; }
+    function addRows(from, to) {
+      var frag = document.createDocumentFragment();
+      for (var n = from; n < to; n++) {
+        var row = document.createElement("div"); row.className = "pl";
+        var ln = document.createElement("span"); ln.className = "ln"; ln.textContent = String(n + 1);
+        var cd = document.createElement("code"); cd.appendChild(highlightLine(allLines[n], lang, hlState));
+        row.appendChild(ln); row.appendChild(cd); frag.appendChild(row);
+      }
+      return frag;
+    }
+    function paintSource() {
+      clearBody(); hlState = { block: false }; shown = 0;
+      var wrap = document.createElement("div"); wrap.className = "fview-code";
+      E.body.appendChild(wrap);
+      function more() {
+        var old = $(".fview-more", wrap); if (old) wrap.removeChild(old);
+        var to = Math.min(allLines.length, shown + CHUNK);
+        wrap.appendChild(addRows(shown, to)); shown = to;
+        if (shown < allLines.length) {
+          var b = document.createElement("button"); b.type = "button"; b.className = "btn btn-ghost btn-sm fview-more";
+          b.textContent = "Tampilkan " + Math.min(CHUNK, allLines.length - shown).toLocaleString("id-ID") + " baris berikutnya (sisa " + (allLines.length - shown).toLocaleString("id-ID") + ")";
+          b.addEventListener("click", more); wrap.appendChild(b);
+        }
+      }
+      more();
+    }
+    function paintRendered() {
+      clearBody();
+      var d = document.createElement("div"); d.className = "msg-body fview-md"; E.body.appendChild(d);
+      renderMarkdown(textRaw, d, { analysisId: info.aid, citations: {} });
+    }
+    function paint() { (isMd && mode === "render") ? paintRendered() : paintSource(); }
+    function setMode(m) {
+      mode = m;
+      $all("button", E.modes).forEach(function (b) { b.setAttribute("aria-pressed", b.getAttribute("data-mode") === m ? "true" : "false"); });
+      paint();
+    }
+    function showImage(url) {
+      clearBody();
+      var btn = document.createElement("button"); btn.type = "button"; btn.className = "fview-imgbtn";
+      btn.setAttribute("aria-label", "Ganti antara ukuran pas layar dan ukuran asli");
+      var img = document.createElement("img"); img.className = "fview-img"; img.alt = info.name;
+      img.addEventListener("load", function () { E.note.textContent = img.naturalWidth + " × " + img.naturalHeight + " px · klik gambar untuk ukuran asli"; });
+      img.addEventListener("error", function () { E.note.textContent = "Gambar tidak dapat dimuat."; });
+      btn.addEventListener("click", function () { E.body.classList.toggle("is-actual"); });
+      img.src = url; btn.appendChild(img); E.body.appendChild(btn);
+    }
+    function msg(t) { clearBody(); var p = document.createElement("p"); p.className = "fview-empty muted"; p.textContent = t; E.body.appendChild(p); }
+
+    function open(i, openerEl) {
+      info = i; opener = openerEl || null; textRaw = ""; E.copy.hidden = true; E.modes.hidden = true; E.body.classList.remove("is-actual");
+      var u = fileUrls(i.aid, i.id), t = ++tok;
+      E.name.textContent = i.path || i.name; E.name.title = i.path || i.name;
+      E.meta.textContent = fmtBytes(i.size) + (i.rev > 1 ? " · revisi " + i.rev : "");
+      while (E.ic.firstChild) E.ic.removeChild(E.ic.firstChild); E.ic.appendChild(svgIcon(fileKind(i.name, i.media), 20));
+      E.dl.href = u.download; E.dl.setAttribute("download", i.name);
+      E.note.textContent = i.media === "image" ? "Memuat gambar…" : "Memuat…"; clearBody();
+      if (typeof dlg.showModal === "function") { if (!dlg.open) dlg.showModal(); } else dlg.setAttribute("open", "");
+      if (i.media === "image") { showImage(u.raw); return; }
+      fetch(u.text, { credentials: "same-origin", cache: "no-store" })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          if (t !== tok) return;                              // penampil sudah dipakai untuk berkas lain / ditutup
+          var d = res.d;
+          if (!res.ok) { E.note.textContent = d.error || "Berkas tidak dapat dimuat."; msg(E.note.textContent); return; }
+          if (d.missing) { E.note.textContent = "Isi berkas tidak ditemukan di penyimpanan."; msg(E.note.textContent); return; }
+          if (d.binary) { E.note.textContent = "Berkas biner"; msg("Berkas biner tidak bisa ditampilkan. Gunakan Unduh untuk membukanya di aplikasi lain."); return; }
+          if (d.image) { showImage(u.raw); return; }
+          textRaw = d.text; allLines = textRaw.split("\n"); if (allLines.length > 1 && allLines[allLines.length - 1] === "") allLines.pop();
+          lang = langOf(i.name); isMd = /\.(md|markdown)$/i.test(i.name);
+          E.note.textContent = allLines.length.toLocaleString("id-ID") + " baris" + (d.truncated ? " · pratinjau dibatasi " + fmtBytes(textRaw.length) + " dari " + fmtBytes(d.size) + "; Unduh untuk berkas lengkap" : "");
+          E.copy.hidden = false; copyLabel("Salin");
+          E.modes.hidden = !isMd; mode = isMd ? "render" : "source";
+          if (isMd) setMode("render"); else paint();
+          E.body.scrollTop = 0;
+        })
+        .catch(function () { if (t === tok) { E.note.textContent = "Koneksi gagal. Coba lagi."; msg("Koneksi gagal. Tutup lalu buka lagi."); } });
+    }
+    function close() { if (dlg.open) dlg.close(); else dlg.removeAttribute("open"); }
+    dlg.addEventListener("close", function () {
+      tok++; clearBody(); textRaw = ""; allLines = [];
+      var o = opener; opener = null;
+      if (o && document.body.contains(o)) o.focus();
+    });
+    dlg.addEventListener("click", function (e) { if (e.target === dlg) close(); });       // klik di luar kotak
+    E.close.addEventListener("click", close);
+    E.copy.addEventListener("click", function () {
+      copyText(textRaw).then(function () { copyLabel("Tersalin"); setTimeout(function () { copyLabel("Salin"); }, 1500); },
+                             function () { copyLabel("Gagal"); setTimeout(function () { copyLabel("Salin"); }, 1500); });
+    });
+    $all("button", E.modes).forEach(function (b) { b.addEventListener("click", function () { setMode(b.getAttribute("data-mode")); }); });
+    fviewApi = { open: open, close: close, isOpen: function () { return dlg.open || dlg.hasAttribute("open"); } };
+    return fviewApi;
+  }
+  document.addEventListener("click", function (e) {
+    var el = e.target && e.target.closest ? e.target.closest("[data-file-view]") : null;
+    if (!el || e.defaultPrevented) return;
+    var host = el.closest("[data-analysis-id]") || $("[data-analysis-id]"), v = fileViewer();
+    var aid = host && host.getAttribute("data-analysis-id");
+    if (!aid || !v) return;
+    e.preventDefault(); v.open(fileInfoFrom(el, aid), el);
+  });
+
+  // Kartu berkas buatan AI di bawah jawaban (dibuat/diperbarui langsung saat peristiwa 'file' tiba).
+  function buildFileCard(aid, f) {
+    var u = fileUrls(aid, f.id), name = f.name || baseName(f.path), path = f.path || name;
+    var dir = path.length > name.length ? path.slice(0, path.length - name.length) : "";
+    var card = document.createElement("div"); card.className = "fcard"; card.setAttribute("data-fcard", String(f.id));
+    var ic = document.createElement("span"); ic.className = "fcard-ic"; ic.appendChild(svgIcon(fileKind(name, f.media || "text"), 20));
+    var main = document.createElement("div"); main.className = "fcard-main";
+    var nm = document.createElement("span"); nm.className = "fcard-name mono";
+    var dr = document.createElement("span"); dr.className = "fcard-dir"; dr.textContent = dir; nm.appendChild(dr); nm.appendChild(document.createTextNode(name));
+    var meta = document.createElement("span"); meta.className = "fcard-meta muted hint";
+    meta.textContent = fmtBytes(f.size) + (f.revision > 1 ? " · revisi " + f.revision : "");
+    main.appendChild(nm); main.appendChild(meta);
+    var act = document.createElement("div"); act.className = "fcard-actions";
+    var view = document.createElement("button"); view.type = "button"; view.className = "btn btn-ghost btn-sm";
+    view.setAttribute("data-file-view", ""); view.setAttribute("data-file-id", String(f.id)); view.setAttribute("data-file-name", name);
+    view.setAttribute("data-file-media", f.media || "text"); view.setAttribute("data-file-size", String(f.size)); view.setAttribute("data-file-rev", String(f.revision || 1));
+    view.setAttribute("data-file-path", path); view.setAttribute("aria-label", "Lihat " + name);
+    view.appendChild(svgIcon("eye", 16)); var vs = document.createElement("span"); vs.textContent = "Lihat"; view.appendChild(vs);
+    var dl = document.createElement("a"); dl.className = "btn btn-ghost btn-sm"; dl.href = u.download; dl.setAttribute("download", name);
+    dl.setAttribute("aria-label", "Unduh " + name); dl.appendChild(svgIcon("download", 16)); var ds = document.createElement("span"); ds.textContent = "Unduh"; dl.appendChild(ds);
+    act.appendChild(view); act.appendChild(dl);
+    card.appendChild(ic); card.appendChild(main); card.appendChild(act);
+    return card;
+  }
+  function upsertFileCard(box, aid, f) {
+    var ex = null;
+    $all("[data-fcard]", box).forEach(function (c) { if (c.getAttribute("data-fcard") === String(f.id)) ex = c; });
+    var el = buildFileCard(aid, f);
+    if (ex) box.replaceChild(el, ex); else box.appendChild(el);
+    return el;
+  }
+  window.__rvFileViewer = fileViewer;           // dipakai pengujian
+
   function initChat(root) {
     var aid = root.getAttribute("data-analysis-id"), csrf = root.getAttribute("data-csrf");
     var sessionId = root.getAttribute("data-session-id") || null;
@@ -1050,7 +1263,11 @@
     var peek = $("[data-peek]", root), peekTitle = $("[data-peek-title]", root), peekOpen = $("[data-peek-open]", root);
     var peekNote = $("[data-peek-note]", root), peekCode = $("[data-peek-code]", root), peekClose = $("[data-peek-close]", root);
     var fold = $("[data-sidefold]", root);
+    var attBox = $("[data-atts]", root), attBtn = $("[data-attach]", root), fileInput = $("[data-file]", root), attWarn = $("[data-att-warn]", root);
+    var dz = $("[data-dropzone]", root), chatMain = $(".chat-main", root);
+    var maxFile = parseInt(root.getAttribute("data-max-file") || "0", 10) || 0;
     var es = null, busy = false, lastUserText = "", peekToken = 0, peekOpener = null, peekDir = "";
+    var atts = [], attSeq = 0;
     function setPeekNote(t) { peekNote.textContent = (peekDir ? peekDir + "  ·  " : "") + t; }
 
     // Daftar sesi dilipat otomatis di layar sempit agar percakapan langsung terlihat.
@@ -1143,22 +1360,25 @@
       var head = document.createElement("header"); head.className = "msg-head"; head.textContent = label; art.appendChild(head);
       log.appendChild(art); return art;
     }
-    function updateSend() { sendBtn.disabled = busy || !input.value.trim(); }
+    function updateSend() {
+      var hasContent = !!input.value.trim() || readyAtts().length > 0;
+      sendBtn.disabled = busy || !hasContent || uploading() || visionBlocked();
+    }
     function grow() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight + 2, 224) + "px"; if (log.style.maxHeight) fitLog(); }
     function setBusy(b) {
-      busy = b; input.disabled = b; stopBtn.hidden = !b; updateSend();
+      busy = b; input.disabled = b; stopBtn.hidden = !b; if (attBtn) attBtn.disabled = b; updateSend();
       if (modelEl && modelEl.tagName === "SELECT") modelEl.disabled = b;
       // Pembaca layar: jangan umumkan setiap potongan streaming; cukup status ringkas + hasil akhir.
       log.setAttribute("aria-busy", b ? "true" : "false");
       log.setAttribute("aria-live", b ? "off" : "polite");
     }
-    function fail(msg, retryText) {
+    function fail(msg, retryText, retryAtts) {
       var art = addMsg("error", "Galat"); var d = document.createElement("div"); d.className = "msg-body"; d.textContent = msg; art.appendChild(d);
       art.setAttribute("role", "alert");
       if (retryText) {
         var row = document.createElement("div"); row.className = "msg-note";
         var rb = document.createElement("button"); rb.type = "button"; rb.className = "btn btn-ghost btn-sm"; rb.textContent = "Coba lagi";
-        rb.addEventListener("click", function () { rb.disabled = true; send(retryText); });
+        rb.addEventListener("click", function () { rb.disabled = true; send(retryText, retryAtts && retryAtts.length ? retryAtts : []); });
         row.appendChild(rb); art.appendChild(row);
       }
       scrollDown(true);
@@ -1223,12 +1443,151 @@
       e.preventDefault(); openPeek(a, path, line);
     });
 
-    function send(text) {
+    // --- lampiran: unggah (XHR agar ada progres), pratinjau, seret-lepas, tempel
+    function readyAtts() { return atts.filter(function (a) { return a.state === "ready"; }); }
+    function uploading() { return atts.some(function (a) { return a.state === "uploading"; }); }
+    function visionOk() {
+      if (!modelEl) return false;
+      var el = modelEl.tagName === "SELECT" ? modelEl.options[modelEl.selectedIndex] : modelEl;
+      return !!el && el.getAttribute("data-vision") === "1";
+    }
+    function visionBlocked() { return !visionOk() && atts.some(function (a) { return a.state !== "error" && a.isImage; }); }
+    function refreshAtts() {
+      if (attBox) attBox.hidden = atts.length === 0;
+      var m = visionBlocked() ? "Model ini tidak bisa melihat gambar. Pilih model yang bertanda “gambar”, atau hapus gambar dari lampiran." : "";
+      if (attWarn) { attWarn.textContent = m; attWarn.hidden = !m; }
+      updateSend();
+    }
+    function attChip(a) {
+      var el = document.createElement("div"); el.setAttribute("role", "listitem");
+      var th = document.createElement("span"); th.className = "att-thumb";
+      var body = document.createElement("span"); body.className = "att-body";
+      var nm = document.createElement("span"); nm.className = "att-name"; nm.textContent = a.name; nm.title = a.name;
+      var sub = document.createElement("span"); sub.className = "att-sub";
+      var bar = document.createElement("span"); bar.className = "att-bar"; bar.setAttribute("role", "progressbar");
+      bar.setAttribute("aria-label", "Mengunggah " + a.name); bar.setAttribute("aria-valuemin", "0"); bar.setAttribute("aria-valuemax", "100");
+      var fill = document.createElement("span"); bar.appendChild(fill);
+      body.appendChild(nm); body.appendChild(sub); body.appendChild(bar);
+      var retry = document.createElement("button"); retry.type = "button"; retry.className = "att-btn"; retry.textContent = "Coba lagi"; retry.hidden = true;
+      retry.addEventListener("click", function () { upload(a); });
+      var x = document.createElement("button"); x.type = "button"; x.className = "att-x"; x.setAttribute("aria-label", "Hapus lampiran " + a.name);
+      x.title = "Hapus"; x.appendChild(svgIcon("x", 14));
+      x.addEventListener("click", function () { removeAtt(a); });
+      el.appendChild(th); el.appendChild(body); el.appendChild(retry); el.appendChild(x);
+      a.el = el; a.p = { th: th, sub: sub, bar: bar, fill: fill, retry: retry, shown: "" };
+      paintAtt(a);
+      return el;
+    }
+    function paintAtt(a) {
+      var p = a.p;
+      a.el.className = "att is-" + a.state;
+      var key = a.state + (a.raw || "");
+      if (p.shown !== key) {                                           // ganti isi thumbnail hanya saat status berubah (hindari memuat ulang gambar)
+        p.shown = key;
+        while (p.th.firstChild) p.th.removeChild(p.th.firstChild);
+        if (a.state === "ready" && a.raw) { var img = document.createElement("img"); img.alt = ""; img.src = a.raw; p.th.appendChild(img); }
+        else p.th.appendChild(svgIcon(a.state === "uploading" ? "spinner" : a.state === "error" ? "alert" : fileKind(a.name, a.media || (a.isImage ? "image" : "binary")), 20, a.state === "uploading"));
+      }
+      p.sub.textContent = a.state === "uploading" ? "Mengunggah " + Math.round(a.pct) + "%" : a.state === "error" ? a.err : fmtBytes(a.size);
+      p.bar.hidden = a.state !== "uploading";
+      p.fill.style.width = Math.round(a.pct) + "%";
+      p.bar.setAttribute("aria-valuenow", String(Math.round(a.pct)));
+      p.retry.hidden = !(a.state === "error" && a.file && a.retryable);
+    }
+    function attFail(a, text, retryable) { a.state = "error"; a.err = text; a.retryable = !!retryable; a.xhr = null; paintAtt(a); refreshAtts(); }
+    function upload(a) {
+      a.state = "uploading"; a.pct = 0; a.err = ""; paintAtt(a); refreshAtts();
+      var xhr = new XMLHttpRequest(); a.xhr = xhr;
+      xhr.open("POST", "/api/files/upload?analysis=" + enc(aid));
+      xhr.setRequestHeader("X-CSRF-Token", csrf); xhr.setRequestHeader("X-File-Name", enc(a.name)); xhr.setRequestHeader("Content-Type", "application/octet-stream");
+      xhr.upload.onprogress = function (e) { if (e.lengthComputable && e.total) { a.pct = e.loaded / e.total * 100; paintAtt(a); } };
+      xhr.onload = function () {
+        var d = {}; try { d = JSON.parse(xhr.responseText); } catch (_) { d = {}; }
+        if (xhr.status === 201 && d.id) {
+          a.state = "ready"; a.id = d.id; a.media = d.media; a.raw = d.raw; a.size = d.size || a.size; a.isImage = d.media === "image"; a.xhr = null; a.pct = 100;
+          paintAtt(a); refreshAtts();
+        } else attFail(a, d.error || "Gagal mengunggah (HTTP " + xhr.status + ").", xhr.status >= 500 || xhr.status === 0);
+      };
+      xhr.onerror = function () { attFail(a, "Koneksi terputus saat mengunggah.", true); };
+      xhr.ontimeout = xhr.onerror;
+      xhr.send(a.file);
+    }
+    function addFiles(list) {
+      Array.prototype.slice.call(list || []).forEach(function (f) {
+        if (!f) return;
+        var a = { key: ++attSeq, file: f, name: f.name || "berkas", size: f.size, state: "uploading", pct: 0, id: null, raw: null, err: "", media: null,
+                  isImage: /^image\/(png|jpeg|gif|webp)$/.test(f.type) };
+        atts.push(a); attBox.appendChild(attChip(a));
+        if (!f.size) attFail(a, "Berkas kosong (atau folder; folder tidak bisa dilampirkan).", false);
+        else if (maxFile && f.size > maxFile) attFail(a, "Melebihi batas " + fmtBytes(maxFile) + " per berkas.", false);
+        else upload(a);
+      });
+      refreshAtts();
+    }
+    function removeAtt(a) {
+      if (a.xhr) { try { a.xhr.abort(); } catch (_) { /* abaikan */ } }
+      var i = atts.indexOf(a); if (i >= 0) atts.splice(i, 1);
+      if (a.el && a.el.parentNode) a.el.parentNode.removeChild(a.el);
+      if (a.state === "ready" && a.id) {                                // buang juga dari server (belum pernah dikirim)
+        fetch("/analyses/" + enc(aid) + "/files/" + enc(a.id) + "/delete", { method: "POST", credentials: "same-origin", headers: { "X-CSRF-Token": csrf } }).catch(function () { /* dibersihkan otomatis nanti */ });
+      }
+      refreshAtts(); input.focus();
+    }
+    function clearAtts() { atts.forEach(function (a) { if (a.el && a.el.parentNode) a.el.parentNode.removeChild(a.el); }); atts = []; refreshAtts(); }
+    function renderSentAtts(art, list) {
+      var box = document.createElement("div"); box.className = "msg-atts"; box.setAttribute("role", "list"); box.setAttribute("aria-label", "Lampiran");
+      list.forEach(function (a) {
+        var isImg = a.media === "image", b = document.createElement("button"); b.type = "button"; b.setAttribute("role", "listitem");
+        b.className = isImg ? "att-img" : "file-chip";
+        b.setAttribute("data-file-view", ""); b.setAttribute("data-file-id", String(a.id)); b.setAttribute("data-file-name", a.name);
+        b.setAttribute("data-file-media", a.media || "binary"); b.setAttribute("data-file-size", String(a.size)); b.title = a.name;
+        if (isImg) { b.setAttribute("aria-label", "Lihat gambar " + a.name); var im = document.createElement("img"); im.alt = ""; im.src = a.raw; b.appendChild(im); }
+        else {
+          b.appendChild(svgIcon(fileKind(a.name, a.media), 16));
+          var n = document.createElement("span"); n.className = "file-chip-name"; n.textContent = a.name; b.appendChild(n);
+          var z = document.createElement("span"); z.className = "muted hint"; z.textContent = fmtBytes(a.size); b.appendChild(z);
+        }
+        box.appendChild(b);
+      });
+      art.appendChild(box);
+    }
+    // Komposer lampiran bersifat opsional: bila elemennya tidak ada, chat teks tetap berfungsi penuh.
+    var composerOk = !!(attBox && attBtn && fileInput && attWarn && chatMain && dz);
+    if (composerOk) {
+    attBtn.addEventListener("click", function () { fileInput.click(); });
+    fileInput.addEventListener("change", function () { addFiles(fileInput.files); fileInput.value = ""; });
+    if (modelEl) modelEl.addEventListener("change", refreshAtts);
+    input.addEventListener("paste", function (e) {                      // tangkapan layar / berkas dari papan klip
+      var cd = e.clipboardData;
+      if (!cd || !cd.files || !cd.files.length || busy) return;
+      e.preventDefault();
+      var stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+      addFiles(Array.prototype.map.call(cd.files, function (f, i) {
+        if (f.name && !/^image\.(png|jpe?g|gif|webp)$/i.test(f.name)) return f;
+        var ext = (f.type.split("/")[1] || "png").replace("jpeg", "jpg");
+        try { return new File([f], "tangkapan-" + stamp + (i ? "-" + (i + 1) : "") + "." + ext, { type: f.type }); } catch (_) { return f; }
+      }));
+    });
+    var dragDepth = 0;
+    function hasFiles(e) { var t = e.dataTransfer && e.dataTransfer.types; return !!t && Array.prototype.indexOf.call(t, "Files") >= 0; }
+    chatMain.addEventListener("dragenter", function (e) { if (!hasFiles(e)) return; e.preventDefault(); if (busy) return; dragDepth++; dz.hidden = false; });
+    chatMain.addEventListener("dragover", function (e) { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = busy ? "none" : "copy"; });
+    chatMain.addEventListener("dragleave", function (e) { if (!hasFiles(e)) return; dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) dz.hidden = true; });
+    chatMain.addEventListener("drop", function (e) { if (!hasFiles(e)) return; e.preventDefault(); dragDepth = 0; dz.hidden = true; if (!busy) addFiles(e.dataTransfer.files); });
+    window.addEventListener("dragover", function (e) { if (hasFiles(e)) e.preventDefault(); });      // jangan membuka berkas yang jatuh di luar area
+    window.addEventListener("drop", function (e) { if (hasFiles(e)) { e.preventDefault(); dragDepth = 0; dz.hidden = true; } });
+    }   // composerOk
+
+    function send(text, retryAtts) {
       text = String(text || "").trim();
-      if (!text || busy) return;
+      var sent = retryAtts || readyAtts();
+      if ((!text && !sent.length) || busy) return;
+      if (!retryAtts && (uploading() || visionBlocked())) return;
       lastUserText = text;
       if (sugg) sugg.hidden = true;
-      var u = addMsg("user", "Anda"); var ub = document.createElement("div"); ub.className = "msg-body msg-plain"; ub.textContent = text; u.appendChild(ub);
+      var u = addMsg("user", "Anda");
+      if (sent.length) renderSentAtts(u, sent);
+      if (text) { var ub = document.createElement("div"); ub.className = "msg-body msg-plain"; ub.textContent = text; u.appendChild(ub); }
       input.value = ""; grow(); setBusy(true); statusEl.textContent = "Mengirim…"; scrollDown(true);
 
       var asst = addMsg("assistant", "Asisten"), toolsBox = null, toolsList = null, toolsSummary = null, bodyEl = document.createElement("div"), raw = "", pending = false;
@@ -1251,12 +1610,21 @@
       }
 
       var payload = { text: text, session_id: sessionId ? parseInt(sessionId, 10) : null };
+      if (sent.length) payload.attachment_ids = sent.map(function (a) { return a.id; });
       if (modelEl && modelEl.value) payload.model = modelEl.value;
       fetch("/analyses/" + enc(aid) + "/chat/send", { method: "POST", credentials: "same-origin",
         headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify(payload) })
         .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
         .then(function (res) {
-          if (!res.ok) { log.removeChild(asst); setBusy(false); statusEl.textContent = ""; fail(res.d.error || "Gagal mengirim pesan.", lastUserText); return; }
+          if (!res.ok) {
+            log.removeChild(asst); setBusy(false); statusEl.textContent = "";
+            if (sent.length && !retryAtts) {                           // kembalikan ke kotak pesan agar bisa diperbaiki (mis. ganti model) lalu kirim lagi
+              log.removeChild(u); input.value = text; grow(); updateSend();
+              if (attWarn) { attWarn.textContent = res.d.error || "Gagal mengirim pesan."; attWarn.hidden = false; } input.focus(); return;
+            }
+            fail(res.d.error || "Gagal mengirim pesan.", lastUserText, sent); return;
+          }
+          if (sent.length && !retryAtts) clearAtts();                  // lampiran sudah pindah ke gelembung pesan
           sessionId = String(res.d.session_id); root.setAttribute("data-session-id", sessionId);
           history.replaceState(null, "", "?s=" + sessionId);
           statusEl.textContent = "Asisten bekerja…";
@@ -1275,8 +1643,15 @@
             if (!running && !raw) setTyping(true);
             scrollDown(false);
           });
+          var cardsBox = null;
+          function cards() {
+            if (!cardsBox) { cardsBox = document.createElement("div"); cardsBox.className = "fcards"; cardsBox.setAttribute("aria-label", "Berkas yang dibuat asisten"); asst.appendChild(cardsBox); }
+            return cardsBox;
+          }
+          es.addEventListener("file", function (e) { setTyping(false); upsertFileCard(cards(), aid, JSON.parse(e.data)); scrollDown(false); });
           es.addEventListener("final", function (e) {
             finished = true; var d = JSON.parse(e.data);
+            (d.files || []).forEach(function (f) { upsertFileCard(cards(), aid, f); });
             var text = d.content || ""; raw = text; setTyping(false);
             renderMarkdown(text, bodyEl, { analysisId: aid, citations: citeMap(d.citations) });
             if (toolsBox) {
@@ -1294,11 +1669,11 @@
               var nt = document.createElement("span"); nt.textContent = notes[d.stopped] + (d.error ? " " + d.error : ""); n.appendChild(nt);
               if (d.stopped === "max_steps" || d.stopped === "tool_budget") {
                 var cb = document.createElement("button"); cb.type = "button"; cb.className = "btn btn-ghost btn-sm"; cb.textContent = "Lanjutkan";
-                cb.addEventListener("click", function () { cb.disabled = true; send("lanjutkan"); });
+                cb.addEventListener("click", function () { cb.disabled = true; send("lanjutkan", []); });
                 n.appendChild(cb);
               } else if (d.stopped === "error") {
                 var rb = document.createElement("button"); rb.type = "button"; rb.className = "btn btn-ghost btn-sm"; rb.textContent = "Coba lagi";
-                rb.addEventListener("click", function () { rb.disabled = true; send(lastUserText); });
+                rb.addEventListener("click", function () { rb.disabled = true; send(lastUserText || "Lanjutkan", []); });   // lampiran pesan itu sudah tersimpan di riwayat
                 n.appendChild(rb);
               }
               asst.insertBefore(n, foot);
@@ -1312,13 +1687,21 @@
             if (es && es.readyState === 2) { es = null; setTyping(false); if (!finished) { setBusy(false); fail("Koneksi stream terputus. Muat ulang halaman untuk melihat hasil tersimpan."); } }
           };
         })
-        .catch(function () { setTyping(false); setBusy(false); statusEl.textContent = ""; fail("Koneksi gagal. Periksa jaringan lalu coba lagi.", lastUserText); });
+        .catch(function () {
+          setTyping(false); setBusy(false); statusEl.textContent = "";
+          if (sent.length && !retryAtts && u.parentNode) {
+            if (asst.parentNode) log.removeChild(asst);
+            log.removeChild(u); input.value = text; grow(); updateSend();
+            if (attWarn) { attWarn.textContent = "Koneksi gagal. Periksa jaringan lalu coba lagi."; attWarn.hidden = false; } return;
+          }
+          fail("Koneksi gagal. Periksa jaringan lalu coba lagi.", lastUserText, sent);
+        });
     }
 
     form.addEventListener("submit", function (e) { e.preventDefault(); send(input.value); });
     input.addEventListener("input", function () { grow(); updateSend(); });
     input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(input.value); } });
-    $all("[data-suggest]", root).forEach(function (b) { b.addEventListener("click", function () { send(b.getAttribute("data-suggest")); }); });
+    $all("[data-suggest]", root).forEach(function (b) { b.addEventListener("click", function () { send(b.getAttribute("data-suggest"), []); }); });
     function stop() {
       if (!sessionId) return;
       stopBtn.disabled = true; statusEl.textContent = "Menghentikan…";
@@ -1329,6 +1712,7 @@
     // Esc: tutup pratinjau dulu; bila tidak ada, hentikan giliran yang sedang berjalan.
     document.addEventListener("keydown", function (e) {
       if (e.key !== "Escape" || e.defaultPrevented) return;
+      var fv = fileViewer(); if (fv && fv.isOpen()) return;           // Esc menutup penampil berkas (ditangani <dialog>), bukan menghentikan giliran
       if (peek && !peek.hidden) { e.preventDefault(); closePeek(); }
       else if (busy) { e.preventDefault(); stop(); }
     });

@@ -106,7 +106,7 @@
       {% for c in d.categories %}
       <li class="dq-cat">
         <div class="dq-cat-head"><strong>{{ c.label }}</strong><span class="mono muted">{{ c.n }} method</span></div>
-        <div class="dq-bar" aria-hidden="true"><span style="width: {{ (c.n / total_cat * 100)|round(1) }}%"></span></div>
+        <div class="dq-bar" aria-hidden="true"><span data-pct="{{ (c.n / total_cat * 100)|round(1) }}"></span></div>
         <p class="dq-cat-body">{{ c.arti }}</p>
         <p class="dq-cat-fix"><span class="dq-tag">Yang dilakukan</span> {{ c.solusi }}</p>
         {% if c.examples %}<p class="dq-ex mono muted break">Contoh: {% for e in c.examples %}{{ e.short }}{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}

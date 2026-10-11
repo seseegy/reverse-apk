@@ -1,0 +1,24 @@
+{#- Penampil berkas modal. <dialog> native: fokus terperangkap di dalam, Esc menutup, latar belakang dikunci. Diisi oleh app.js. -#}
+{% from "_icons.html" import icon %}
+<dialog class="fview" data-fview aria-labelledby="fview-title">
+  <div class="fview-box">
+    <header class="fview-head">
+      <div class="fview-title">
+        <span class="fview-ic" data-fview-ic aria-hidden="true"></span>
+        <h2 id="fview-title" class="mono" data-fview-name></h2>
+        <span class="muted hint" data-fview-meta></span>
+      </div>
+      <div class="fview-actions">
+        <div class="seg" data-fview-modes role="group" aria-label="Mode tampilan" hidden>
+          <button type="button" data-mode="render" aria-pressed="true">Tampilan</button>
+          <button type="button" data-mode="source" aria-pressed="false">Sumber</button>
+        </div>
+        <button type="button" class="btn btn-ghost btn-sm" data-fview-copy>{{ icon('copy', 16) }}<span>Salin</span></button>
+        <a class="btn btn-ghost btn-sm" data-fview-download href="#" download>{{ icon('download', 16) }}<span>Unduh</span></a>
+        <button type="button" class="btn btn-ghost btn-sm" data-fview-close>{{ icon('x', 16) }}<span>Tutup</span></button>
+      </div>
+    </header>
+    <p class="fview-note hint muted" data-fview-note role="status"></p>
+    <div class="fview-body" data-fview-body tabindex="0" role="region" aria-label="Isi berkas"></div>
+  </div>
+</dialog>

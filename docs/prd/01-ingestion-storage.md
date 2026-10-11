@@ -60,3 +60,6 @@ audit_log      id, ts, action, detail(json)
 - [DIPUTUSKAN di M1] SQLite mode WAL, dibagi web dan worker lewat volume `db` (runner tidak punya akses). Skema dimigrasi lewat `PRAGMA user_version` (`services/rvcore/db.py`).
 - [OPEN] Perlu enkripsi at-rest untuk `/data`?
 - [DIPUTUSKAN di M1] Batas ukuran APK 200 MB (`MAX_UPLOAD_MB`). Unggahan berupa badan mentah (octet-stream) dengan metadata di header, bukan multipart, agar bisa di-stream ke disk tanpa melewati tmpfs berbasis RAM.
+
+## Penyimpanan berkas pengguna & AI (FR-5.11–5.14)
+Selain APK (`uploads`) dan hasil dekompilasi (`work`), ada volume `files` untuk lampiran chat dan berkas buatan AI per analisis (`files/<analysis_id>/{up,ai}`). Dipisah dari `work` karena "Analisis ulang" menghapus `work/<id>`; hanya `web` yang memasangnya. Kuota dan batas ukuran dari `.env` (`ATTACH_MAX_MB`, `FILES_QUOTA_MB`, `FILES_MAX_COUNT`). Retensi otomatis (FR-1.10) belum menyentuh volume ini; berkas dihapus manual (tab Berkas) atau bersama APK-nya. Detail di 05-chat-agent.md.

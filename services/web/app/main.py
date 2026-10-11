@@ -26,6 +26,7 @@ from .context import (
     settings,
 )
 from .routes_apk import router as apk_router
+from .routes_files import router as files_router
 from .security import (
     Session,
     new_token,
@@ -44,6 +45,7 @@ init_storage()  # direktori data + migrasi skema; gagal cepat bila volume tidak 
 app = FastAPI(title="reverse-apk", docs_url=None, redoc_url=None, openapi_url=None)
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 app.include_router(apk_router)
+app.include_router(files_router)
 
 if settings.load_password_hash() is None:
     log.warning(
@@ -62,7 +64,9 @@ CSP = (
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
     h = response.headers
-    h["Content-Security-Policy"] = CSP
+    # Rute boleh memasang CSP yang LEBIH ketat (mis. penyajian berkas pengguna: "default-src 'none'; sandbox"); jangan ditimpa.
+    if "content-security-policy" not in h:
+        h["Content-Security-Policy"] = CSP
     h["X-Content-Type-Options"] = "nosniff"
     h["X-Frame-Options"] = "DENY"
     h["Referrer-Policy"] = "no-referrer"

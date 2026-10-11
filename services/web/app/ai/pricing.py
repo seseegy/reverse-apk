@@ -28,9 +28,14 @@ class Rate:
 
 class PriceTable:
     def __init__(self, models: dict[str, dict], default: Rate, labels: dict[str, str], chat: list[str],
-                 floor: float = DEFAULT_FLOOR) -> None:
+                 floor: float = DEFAULT_FLOOR, vision: frozenset[str] = frozenset()) -> None:
         self._models, self._default, self.labels, self.chat_models = models, default, labels, chat
         self.floor = floor
+        self._vision = vision
+
+    def supports_vision(self, model: str) -> bool:
+        """Model ini bisa menerima gambar? Hanya dari penanda "vision": true di ai_models.json; model tak dikenal = tidak."""
+        return model in self._vision
 
     @classmethod
     def load(cls, path: str | Path) -> "PriceTable":
@@ -40,7 +45,7 @@ class PriceTable:
             data = {}
         d = data.get("default") if isinstance(data, dict) else None
         default = Rate(_num(d, "in", 4.0), _num(d, "out", 4.0), known=False)
-        models, labels, chat = {}, {}, []
+        models, labels, chat, vision = {}, {}, [], set()
         raw = data.get("models") if isinstance(data, dict) else None
         for slug, spec in (raw or {}).items():
             if not isinstance(spec, dict) or not isinstance(slug, str):
@@ -49,8 +54,10 @@ class PriceTable:
             labels[slug] = str(spec.get("label") or slug)[:80]
             if spec.get("chat", True):
                 chat.append(slug)
+            if spec.get("vision") is True:
+                vision.add(slug)
         floor = _num(data if isinstance(data, dict) else None, "floor_per_request", DEFAULT_FLOOR)
-        return cls(models, default, labels, chat, floor)
+        return cls(models, default, labels, chat, floor, frozenset(vision))
 
     def rate(self, model: str) -> Rate:
         m = self._models.get(model)

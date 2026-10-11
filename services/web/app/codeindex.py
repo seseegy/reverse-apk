@@ -144,6 +144,25 @@ def read_file(work: Path, analysis_id: int, root: str, rel: str, max_bytes: int 
             "lines": text.count("\n") + 1}
 
 
+def read_bytes(work: Path, analysis_id: int, root: str, rel: str, max_bytes: int) -> bytes | None:
+    """Byte mentah satu berkas di akar yang diizinkan (untuk gambar). None bila tidak ada / bukan berkas biasa / lebih besar dari max_bytes."""
+    target = _resolve(work, analysis_id, root, rel)
+    if target is None:
+        return None
+    try:
+        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes:
+                return None
+            return fh.read(max_bytes + 1)
+    except OSError:
+        return None
+
+
 # ------------------------------------------------------------------------- pencarian
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
 

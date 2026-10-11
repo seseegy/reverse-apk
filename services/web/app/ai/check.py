@@ -2,17 +2,21 @@
 
     docker compose run --rm --no-deps web python -m app.ai.check
 
-Menguji berurutan: konfigurasi, koneksi + chat sederhana, streaming, tool calling, dan pelaporan pemakaian token.
+Menguji berurutan: konfigurasi, koneksi + chat sederhana, streaming, tool calling, pelaporan pemakaian token, dan (hanya untuk model
+yang ditandai "vision": true di config/ai_models.json) membaca gambar. Penanda vision di berkas itu perkiraan; uji ini yang membuktikannya.
 Setiap baris [OK ] / [GAGAL] / [INFO]. Kode keluar 0 hanya bila semua yang WAJIB lulus.
 Panggilan uji dicatat di ai_call (purpose=check) dan ikut menghitung anggaran. Kunci API tidak pernah dicetak.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import os
+import struct
 import sys
 import time
+import zlib
 from contextlib import closing
 
 from rvcore import db as rvdb
@@ -24,6 +28,16 @@ from .pricing import PriceTable
 from .provider import AIError, Client
 
 OK, BAD, INFO = "[OK ]", "[GAGAL]", "[INFO]"
+
+
+def _red_png(size: int = 48) -> bytes:
+    """PNG persegi merah polos: jawaban benar ('merah') tidak bisa ditebak tanpa benar-benar melihat gambarnya."""
+    raw = b"".join(b"\x00" + b"\xff\x00\x00" * size for _ in range(size))
+
+    def chunk(t: bytes, d: bytes) -> bytes:
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
 ADD_TOOL = [{"type": "function", "function": {
     "name": "tambah", "description": "Menjumlahkan dua bilangan.",
     "parameters": {"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
@@ -76,16 +90,17 @@ def main() -> int:
         client = Client(cfg)
         total_tokens = 0
 
-        def call(label: str, **kw):  # noqa: ANN003
+        def call(label: str, model: str | None = None, **kw):  # noqa: ANN003
             nonlocal total_tokens
             t0 = time.time()
+            use = model or cfg.model
             try:
-                result = client.chat(**kw)
+                result = client.chat(model=use, **kw) if model else client.chat(**kw)
             except AIError as exc:
-                budget.record(conn, cfg, prices, purpose="check", model=cfg.model, result=None, error=exc)
+                budget.record(conn, cfg, prices, purpose="check", model=use, result=None, error=exc)
                 line(BAD, f"{label}: {exc.message}")
                 return None
-            cost = budget.record(conn, cfg, prices, purpose="check", model=cfg.model, result=result)
+            cost = budget.record(conn, cfg, prices, purpose="check", model=use, result=result)
             total_tokens += result.usage.prompt + result.usage.completion
             return result, time.time() - t0, cost
 
@@ -150,6 +165,26 @@ def main() -> int:
             else:
                 line(BAD, "tool calling: model TIDAK memanggil alat (provider/model ini tidak mendukung function calling). "
                           "Chat agent membutuhkannya; pilih model lain atau gunakan mode cadangan.")
+
+        # 5. gambar: hanya untuk model yang boleh dipilih di chat DAN ditandai vision (satu permintaan kecil per model)
+        data_url = "data:image/png;base64," + base64.b64encode(_red_png()).decode("ascii")
+        for name, slug in (("AI_MODEL", cfg.model), ("AI_MODEL_PRO", cfg.model_pro)):
+            if not slug:
+                continue
+            if not prices.supports_vision(slug):
+                line(INFO, f"gambar: {slug} tidak bertanda \"vision\" di {cfg.models_file}, jadi lampiran gambar ditolak di chat untuk model ini. "
+                           "Bila sebenarnya mendukung gambar, tambahkan \"vision\": true lalu jalankan uji ini lagi.")
+                continue
+            out = call(f"gambar ({slug})", model=slug, max_tokens=24, temperature=0, messages=[{"role": "user", "content": [
+                {"type": "text", "text": "Gambar ini satu warna polos. Sebutkan warnanya dalam satu kata bahasa Inggris (red/green/blue/black/white)."},
+                {"type": "image_url", "image_url": {"url": data_url}}]}])
+            if out is not None:
+                answer = out[0].content.strip().lower()
+                if "red" in answer or "merah" in answer:
+                    line(OK, f"gambar: {slug} benar-benar melihat gambar (menjawab {answer[:30]!r})")
+                else:
+                    line(BAD, f"gambar: {slug} ditandai vision tetapi tidak mengenali gambar (jawab {answer[:40]!r}). Hapus \"vision\": true untuk "
+                              f"model ini di {cfg.models_file} agar UI tidak menawarkan lampiran gambar yang tidak bisa dibaca.")
 
         snap = budget.snapshot(conn, cfg)
         spent = prices.cost(cfg.model, total_tokens, 0)
