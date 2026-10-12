@@ -3,8 +3,8 @@
   <div class="container header-row">
     <a class="brand" href="/">reverse-apk</a>
     <nav aria-label="Navigasi utama">
-      <a href="/"{% if nav == 'dashboard' %} aria-current="page"{% endif %}>Dashboard</a>
-      <a href="/upload"{% if nav == 'upload' %} aria-current="page"{% endif %}>Upload</a>
+      <a href="/"{% if nav == 'dashboard' %} aria-current="page"{% endif %}>Beranda</a>
+      <a href="/upload"{% if nav == 'upload' %} aria-current="page"{% endif %}>Unggah</a>
     </nav>
     <form method="post" action="/logout" class="header-user">
       <input type="hidden" name="csrf" value="{{ csrf }}">

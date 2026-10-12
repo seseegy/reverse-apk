@@ -40,7 +40,7 @@ def check(conn: sqlite3.Connection, cfg: AIConfig, session_id: int | None = None
         raise AIError("budget", f"Anggaran harian habis ({fmt.num(s['today'], 3)} dari {fmt.num(cfg.daily_budget, None)} kredit ≈ "
                                 f"Rp{fmt.num(cfg.idr(s['today']))}). Naikkan AI_DAILY_BUDGET_CREDITS atau coba lagi besok.")
     if s["session_exhausted"]:
-        raise AIError("budget", f"Anggaran sesi chat habis ({fmt.num(s['session'], 3)} dari {fmt.num(cfg.session_budget, None)} kredit). "
+        raise AIError("budget", f"Anggaran sesi percakapan habis ({fmt.num(s['session'], 3)} dari {fmt.num(cfg.session_budget, None)} kredit). "
                                 "Mulai sesi baru atau naikkan AI_SESSION_BUDGET_CREDITS.")
 
 

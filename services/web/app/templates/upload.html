@@ -1,18 +1,18 @@
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
-{% block title %}Upload APK · reverse-apk{% endblock %}
+{% block title %}Unggah APK · reverse-apk{% endblock %}
 
 {% block header %}{% include "_header.html" %}{% endblock %}
 
 {% block content %}
 <div class="container page page-narrow">
   <div class="page-head">
-    <h1>Upload APK</h1>
+    <h1>Unggah APK</h1>
   </div>
 
   <noscript>
     <div class="alert alert-error" role="alert">
-      {{ icon('x-circle') }}<span>Upload membutuhkan JavaScript (untuk progres dan pengiriman berkas besar). Aktifkan JavaScript lalu muat ulang halaman.</span>
+      {{ icon('x-circle') }}<span>Unggah membutuhkan JavaScript (untuk progres dan pengiriman berkas besar). Aktifkan JavaScript lalu muat ulang halaman.</span>
     </div>
   </noscript>
 
@@ -60,7 +60,7 @@
     </fieldset>
 
     <div id="upload-progress-box" class="progress-box" hidden>
-      <label for="upload-progress" class="sr-only">Progres upload</label>
+      <label for="upload-progress" class="sr-only">Progres unggah</label>
       <progress id="upload-progress" max="100" value="0"></progress>
       <p id="upload-status" class="muted" role="status" aria-atomic="true"></p>
     </div>
@@ -83,7 +83,7 @@
 
     <div class="card-foot">
       <button id="upload-submit" type="submit" class="btn btn-primary">
-        {{ icon('upload', 16) }}<span>Upload &amp; analisis</span>
+        {{ icon('upload', 16) }}<span>Unggah &amp; analisis</span>
       </button>
       <span class="muted hint">APK tidak pernah dijalankan; hanya dibongkar secara statis di lingkungan terisolasi.</span>
     </div>

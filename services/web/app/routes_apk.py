@@ -182,7 +182,7 @@ def _reject_audit(code: str, name: str, ip: str, sha256: str | None = None) -> N
 def _mark_enqueue_failed(analysis_id: int) -> None:
     with closing(db()) as conn:
         store.finish_analysis(conn, analysis_id, store.FAILED, store.E_INTERNAL,
-                              "Antrean (Redis) tidak tersedia saat upload. Gunakan “Coba lagi”.")
+                              "Antrean (Redis) tidak tersedia saat unggah. Gunakan “Coba lagi”.")
 
 
 @router.post("/api/uploads", include_in_schema=False)
@@ -668,7 +668,7 @@ async def chat_send(request: Request, analysis_id: AnalysisId) -> Response:
     if status == "not_found":
         return _json(404, error="Analisis tidak ditemukan.")
     if status == "no_session":
-        return _json(404, error="Sesi chat tidak ditemukan untuk analisis ini.")
+        return _json(404, error="Sesi percakapan tidak ditemukan untuk analisis ini.")
     if status == "bad_attachment":
         return _json(422, error="Lampiran tidak valid atau sudah terpakai di pesan lain. Hapus lalu lampirkan ulang.", code="attachment")
     if status == "no_vision":
@@ -760,7 +760,7 @@ async def chat_cancel(request: Request, analysis_id: AnalysisId, s: int = Query(
     if not tokens_equal(session.csrf, request.headers.get("x-csrf-token")):
         return _json(403, error="Token keamanan tidak valid.")
     if not await run_in_threadpool(lambda: _owns(analysis_id, s)):
-        return _json(404, error="Sesi chat tidak ditemukan.")
+        return _json(404, error="Sesi percakapan tidak ditemukan.")
     turn = ai_chat.REGISTRY.get(s)
     if turn is not None and not turn.done:
         turn.cancel.set()

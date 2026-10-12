@@ -185,7 +185,7 @@ IBM Plex Sans dan JetBrains Mono (woff2 di `static/fonts/`) **tidak memuat**: `�
 ### UI-05 · Pesan "Koneksi gagal" menyesatkan untuk respons non-JSON — Rendah · Terverifikasi dari kode
 `app.js` (±451, 482, 609): `fetch(...).then(r => r.json()...)`. Bila yang kembali bukan JSON (413 dari Caddy untuk badan > 1 MB, 502/504 HTML dari proxy), `r.json()` ditolak dan jatuh ke `.catch` → "Koneksi gagal. Periksa jaringan" padahal masalahnya "pesan terlalu besar". **Saran:** periksa `r.ok`/`Content-Type` dulu dan tampilkan pesan sesuai status (413 → "Pesan terlalu besar").
 
-### UI-06 · Bahasa campuran pada navigasi — Catatan (butuh keputusan)
+### UI-06 · Bahasa campuran pada navigasi — Catatan (**selesai**, lihat §10.1 dan §10.4)
 Tab/menu: **Dashboard, Upload, Chat, Manifest** (Inggris) bercampur dengan **Ringkasan, Temuan, Jaringan, Kode, Berkas** (Indonesia). Mungkin sengaja (istilah teknis), tetapi belum pernah diputuskan. Istilah "berkas" konsisten (85 pemakaian; tidak ada "file" di teks UI).
 
 ### UI-07 · Ikon tombol "Kirim" kurang semantik — Rendah
@@ -335,6 +335,7 @@ Ditulis sesi berikutnya, setelah tiap temuan diverifikasi ulang dari kode dan di
 | QA-01, OP-04 | #28 | `tests/` + CI (pyflakes + pytest). Menggantikan aturan lama "jangan commit tes". |
 | UI-04, UI-05, UI-07 | #29 | Satu sumber format angka `rvcore/fmt.py` (dipakai web, worker, runner) + `fmtNum` di `app.js`. `readJson()` agar respons non-JSON tidak lagi jadi "Koneksi gagal". |
 | Sesi kosong saat anggaran habis (tidak ada di audit awal) | #29 | `budget.check()` dipindah sebelum `create_chat_session()`. |
+| UI-06 | #33 | Bahasa seragam Indonesia pada **teks yang tampil**: Dashboard → **Beranda**, Upload → **Unggah**, Chat → **Percakapan**, Manifest → **Manifes** (menu, tab, judul tab browser, tombol, pesan galat server dan JS, `README`/`docs/deploy.md`). **Sengaja tidak diubah** karena itu kode, bukan tampilan: alamat (`/chat`, `/upload`, `/manifest`), kelas CSS, `id`, `data-*`, nama tool AI dan prompt, nilai aksi audit `upload`, log operator, dan PRD (istilah konseptual). `tests/test_ui_language.py` memeriksa teks yang terlihat di 9 halaman; Chromium memastikan tidak ada kata lama di layar setelah JavaScript berjalan. |
 
 ### 10.2 Hasil pengukuran
 
@@ -411,7 +412,8 @@ Dikelompokkan menurut **layanan yang membacanya**; ini yang menentukan ke mana v
 | BE-10 (`MAX_CHAT_BODY` 4 MiB) | **Ditutup**: pengaman yang disengaja (PRD 05), Caddy sudah menahan 1 MB di rute itu |
 | UI-01 (overflow 320 px) | **Dibiarkan**: di bawah breakpoint uji design system (375 px ke atas) |
 | UI-03 (glyph ▯) | **Tidak dikerjakan** |
-| UI-06, UI-08, OP-05 | Belum diputuskan |
+| UI-06 (bahasa campuran) | **Diseragamkan penuh** → #33 (4 kata; hanya teks tampil). Ditolak: dibiarkan, dan jalan tengah 2 kata |
+| UI-08, OP-05 | Belum diputuskan |
 
 ### 10.5 Hasil setelah perbaikan BE-09 (halaman Berkas) & UI-02
 
