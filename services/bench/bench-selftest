@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""Uji mandiri image bench: BUKTI isolasi dari dalam kontainer sungguhan. Keluar dengan kode != 0 bila ada yang gagal.
+
+Dijalankan lewat `make bench-selftest`, yang memakai opsi isolasi yang sama dengan layanan asli (--network none, --read-only, --cap-drop ALL,
+non-root, no-new-privileges). JALANKAN INI di server Anda sebelum menyalakan AI_SHELL_ENABLED=1: yang tidak bisa dibuktikan dari luar kontainer
+adalah apakah Landlock benar-benar bekerja di bawah profil seccomp/AppArmor Docker Anda.
+
+Cara kerja: membuat DATA UMPAN di folder sementara (analisis dengan index/ berisi 'rahasia', analisis lain, database) lalu menjalankan perintah
+lewat executor yang SAMA dengan produksi. Setiap yang seharusnya ditolak HARUS ditolak, dan tidak ada umpan yang boleh muncul di keluaran.
+"""
+
+from __future__ import annotations
+
+import os
+import socket
+import sys
+import tempfile
+import zipfile
+from pathlib import Path
+
+sys.path.insert(0, os.environ.get("PYTHONPATH", "/app").split(":")[0])
+
+from bench import executor, landlock, policy  # noqa: E402
+
+failed = False
+UMPAN = "UMPAN-RAHASIA-JANGAN-BOCOR"
+
+
+def report(ok: bool, name: str, detail: str = "") -> None:
+    global failed
+    failed = failed or not ok
+    print(f"[{'OK ' if ok else 'GAGAL'}] {name}" + (f" — {detail}" if detail else ""))
+
+
+# --- 1. kontainer
+report(os.geteuid() != 0, "bukan root", f"uid={os.geteuid()}")
+root_opts = None
+with open("/proc/self/mountinfo") as fh:
+    for line in fh:
+        parts = line.split()
+        if len(parts) > 5 and parts[4] == "/":
+            root_opts = parts[5].split(",")
+            break
+report(root_opts is not None and "ro" in root_opts, "rootfs read-only", "mount / opsi: " + (",".join(root_opts) if root_opts else "tidak ditemukan"))
+reachable = False
+for host in ("1.1.1.1", "8.8.8.8"):
+    try:
+        with socket.create_connection((host, 443), timeout=3):
+            reachable = True
+            break
+    except OSError:
+        pass
+report(not reachable, "jaringan terisolasi", "koneksi keluar gagal (benar)" if not reachable else "internet TERJANGKAU")
+env_leaks = sorted(k for k in os.environ if any(t in k.upper() for t in ("API_KEY", "SECRET", "PASSWORD", "TOKEN", "REDIS")))
+report(not env_leaks, "tidak ada rahasia di environment", "bersih" if not env_leaks else "ditemukan: " + ", ".join(env_leaks))
+
+# --- 2. Landlock
+abi = landlock.abi_version()
+report(abi >= 1, "Landlock tersedia di kontainer ini", f"ABI v{abi}" if abi else "TIDAK tersedia: semua perintah AI akan DITOLAK (benar, gagal tertutup) tetapi fitur tidak berguna")
+if abi < 1:
+    print("\nLandlock tidak aktif di server ini. AI_SHELL_ENABLED jangan dinyalakan sebelum ini beres (uji `scripts/bench-probe.sh`).")
+    sys.exit(1)
+
+# --- 3. data umpan + pengurungan lewat executor produksi
+base = Path(tempfile.mkdtemp(prefix="selftest-", dir=os.environ.get("TMPDIR", "/tmp")))
+data = base / "data"
+SHA, OTHER = "a" * 64, "b" * 64
+for d in ("work/1/apktool", "work/1/jadx", "work/1/logs", "work/1/index", "work/2/apktool", "work/2/index", "uploads", "bench/1", "bench/2", "db", "files/1/up"):
+    (data / d).mkdir(parents=True, exist_ok=True)
+(data / "work/1/apktool/AndroidManifest.xml").write_text("<manifest/>")
+(data / "work/1/jadx/A.java").write_text("class A {}")
+(data / "work/1/manifest.json").write_text("{}")
+(data / "work/1/index/findings.jsonl").write_text(f'{{"secret": "{UMPAN}-INDEX"}}')
+(data / "work/2/apktool/x.txt").write_text(f"{UMPAN}-ANALISIS2")
+(data / "work/2/index/f.jsonl").write_text(f"{UMPAN}-INDEX2")
+(data / "bench/2/catatan.txt").write_text(f"{UMPAN}-BENCH2")
+(data / "db/app.sqlite").write_text(f"{UMPAN}-DB")
+(data / "files/1/up/l.txt").write_text(f"{UMPAN}-LAMPIRAN")
+with zipfile.ZipFile(data / "uploads" / f"{SHA}.apk", "w") as zf:
+    zf.writestr("AndroidManifest.xml", "x")
+(data / "uploads" / f"{OTHER}.apk").write_text(f"{UMPAN}-APKLAIN")
+
+dirs = policy.Dirs(data)
+limits = executor.Limits(max_timeout=20, output_bytes=8192, nproc=int(os.environ.get("BENCH_NPROC", "2048")))
+executor.enable_subreaper()
+D = str(data)
+
+
+def run(cmd: str, timeout: int = 15) -> dict:
+    return executor.run_confined(dirs, limits, analysis_id=1, command=cmd, timeout=timeout, sha256=SHA, job_id="s1-selftest0001")
+
+
+def must_work(name: str, cmd: str, expect: str = "") -> None:
+    r = run(cmd)
+    ok = r["status"] == "ok" and r["exit_code"] == 0 and (expect in r["stdout"])
+    report(ok, name, "" if ok else f"status={r['status']} exit={r['exit_code']} {r.get('message', '')} {r['stderr'][:100]!r}")
+
+
+def must_block(name: str, cmd: str) -> None:
+    r = run(cmd)
+    leaked = UMPAN in r["stdout"] + r["stderr"]
+    blocked = r["status"] == "ok" and r["exit_code"] != 0
+    report(blocked and not leaked, name, "ditolak" if blocked and not leaked else ("BOCOR: umpan terbaca" if leaked else f"TIDAK ditolak (status={r['status']} exit={r['exit_code']})"))
+
+
+r0 = run("true")
+if r0["status"] == "refused":
+    report(False, "pengurungan dapat dipasang", r0.get("message", ""))
+    sys.exit(1)
+report(True, "pengurungan dapat dipasang")
+
+must_work("membaca manifest analisis sendiri", "cat $WORK/apktool/AndroidManifest.xml", "<manifest/>")
+must_work("membaca kode jadx analisis sendiri", "cat $WORK/jadx/A.java", "class A")
+must_work("membuka APK sendiri", "unzip -l $APK", "AndroidManifest.xml")
+must_work("menulis dan membaca di ruang kerja", "echo halo > $WS/a.txt && cat $WS/a.txt", "halo")
+must_work("python3 tersedia", "python3 -c 'print(6*7)'", "42")
+must_block("index/ analisis sendiri (rahasia mentah): baca", "cat $WORK/index/findings.jsonl")
+must_block("index/ analisis sendiri: daftar", "ls $WORK/index")
+must_block("analisis lain: baca", f"cat {D}/work/2/apktool/x.txt")
+must_block("index analisis lain: baca", f"cat {D}/work/2/index/f.jsonl")
+must_block("ruang kerja bench lain: baca", f"cat {D}/bench/2/catatan.txt")
+must_block("ruang kerja bench: daftar semua", f"ls {D}/bench")
+must_block("database: baca", f"cat {D}/db/app.sqlite")
+must_block("lampiran: baca", f"cat {D}/files/1/up/l.txt")
+must_block("APK lain: baca", f"cat {D}/uploads/{OTHER}.apk")
+must_block("folder uploads: daftar", f"ls {D}/uploads")
+must_block("/data: daftar", f"ls {D}")
+must_block("hasil dekompilasi: tulis", "echo x > $WORK/apktool/hack.txt")
+must_block("hasil dekompilasi: hapus", "rm $WORK/apktool/AndroidManifest.xml")
+must_block("hasil dekompilasi: ganti nama", "mv $WORK/apktool/AndroidManifest.xml $WS/x")
+must_block("tautan keras keluar ruang kerja", "ln $WORK/jadx/A.java $WS/tautan")
+must_block("symlink ke index/ lalu baca", "ln -s $WORK/index $WS/s && cat $WS/s/findings.jsonl")
+must_block("lewat /proc/self/root", "cat /proc/self/root$WORK/index/findings.jsonl")
+must_block("lewat ..", "cat $WS/../2/catatan.txt")
+must_block("lingkungan daemon (/proc/<ppid>/environ)", "cat /proc/$PPID/environ")
+# Jaringan dari DALAM perintah AI. Dua lapis: (1) network_mode none pada kontainer (cek di atas), (2) Landlock TCP (ABI >= 4). Cek ini hanya bermakna bila
+# lapis 1 terbukti; bila tidak, hasilnya TIDAK membuktikan apa pun tentang Landlock dan ditandai jelas.
+net = run("python3 -c \"import socket; socket.create_connection(('1.1.1.1', 443), timeout=3)\"")
+net_blocked = net["status"] == "ok" and net["exit_code"] != 0
+if abi >= 4:
+    report(net_blocked, "jaringan dari perintah AI ditolak (lapis Landlock TCP, ABI >= 4)", "ditolak" if net_blocked else "TIDAK ditolak")
+else:
+    report(not reachable and net_blocked, f"jaringan dari perintah AI ditolak (hanya lapis kontainer; Landlock ABI v{abi} belum mengunci TCP)",
+           "ditolak oleh network_mode none" if (not reachable and net_blocked) else ("kontainer TIDAK terisolasi: lapis satu-satunya tidak ada" if reachable else "TIDAK ditolak"))
+
+# --- 4. batas dan pembersihan
+r = run("sleep 30", timeout=2)
+report(r["status"] == "timeout" and r["duration_ms"] < 10000, "batas waktu menghentikan perintah", f"status={r['status']} {r['duration_ms']}ms")
+r = run("(sleep 60 &); (setsid sleep 60 &); echo mulai")
+import time  # noqa: E402
+time.sleep(0.5)
+left = executor._children_of(os.getpid())
+report(r["status"] == "ok" and not left, "tidak ada proses sisa (anak yatim + setsid dimatikan)", "bersih" if not left else f"sisa: {left}")
+r = run("head -c 3000000 /dev/zero | tr '\\0' A; echo AKHIR")
+report(r["truncated"] and len(r["stdout"]) < 20000 and r["stdout"].endswith("AKHIR\n"), "keluaran besar dipotong (kepala+ekor)", f"{len(r['stdout'])} karakter diterima")
+
+sys.exit(1 if failed else 0)

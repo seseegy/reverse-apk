@@ -135,7 +135,12 @@ def run_in_thread(turn: Turn, *, cfg: AIConfig, prices: PriceTable, analysis_id:
                             "outputs": [f for f in fmap.get(r["id"], []) if f["role"] == "output"]} for r in rows]
                 uid = store.add_chat_message(conn, session_id, "user", user_text)
                 attached = [dict(f) for f in store.attach_uploads(conn, uid, analysis_id, attachment_ids or [])]
-            ctx = T.ToolContext(analysis_id, work, cfg, db, Redactor(cfg.redact_secrets), files=files)
+            ctx = T.ToolContext(analysis_id, work, cfg, db, Redactor(cfg.redact_secrets), files=files, cancel=turn.cancel)
+            if cfg.shell_enabled:
+                # sha256 APK untuk $APK di bench: dibaca dari DB (BUKAN dari pesan atau argumen model), hanya bila shell menyala.
+                with closing(db()) as conn:
+                    an = store.get_analysis(conn, analysis_id)
+                ctx.bench_sha256 = an["sha256"] if an else None
             res = agent.run_turn(client=Client(cfg), cfg=cfg, prices=prices, ctx=ctx, history=history, user_text=user_text,
                                  model=model, session_id=session_id, emit=emit, cancel=turn.cancel, attachments=attached)
             content = res.content or (res.error or "(tidak ada jawaban)")

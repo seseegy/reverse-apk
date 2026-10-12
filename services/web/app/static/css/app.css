@@ -717,6 +717,19 @@ select:hover { border-color: var(--color-muted-foreground); }
 .tstep-label { overflow-wrap: anywhere; line-height: 1.4; }
 .tstep-sub { display: block; font-size: 0.78rem; color: var(--color-muted-foreground); overflow-wrap: anywhere; }
 .tstep.is-bad .tstep-sub { color: var(--text-danger); }
+/* Daftar langkah punya kotak gulir sendiri (max-height 16rem). Bila SALAH SATU rincian shell dibuka, kotak itu dilepas: kalau tidak, rincian terjepit di dalam
+   kotak gulir kecil dan di dalamnya ada gulir lagi (dua gulir bersarang; label langkah tergulir keluar dari pandangan; di ponsel jari menggulir kotak yang salah). */
+.tsteps:has(.tstep-out[open]) { max-height: none; overflow: visible; }
+/* Rincian perintah shell (terlipat): perintah + keluaran. Teks diisi lewat textContent (app.js). */
+.tstep-out { margin-top: var(--space-1); font-size: 0.78rem; }
+.tstep-out > summary { cursor: pointer; color: var(--color-muted-foreground); width: fit-content; }
+.tstep-out > summary:hover { color: var(--color-foreground); }
+.tstep-out-h { display: block; margin-top: var(--space-2); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--color-muted-foreground); }
+.tstep-pre { margin: var(--space-1) 0 0; padding: var(--space-2); max-height: 12rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.5; background: var(--code-bg); border: 1px solid var(--color-border); border-radius: var(--radius); }
+.tstep-pre:focus-visible { outline: 2px solid var(--color-ring); outline-offset: 1px; }
+.tstep-cmd { border-left: 3px solid var(--color-accent); }
+.tstep-err { border-left: 3px solid var(--text-danger); }
 .tstep-time { font-family: var(--font-mono); font-size: 0.75rem; color: var(--color-muted-foreground); white-space: nowrap; }
 .spin { animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -1020,7 +1033,7 @@ select:hover { border-color: var(--color-muted-foreground); }
     min-height: 44px; display: inline-flex; align-items: center;
   }
   .tree-item, .result-item { min-height: 44px; }
-  .msg-tools > summary, .side-fold > summary, .f-details > summary {
+  .msg-tools > summary, .side-fold > summary, .f-details > summary, .tstep-out > summary {
     min-height: 44px; display: flex; align-items: center;
   }
   /* Penimpa yang sebelumnya mengalahkan aturan 44px */

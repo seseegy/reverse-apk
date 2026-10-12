@@ -1,4 +1,8 @@
-"""Tool BACA-SAJA untuk agent (PRD 05). Model hanya bisa memanggil fungsi di sini; tidak ada shell, jaringan, atau tulis.
+"""Tool untuk agent (PRD 05). Model hanya bisa memanggil fungsi di sini; tidak ada jaringan di proses web.
+
+Hampir semua tool BACA-SAJA. Pengecualian: write_file/edit_file (berkas buatan AI) dan `shell_run` (PRD 09 Bagian C), yang MATI secara bawaan
+(AI_SHELL_ENABLED=0) dan, bila menyala, TIDAK menjalankan apa pun di proses web: perintah dikirim lewat spool ke kontainer `bench` (tanpa jaringan,
+tanpa rahasia; tiap perintah dikurung Landlock dan ditolak bila pengurungan gagal). Lihat rvcore/shellspool.py dan services/bench/.
 
 Prinsip keamanan:
   * `analysis_id` TIDAK pernah datang dari model: terikat pada sesi (objek ToolContext), jadi model tak bisa melompat
@@ -17,12 +21,13 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from rvcore import store
+from rvcore import shellspool, store
 
 from . import redact as redact_mod
 from .config import AIConfig
@@ -53,7 +58,16 @@ class ToolContext:
     pending_images: list[dict[str, Any]] = field(default_factory=list)   # gambar yang diminta lewat view_image, dikirim di pesan berikutnya
     seen_images: set = field(default_factory=set)
     inline_images: set = field(default_factory=set)   # id lampiran gambar yang sudah terkirim inline di pesan
+    cancel: threading.Event | None = None      # diset saat pengguna menekan Batal; tool yang lama (shell_run) memeriksanya
+    ui_detail: dict[str, Any] | None = None    # rincian tool terakhir untuk kartu langkah di UI (perintah + keluaran, SUDAH diredaksi); diambil agent
+    shell_calls: int = 0                       # jumlah shell_run pada giliran ini (batas: cfg.shell_max_calls_per_turn)
+    bench_sha256: str | None = None            # sha256 APK analisis ini (untuk $APK di bench); diisi pemanggil, BUKAN dari model
     _written_seen: int = 0
+
+    def take_detail(self) -> dict[str, Any] | None:
+        """Rincian untuk UI dari tool yang baru dijalankan (sekali ambil)."""
+        d, self.ui_detail = self.ui_detail, None
+        return d
 
     def take_written(self) -> list[dict[str, Any]]:
         """Kejadian tulis-berkas baru sejak pemanggilan terakhir (untuk dikirim ke UI sebagai peristiwa 'file')."""
@@ -843,9 +857,87 @@ def view_image(ctx: ToolContext, args: dict) -> dict:
 
 
 # ---------------------------------------------------------------- registri & skema untuk model
+# ---------------------------------------------------------------- shell (PRD 09 Bagian C)
+def _shell_audit(ctx: ToolContext, detail: dict[str, Any]) -> None:
+    """Catat TANPA isi perintah dan keluaran: perintah bisa memuat rahasia dari APK, dan audit log tidak boleh menjadi kebocoran baru."""
+    try:
+        with closing(ctx.db()) as conn:
+            store.audit(conn, "ai_shell_run", {"analysis_id": ctx.analysis_id, **detail})      # koneksi autocommit
+    except Exception as exc:  # noqa: BLE001 - kegagalan audit tidak boleh menutupi hasil, tetapi harus terlihat di log
+        log.error("audit ai_shell_run gagal: analysis=%s: %s", ctx.analysis_id, type(exc).__name__)
+
+
+def shell_run(ctx: ToolContext, args: dict) -> dict:
+    cfg = ctx.cfg
+    if not cfg.shell_enabled:                                  # lapis kedua: schemas() juga menyembunyikan tool ini
+        raise ToolError("shell_run tidak diaktifkan di server ini")
+    command = _content_arg(args, "command")
+    if not command.strip():
+        raise ToolError("argumen 'command' wajib diisi")
+    if "\x00" in command:
+        raise ToolError("argumen 'command' tidak boleh memuat karakter NUL")
+    if len(command) > shellspool.MAX_COMMAND_CHARS:
+        raise ToolError(f"perintah terlalu panjang ({len(command)} > {shellspool.MAX_COMMAND_CHARS} karakter); tulis skrip dengan write_file "
+                        "atau pecah menjadi beberapa perintah")
+    timeout = min(_int(args, "timeout", cfg.shell_timeout_s, 1), cfg.shell_max_timeout_s)
+    if cfg.shell_max_calls_per_turn and ctx.shell_calls >= cfg.shell_max_calls_per_turn:
+        raise ToolError(f"batas {cfg.shell_max_calls_per_turn} perintah per giliran tercapai; rangkum yang sudah Anda ketahui dan tanyakan "
+                        "kepada pengguna bila perlu lanjut")
+    ctx.shell_calls += 1
+    spool = shellspool.make_spool(cfg.shell_spool_dir)
+    started = time.monotonic()
+    try:
+        # analysis_id dan sha256 HANYA dari konteks sesi, tidak pernah dari argumen model.
+        res = shellspool.run_command(spool, ctx.analysis_id, command, timeout=timeout, sha256=ctx.bench_sha256, cancel=ctx.cancel)
+    except shellspool.BenchUnavailable as exc:
+        _shell_audit(ctx, {"status": "unavailable", "command_chars": len(command)})
+        raise ToolError(exc.message) from None
+    ms = int((time.monotonic() - started) * 1000)
+    status = res["status"]
+    red = ctx.redactor.text
+    budget = max(500, cfg.shell_max_output_chars)
+    out, err = _clip_tail(red(res["stdout"]), budget * 2 // 3), _clip_tail(red(res["stderr"]), budget - budget * 2 // 3)
+    _shell_audit(ctx, {"status": status, "exit_code": res["exit_code"], "command_chars": len(command), "ms": res["duration_ms"] or ms,
+                       "out_chars": len(res["stdout"]) + len(res["stderr"]), "truncated": res["truncated"], "timeout_s": timeout})
+    # Rincian untuk kartu langkah di UI. Perintah juga diredaksi (bisa memuat nilai dari APK). Dibatasi: tersimpan di DB per pesan.
+    ctx.ui_detail = {"command": _clip_tail(red(command), 2000), "stdout": _clip_tail(out, 6000), "stderr": _clip_tail(err, 3000),
+                     "exit_code": res["exit_code"], "status": status}
+    parts = [f"exit {res['exit_code']}" if res["exit_code"] is not None else status, f"{(res['duration_ms'] or ms) / 1000:.1f} dtk"]
+    if res["signal"]:
+        parts.append(f"sinyal {res['signal']}")
+    data: dict[str, Any] = {"ringkas": " · ".join(parts), "status": status, "exit_code": res["exit_code"], "stdout": out, "stderr": err}
+    if res["truncated"] or "karakter dihilangkan]" in out or "karakter dihilangkan]" in err:
+        data["dipotong"] = True
+    if res["message"]:
+        data["catatan"] = red(res["message"])
+    if status in ("refused", "failed", "timeout", "cancelled"):
+        data["ringkas"] = f"{status}: {red(res['message'])[:100]}" if res["message"] else status
+    return data
+
+
+def _clip_tail(text: str, limit: int) -> str:
+    """Pertahankan KEPALA dan EKOR: galat biasanya ada di ujung keluaran."""
+    if len(text) <= limit:
+        return text
+    head = limit * 2 // 3
+    tail = limit - head
+    return text[:head] + f"\n…[{len(text) - head - tail} karakter dihilangkan]…\n" + text[-tail:]
+
+
 TOOLS: dict[str, tuple[Callable[[ToolContext, dict], dict], dict]] = {
     "get_overview": (get_overview, {"description": "Ringkasan aplikasi: paket, versi, jumlah temuan, tanda tangan, jaringan.",
                                     "properties": {}}),
+    "shell_run": (shell_run, {"description": "Jalankan perintah bash di ruang kerja terisolasi (kontainer terpisah: TANPA jaringan, TANPA rahasia, tiap "
+                                             "perintah dikurung). Berguna untuk unzip/grep/sed/awk/find, python3, dan mengubah salinan smali di $WS. "
+                                             "Variabel: $WS = ruang kerja Anda (baca-tulis, awal direktori kerja; tersimpan antar perintah), $WORK = hasil "
+                                             "analisis (HANYA BACA), $APK = berkas APK (baca). Di $WORK hanya apktool/, jadx/, logs/, manifest.json yang "
+                                             "bisa dibuka (path-nya harus disebut langsung; `ls $WORK` ditolak dan itu normal; index/ sengaja tertutup). "
+                                             "Yang tidak mungkin: jaringan, menulis di luar $WS, melihat analisis lain, proses latar yang bertahan setelah perintah selesai. "
+                                             "Keluaran stdout/stderr dipotong (kepala dan ekor) dan secret diredaksi. Bukan tempat menyimpan hasil akhir: "
+                                             "gunakan write_file untuk berkas yang ingin dilihat pengguna.",
+                              "properties": {"command": {"type": "string", "description": "perintah bash (satu skrip pendek boleh, mis. dengan && atau |)"},
+                                             "timeout": {"type": "integer", "description": "batas waktu detik (bawaan 60, maksimum dibatasi server)"}},
+                              "required": ["command"]}),
     "get_manifest": (get_manifest, {"description": "Manifest ter-parse: izin, flag, komponen dan status exported.", "properties": {}}),
     "list_packages": (list_packages, {"description": "Daftar package beserta jumlah class (kode aplikasi).",
                                       "properties": {"prefix": {"type": "string", "description": "awalan package, mis. com.example"},
@@ -934,11 +1026,15 @@ TOOLS: dict[str, tuple[Callable[[ToolContext, dict], dict], dict]] = {
 VISION_ONLY = frozenset({"view_image"})     # tidak ditawarkan ke model yang tidak bisa melihat gambar
 
 
-def schemas(vision: bool = True) -> list[dict]:
+SHELL_ONLY = frozenset({"shell_run"})       # hanya ditawarkan bila AI_SHELL_ENABLED=1
+
+
+def schemas(vision: bool = True, shell: bool = False) -> list[dict]:
     return [{"type": "function", "function": {
         "name": name, "description": spec["description"],
         "parameters": {"type": "object", "properties": spec["properties"], "required": spec.get("required", []),
-                       "additionalProperties": False}}} for name, (_fn, spec) in TOOLS.items() if vision or name not in VISION_ONLY]
+                       "additionalProperties": False}}} for name, (_fn, spec) in TOOLS.items()
+            if (vision or name not in VISION_ONLY) and (shell or name not in SHELL_ONLY)]
 
 
 def run_tool(ctx: ToolContext, name: str, raw_args: str) -> tuple[str, bool]:
@@ -946,7 +1042,8 @@ def run_tool(ctx: ToolContext, name: str, raw_args: str) -> tuple[str, bool]:
 
     Nama tool di luar daftar -> ditolak (model tak bisa memanggil fungsi sembarang).
     """
-    entry: dict[str, Any] = {"tool": name, "args": raw_args[:400]}
+    # shell_run: argumen berisi teks bebas yang bisa memuat nilai rahasia dari APK; jejak giliran tidak boleh menyimpannya mentah.
+    entry: dict[str, Any] = {"tool": name, "args": (ctx.redactor.text(raw_args) if name in SHELL_ONLY else raw_args)[:400]}
     try:
         if name not in TOOLS:
             raise ToolError(f"tool '{name}' tidak ada. Tool yang tersedia: {', '.join(TOOLS)}")

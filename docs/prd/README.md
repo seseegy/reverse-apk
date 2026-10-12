@@ -14,7 +14,7 @@ PRD dibagi per bagian supaya bisa direview dan dikerjakan bertahap.
 | 06 | [Web UI](06-web-ui.md) | Halaman, alur pengguna, kebutuhan UX |
 | 07 | [Infra & Security](07-infra-security.md) | Deploy di VPS, jaringan, isolasi, auth, backup |
 | 08 | [Roadmap](08-roadmap.md) | Milestone, urutan kerja, definisi selesai |
-| 09 | [Paket multi-APK & bengkel](09-bundles-and-workbench.md) | XAPK/APKS **sudah** (hanya base APK); **rencana**: APKM/AAB, membangun & menandatangani APK, shell AI di kontainer terpisah |
+| 09 | [Paket multi-APK & bengkel](09-bundles-and-workbench.md) | **Sudah**: XAPK/APKS (hanya base APK) dan shell AI `shell_run` di kontainer `bench` (mati secara bawaan). **Rencana**: APKM/AAB, membangun & menandatangani APK |
 | 10 | [Penyimpanan](10-storage.md) | Halaman Penyimpanan: melihat pemakaian disk, membersihkan, dan menjelajah folder (hanya baca) — selesai |
 
 ## Konvensi
