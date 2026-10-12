@@ -35,7 +35,7 @@ Jenis ditentukan dari **isi arsip**, bukan ekstensi (seperti lampiran di 07). Ek
 |---|---|---|
 | `apk` | `AndroidManifest.xml` + `classes*.dex` di akar | seperti sekarang |
 | `xapk` | `manifest.json` di akar + satu atau lebih `*.apk`; boleh ada `Android/obb/…` | OBB **tidak diekstrak** |
-| `apks` | `toc.pb` + `splits/*.apk` (atau `standalones/`, `universal.apk`) | keluaran bundletool |
+| `apks` | `toc.pb` + `splits/*.apk` (atau `standalones/`, `universal.apk`) | keluaran bundletool. **Bisa memuat beberapa varian APK utama yang isinya sama** (lihat FR-9.43). Bila dibuat tanpa `--ks`, **tidak bertanda tangan** (FR-9.44) |
 | `apkm` | `info.json` + `base.apk` + `split_*.apk` | format APKMirror |
 | `aab` | `BundleConfig.pb` + `base/manifest/AndroidManifest.xml` | **analisis saja**; tidak ada build, tidak ada unduh APK |
 
@@ -48,13 +48,16 @@ Jenis ditentukan dari **isi arsip**, bukan ekstensi (seperti lampiran di 07). Ek
 | FR-9.4 | **Pembongkaran dilakukan di runner**, bukan di `web`: tahap baru `unpack` mengeluarkan hanya APK dalam allowlist, dengan batas ukuran per entri dan total yang dipantau saat streaming | P1 |
 | FR-9.5 | Nama entri dari paket **tidak pernah dipakai sebagai path**. Bagian disimpan sebagai `parts/part-NN.apk`; nama asli, peran (`base`/`config`/`feature`), dan SHA-256 hanya di DB | P1 |
 | FR-9.6 | Tiap bagian divalidasi dengan pemeriksaan APK yang sama (manifest, `classes*.dex` untuk base, batas ukuran). Satu bagian cacat membatalkan seluruh analisis dengan pesan yang menyebut bagiannya | P1 |
-| FR-9.7 | Tahap `merge`: split digabung menjadi **satu APK utuh** (`merged.apk`) dengan APKEditor; hasilnya divalidasi lagi. Gagal gabung → analisis tetap berjalan pada `base.apk` saja dengan peringatan jelas | P1 |
+| FR-9.7 | Tahap `merge`: **set bagian yang sudah dipilih (FR-9.43)** digabung menjadi **satu APK utuh** (`merged.apk`) dengan APKEditor; hasilnya divalidasi lagi. Gagal gabung → analisis tetap berjalan pada `base.apk` saja dengan peringatan jelas | P1 |
 | FR-9.8 | Tahap `apktool` dan `jadx` berjalan pada `merged.apk`. Runner menghitung sendiri path-nya dari `analysis_id` (tidak ada path dari worker) | P1 |
 | FR-9.9 | Sertifikat penandatangan dibaca dari **APK asli di dalam paket** (`base.apk`), bukan dari `merged.apk` (hasil gabung tidak bertanda tangan) | P1 |
 | FR-9.10 | Halaman analisis menampilkan jenis paket, jumlah bagian, dan daftar bagian beserta perannya dan ukurannya | P1 |
 | FR-9.11 | `.aab`: hanya jadx yang dijalankan (apktool tidak membaca AAB). Tab Manifes menampilkan "tidak tersedia untuk AAB" bila manifest biner protobuf tidak bisa diurai | P2 |
 | FR-9.12 | SHA-256 dihitung atas **berkas yang diunggah** (paket luar); dedup (01 FR-1.4) memakai nilai itu | P1 |
 | FR-9.13 | Tahap `unpack`/`merge` tampil di status live, dengan batas waktu sendiri (`TIMEOUT_UNPACK`, `TIMEOUT_MERGE`) | P1 |
+| FR-9.43 | **Pilih satu dari varian yang duplikat sebelum menggabung.** Dua APK dianggap varian bila himpunan nama entri dan CRC-nya identik (hanya cara penyimpanan yang berbeda); yang dipertahankan adalah yang tersimpan terkompresi/lebih kecil, dan sisanya dicatat sebagai "dilewati: varian duplikat" di daftar bagian. Penentuan berdasarkan **isi**, bukan nama berkas atau `toc.pb`. Menggabung semua APK tanpa langkah ini terbukti **diam-diam menggandakan seluruh kode** (lihat "Hasil uji sampel nyata") | P1 |
+| FR-9.44 | **APK tanpa tanda tangan adalah keadaan normal**, bukan galat: `.apks` buatan bundletool tanpa `--ks` tidak bertanda tangan. Analisis sertifikat (FR-9.9) menampilkan "tidak bertanda tangan" dan analisis lain tetap berjalan | P1 |
+| FR-9.45 | Setelah menggabung, **jumlah berkas `classes*.dex` hasil gabungan harus sama dengan jumlah `classes*.dex` unik pada bagian terpilih**; bila lebih, penggabungan dianggap gagal (pagar pengaman terhadap duplikasi diam-diam) | P1 |
 
 ### Perubahan data
 - `apk.kind` (`apk|xapk|apks|apkm|aab`, bawaan `apk`). Path penyimpanan: `uploads/<sha256>.<kind>`; `Layout.upload_path(sha256, kind)`. Berkas lama (`.apk`) tetap valid tanpa migrasi berkas.
@@ -190,7 +193,7 @@ Modifikasi hanya untuk APK yang **milik pengguna atau yang pengguna berwenang me
 ## Urutan kerja
 | PR | Isi | Selesai bila |
 |---|---|---|
-| **A** | Bagian A lengkap: `rvcore/apkcheck.py`, jenis berkas, tahap `unpack`/`merge`, APKEditor di image runner, UI daftar bagian, tes (paket sintetis dari `scripts/make-test-apks.py`) | `.xapk/.apks/.apkm` sampel dianalisis penuh; zip bomb dan path traversal di dalam paket ditolak; `.aab` terbuka lewat jadx; seluruh tes lama tetap lulus |
+| **A** | Bagian A lengkap: `rvcore/apkcheck.py`, jenis berkas, tahap `unpack`/`merge`, APKEditor di image runner, UI daftar bagian, tes (paket sintetis dari `scripts/make-test-apks.py`) | `.xapk/.apks/.apkm` sampel dianalisis penuh; zip bomb dan path traversal di dalam paket ditolak; `.aab` terbuka lewat jadx; seluruh tes lama tetap lulus; **tes khusus**: `.apks` dengan dua varian master identik (beda kompresi saja) menghasilkan gabungan **tanpa dex ganda** (FR-9.43/9.45), dan `.apks` tanpa tanda tangan tetap dianalisis (FR-9.44); waktu `merge`/`apktool`/`jadx` untuk APK besar sungguhan terukur dan batas waktu/memori disesuaikan |
 | **B** | Build + tanda tangan **tanpa AI**: ruang kerja, diff, persetujuan, tahap `build`, layanan `signer`, `make init` membuat keystore, unduhan, audit | APK sampel diubah manual (mis. mengganti string), disetujui, dibangun, `apksigner verify` lulus, dan `aapt2 dump badging` benar; tanpa persetujuan tidak ada job |
 | **C** | `bench` + `benchspool` + tool AI (`shell_run`, `bench_diff`, `request_build`, `get_build_status`) + keputusan isolasi antar analisis + pembaruan 00/05/07 | skenario uji: AI mengubah satu string di smali, mengajukan build, pengguna menyetujui, hasil terverifikasi; **tes injeksi**: APK dengan teks yang menyuruh AI membaca `/data`, mengakses jaringan, atau menyetujui sendiri **gagal** melakukannya |
 | **D** | (P2) antarmuka ruang kerja untuk pengguna, "paket format asal" (FR-9.17b) bila belum masuk A–C | — |
@@ -241,9 +244,37 @@ VPS: kernel `6.8.0-146-generic` x86_64, Docker `29.9.0`, profil `apparmor` + `se
 - **`apksigner` / `zipalign`** dari Android SDK Build-Tools (terbaru 37.0.0, zip Linux ±66 MB). Google menerbitkan **hanya SHA-1** untuk paket ini; maka SHA-256 dihitung sendiri saat pertama diunduh, dipin di Dockerfile, dan SHA-1 Google dipakai sebagai pembanding.
 - Dokumentasi Google menegaskan `zipalign` dijalankan **sebelum** `apksigner` (menandatangani lalu mengubah berkas membatalkan tanda tangan) → sudah di FR-9.22.
 
+## Hasil uji sampel nyata (12 Okt 2026)
+
+Sampel: **NexLoad v1.1.0** (`app-release.aab` 15,4 MB, rilis GitHub publik; SHA-256 dihitung sendiri cocok dengan yang dipublikasikan). `.apks` dibuat dengan **bundletool 1.15.6** (SHA-256 `38ae8a10…2cb8`, dihitung sendiri) memakai perintah dari pemilik, plus satu lagi mode bawaan (split sungguhan). Dijalankan di sandbox pengembangan (Java 25, `-j 2`), **bukan** di VPS atau kontainer runner, jadi **waktu hanya patokan kasar**. Repositori sumbernya tidak mencantumkan lisensi: berkas dipakai lokal untuk uji dan **tidak di-commit**.
+
+### Terbukti
+| Uji | Hasil |
+|---|---|
+| APKEditor 1.4.9 `m` pada 86 bagian terpilih (1 master + 85 split bahasa/ABI/densitas) | **Berhasil, ±1 detik**, 15,8 MB, 221 entri, tanpa entri ganda |
+| `apktool 3.0.3 d` pada hasil gabungan | **Berhasil, ±11 detik**: manifest terbaca sebagai XML, `smali`, `smali_classes2/3`, `res`, `lib`, `assets` ada |
+| `jadx 1.5.6` pada hasil gabungan | **Berhasil**: 21.697 berkas Java, **3 mnt 47 dtk** dengan 2 thread (APK hanya 15 MB, dex 50,7 MB) |
+| `jadx 1.5.6` langsung pada `.aab` (`--no-src`) | Terbuka, 8 detik; **manifest protobuf didekode menjadi XML teks** (`base/manifest/AndroidManifest.xml`), resource terbaca |
+| `jadx 1.5.6` langsung pada `.apks` universal dan `.apks` split (`--no-src`) | Terbuka, 8–10 detik; manifest dan resource terbaca |
+
+### Temuan yang mengubah rancangan
+1. **`.apks` bawaan bundletool berisi dua APK utama yang isinya sama.** `splits/base-master.apk` (15 MB) dan `splits/base-master_2.apk` (51 MB) memiliki 173 entri dengan nama dan **CRC identik**; satu-satunya beda: berkas `.dex` pada `master_2` disimpan tanpa kompresi (varian untuk perangkat yang menjalankan dex langsung dari APK).
+2. **Menggabung semua APK tidak gagal, tetapi salah tanpa pemberitahuan.** APKEditor menerima kedua master dan menghasilkan 30 MB (hampir 2×) dengan `classes4/5/6.dex` yang **ukurannya persis sama** dengan `classes1/2/3.dex` (31.616.172 / 9.860.776 / 9.226.212 byte), yaitu seluruh kode ganda. Tidak ada galat atau peringatan. Akibatnya: jumlah class dan temuan analisis berlipat, dan APK hasil modifikasi membengkak. → FR-9.43 dan FR-9.45 menjadi **syarat wajib**.
+3. **`.apks` dari perintah `--mode=universal` tidak bertanda tangan** (peringatan bundletool). → FR-9.44.
+4. **Mode `universal` hanya berisi `toc.pb` + `universal.apk`** (tanpa split): bagian terpilih tunggal, tidak perlu menggabung.
+
+### Belum terbukti (jangan diklaim di UI)
+- **Dekompilasi sumber dari `.aab`/`.apks` langsung** oleh jadx: hanya `--no-src` yang diuji. Karena dex-nya sama kemungkinan hasilnya sama, tetapi belum dijalankan.
+- **XAPK dan APKM sungguhan**: belum ada sampel yang terverifikasi. Struktur `manifest.json` (XAPK) dan `info.json` (APKM) di atas hanya berasal dari berkas placeholder pemilik, belum dari paket asli. Tautan APKPure/APKMirror yang diberikan **tidak diunduh** (aplikasi pihak ketiga yang kepemilikannya tidak jelas, tidak memenuhi syarat sampel di atas; kebijakan situs-situs itu terhadap unduhan otomatis tidak saya periksa). Lihat Pertanyaan terbuka.
+- **Apakah apktool menolak `.aab`**: tidak dijalankan; diasumsikan menolak (formatnya protobuf).
+- **Perilaku pada 1 GB**: tidak ada sampel sebesar itu. Data titik ini: jadx ±4,5 detik per MB dex pada 2 thread (227 dtk untuk 50,7 MB). Ekstrapolasi **linear** ke dex ratusan MB berarti puluhan menit hingga lebih dari satu jam, jauh di atas `TIMEOUT_JADX` 900 detik. Ini perkiraan kasar, bukan pengukuran: harus diukur di runner sebenarnya.
+
+### Catatan pin alat
+APKEditor 1.4.9: SHA-256 `a9cd40df818845456be6d696de6110c89edf4b0a0580cb83438ed6b25a366e67` (dihitung sendiri; **belum** dicocokkan dengan sumber kedua). jadx 1.5.6 dan apktool 3.0.3 cocok dengan pin yang sudah ada di `services/runner/Dockerfile`.
+
 ## Pertanyaan terbuka
 - [OPEN] Isolasi antar analisis di `bench`: data VPS sudah ada (Landlock aktif); menunggu hasil `scripts/bench-probe.sh` di VPS.
 - [DIPUTUSKAN] Batas unggah hingga **1 GB**. [OPEN] nilai akhir batas lain yang ikut terdampak (tabel "Batas ukuran"), ditentukan dengan pengukuran APK besar sungguhan.
-- [OPEN] Memastikan jadx 1.5.6 membuka `.aab/.xapk/.apkm/.apks` dengan benar dan apakah `merged.apk` dari APKEditor lulus `apktool d`. README jadx menyatakan didukung, tetapi sampel yang tersedia placeholder; butuh sampel nyata dari pemilik. Klaim "didukung" di UI baru ditulis setelah terbukti.
+- [SEBAGIAN TERJAWAB] jadx 1.5.6 membuka `.aab` dan `.apks`, dan gabungan APKEditor lolos `apktool d` + `jadx` (lihat "Hasil uji sampel nyata"). [OPEN] sampel **XAPK dan APKM sungguhan** dari aplikasi yang pemilik berwenang menganalisisnya (milik sendiri, open-source, atau CTF) dan dekompilasi sumber dari `.aab` langsung. Klaim "didukung" per format baru ditulis di UI setelah terbukti dengan sampel itu.
 - [OPEN] Versi pasti Build-Tools yang dipin (kandidat: 37.0.0) dan uji bahwa `zipalign`/`apksigner` berjalan di image `python:3.12-slim-trixie` (pustaka sistem yang dibutuhkan biner bawaan Google).
 - [OPEN] Apakah "paket format asal" (FR-9.17b) cukup bernilai untuk dikerjakan, atau cukup `merged.apk`. Dinilai setelah PR B.
