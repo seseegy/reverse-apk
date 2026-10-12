@@ -1128,3 +1128,34 @@ select:hover { border-color: var(--color-muted-foreground); }
   /* Tautan nama setinggi 44px (target sentuh) membuat teksnya turun; angka rata-atas jadi tampak lebih tinggi. Ratakan di tengah. */
   .storage-table tbody td { vertical-align: middle; }
 }
+
+/* =====================================================================
+   Penjelajah folder (PRD 10, tahap 3)
+   ===================================================================== */
+.crumbs ol { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) 0; font-size: 0.9rem; }
+.crumbs li { display: inline-flex; align-items: center; min-width: 0; }
+.crumbs li + li::before { content: "/"; color: var(--color-muted-foreground); padding-inline: var(--space-2); }       /* pemisah dekoratif: bukan teks yang dibaca */
+.crumbs a { color: var(--color-muted-foreground); }
+.crumbs a:hover { color: var(--color-foreground); }
+.crumbs [aria-current="page"] { color: var(--color-foreground); font-weight: 600; overflow-wrap: anywhere; }
+.entry-dir, .entry-file { display: inline-flex; align-items: center; gap: var(--space-2); }
+.entry-dir { font-weight: 600; }
+.entry-file { font-weight: 400; }
+.roots-list li { align-items: center; }
+.browse-table .cell-action { white-space: nowrap; text-align: right; }
+.browse-table .cell-action .btn + .btn { margin-left: var(--space-1); }
+.browse-pre { margin: 0; padding: var(--space-3); max-height: 32rem; overflow: auto; white-space: pre; font-family: var(--font-mono); font-size: 13px; line-height: 1.55; }
+.browse-pre code { font: inherit; }
+@media (pointer: coarse), (max-width: 640px) {
+  .crumbs a { min-height: 44px; display: inline-flex; align-items: center; }       /* sama dengan kontrol mandiri lain: terukur 22px sebelumnya */
+}
+.browse-table .cell-name { min-width: 8rem; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  /* Ponsel: kolom tanggal disembunyikan dan tombol jadi ikon (nama aksinya tetap ada di aria-label) supaya nama berkas tidak terhimpit. */
+  .browse-table th:nth-child(3), .browse-table td:nth-child(3) { display: none; }
+  .browse-table .cell-action { white-space: normal; width: 1%; }
+  .browse-table .cell-name { min-width: 6rem; }
+  .browse-table .cell-action .btn { margin: 0 0 var(--space-1) 0; padding-inline: 0; min-width: 44px; justify-content: center; }
+  .browse-table .cell-action .btn + .btn { margin-left: 0; }
+  .browse-table .cell-action .btn span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+}

@@ -133,6 +133,38 @@
     });
   });
 
+  // Penjelajah folder (halaman Penyimpanan): pratinjau teks satu berkas di panel. Isi berasal dari disk (tidak tepercaya): HANYA textContent.
+  (function () {
+    var panel = $("#browse-preview");
+    if (!panel) return;
+    var codeEl = $("[data-browse-text]", panel), metaEl = $("[data-browse-meta]", panel), title = $("#preview-title", panel);
+    var seq = 0;
+    function show(name, meta, text) {
+      title.textContent = name;
+      metaEl.textContent = meta;
+      codeEl.textContent = text;
+      panel.hidden = false;
+      panel.scrollIntoView({ block: "nearest" });
+    }
+    $all("[data-browse-view]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var my = ++seq;                                   // klik beruntun: hanya jawaban terakhir yang ditampilkan
+        var q = "akar=" + encodeURIComponent(btn.getAttribute("data-root")) + "&jalur=" + encodeURIComponent(btn.getAttribute("data-path"));
+        show(btn.getAttribute("data-path").split("/").pop(), "Memuat…", "");
+        fetch("/storage/jelajah/lihat?" + q, { credentials: "same-origin", cache: "no-store" }).then(readJson).then(function (res) {
+          if (my !== seq) return;
+          var d = res.d;
+          if (!res.ok) { show(btn.getAttribute("data-path").split("/").pop(), d.error || "Gagal memuat.", ""); return; }
+          if (d.binary) { show(d.name, fmtBytes(d.size) + " · berkas biner, tidak ditampilkan. Gunakan Unduh.", ""); return; }
+          show(d.name, fmtBytes(d.size) + " · " + fmtNum(d.lines) + " baris" + (d.truncated ? " · DIPOTONG, hanya awal berkas yang ditampilkan; gunakan Unduh untuk seluruhnya" : ""), d.text);
+          codeEl.parentNode.focus();
+        }, function () { if (my === seq) show(btn.getAttribute("data-path").split("/").pop(), "Koneksi gagal. Periksa jaringan.", ""); });
+      });
+    });
+    var close = $("[data-browse-close]", panel);
+    if (close) close.addEventListener("click", function () { seq++; panel.hidden = true; codeEl.textContent = ""; });
+  })();
+
   // Waktu server (UTC) -> zona waktu browser. Teks UTC tetap sebagai cadangan tanpa JS.
   $all("time[data-local]").forEach(function (el) {
     var d = new Date(el.getAttribute("datetime"));
