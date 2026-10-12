@@ -1042,3 +1042,81 @@ select:hover { border-color: var(--color-muted-foreground); }
 .pager-info { text-align: center; }
 .pager-page { white-space: nowrap; }
 .pager [aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+
+/* =====================================================================
+   Penyimpanan (PRD 10) — bilah komposisi, legenda, tautan urut
+   ===================================================================== */
+
+/* Bilah bersegmen. Lebar tiap segmen diisi app.js dari data-pct (atribut style="" inline diblokir CSP). Celah 2px antar-segmen dan
+   latar --color-muted membuat batas terlihat tanpa bergantung pada warna saja. */
+.stackbar {
+  display: flex; gap: 2px; height: 16px; border-radius: 8px; overflow: hidden;
+  background: var(--color-muted); border: 1px solid var(--color-border-control);
+}
+.stackbar-seg { display: block; height: 100%; flex: 0 1 auto; min-width: 4px; transition: width 200ms ease; }
+/* Template tidak menggambar segmen < 0,1%: ia tetap ada di legenda dan di label aksesibel bilah, tetapi tidak menjadi serpihan. */
+
+/* Warna + POLA: pembeda kedua, supaya segmen tetap terbedakan tanpa warna (kontras non-teks >= 3:1 terhadap latar card). */
+.seg-apk, .seg-app { background: var(--text-info); }
+.seg-decompile { background: var(--text-ok); }
+.seg-files { background: repeating-linear-gradient(45deg, var(--text-info) 0 4px, transparent 4px 7px); }
+.seg-db { background: var(--color-muted-foreground); }
+.seg-tmp { background: repeating-linear-gradient(135deg, var(--text-warn) 0 4px, transparent 4px 7px); }
+.seg-other { background: var(--color-muted-foreground); }
+.seg-reserved { background: repeating-linear-gradient(45deg, var(--color-muted-foreground) 0 3px, transparent 3px 6px); }
+.seg-free { background: transparent; }
+
+.legend { list-style: none; margin: 0; padding: 0; display: grid; }
+.legend-row {
+  display: grid; grid-template-columns: 18px minmax(0, 1fr) auto 4.5rem; gap: var(--space-3); align-items: center;
+  padding-block: var(--space-2); border-top: 1px solid var(--color-border);
+}
+.legend-row:first-child { border-top: 0; }
+.legend-name { min-width: 0; overflow-wrap: anywhere; }
+.legend-name .chip { margin-left: 0; white-space: nowrap; }        /* penanda tidak boleh patah di dalam kotaknya; ia pindah baris sebagai satu kesatuan */
+.legend-size { white-space: nowrap; }
+.legend-pct { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.legend-total { font-weight: 600; }
+.swatch { width: 18px; height: 12px; border-radius: 3px; border: 1px solid var(--color-border-control); display: block; }
+.legend-total .swatch { visibility: hidden; }
+
+/* Judul kolom yang bisa diurutkan: tautan biasa (tanpa JS), jadi bekerja dengan keyboard dan pembaca layar. */
+.sort-link {
+  display: inline-flex; align-items: center; min-height: 32px; color: inherit;
+  text-transform: inherit; letter-spacing: inherit;
+}
+.sort-link { text-decoration: underline dotted; text-underline-offset: 4px; text-decoration-color: var(--color-muted-foreground); }
+.sort-link:hover { color: var(--color-foreground); text-decoration-style: solid; text-decoration-color: currentColor; }
+.sort-link[aria-current="true"] { color: var(--color-foreground); text-decoration: underline solid; text-decoration-color: var(--color-accent); text-decoration-thickness: 2px; }
+.table thead th.num .sort-link { justify-content: flex-end; }
+/* Tabel penyimpanan: angka tidak boleh patah ("15,1 / MB"); di layar sempit tabel yang bergulir (.table-wrap), bukan isinya yang dipaksa muat. */
+.storage-table td.num, .storage-table th.num { white-space: nowrap; }
+.storage-table .cell-name { min-width: 13rem; }
+
+.codeblock-bar .btn { flex: none; }
+.codeblock pre code { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+/* .codeblock membawa margin-bawah untuk pesan chat; di halaman ini dalam kartu bergrid (gap sudah mengatur jarak), jadi margin-nya dihapus. */
+.card > .codeblock { margin: 0; }
+.card-foot > p { margin: 0; }
+
+@media (max-width: 640px) {
+  .legend-row { grid-template-columns: 18px minmax(0, 1fr) auto auto; gap: var(--space-2); }
+  .legend-pct { min-width: 3.4rem; }
+}
+
+/* Header di ponsel: tiga tautan + nama merek + tombol keluar butuh ±400px (terukur), lebih lebar dari layar 375/390px. Menu bisa digulir
+   (pola yang sama dengan .tabs) dan "Keluar" hanya ikon; nama aksesibelnya tetap lewat aria-label. */
+@media (max-width: 640px) {
+  .header-row { gap: var(--space-3); }
+  .header-row nav { min-width: 0; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; gap: var(--space-3); }
+  .header-row nav::-webkit-scrollbar { display: none; }
+  .header-row nav a { white-space: nowrap; flex: none; }
+  .header-user .btn-label { display: none; }
+  .header-user .btn { padding-inline: var(--space-3); }
+  .brand { flex: none; }
+}
+@media (pointer: coarse), (max-width: 640px) {
+  .sort-link { min-height: 44px; }
+  /* Tautan nama setinggi 44px (target sentuh) membuat teksnya turun; angka rata-atas jadi tampak lebih tinggi. Ratakan di tengah. */
+  .storage-table tbody td { vertical-align: middle; }
+}

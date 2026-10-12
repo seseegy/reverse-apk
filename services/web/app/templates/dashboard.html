@@ -107,7 +107,7 @@
         </span>
         <span class="status-main">
           <span class="status-label">{{ c.label }}</span>
-          <span class="status-detail muted">{{ c.detail }}</span>
+          <span class="status-detail muted">{{ c.detail }}{% if c.key == 'disk' %} · <a class="link-quiet" href="/storage">Lihat rincian penyimpanan</a>{% endif %}</span>
         </span>
         <span class="status-word">
           {{ {'ok': 'Normal', 'error': 'Masalah', 'warn': 'Perhatian', 'pending': 'Menunggu'}[c.state] }}

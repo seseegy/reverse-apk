@@ -1,0 +1,288 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_parts.html" import status_badge, time_el, notice_box %}
+{% block title %}Penyimpanan · reverse-apk{% endblock %}
+
+{% block header %}{% include "_header.html" %}{% endblock %}
+
+{#- Persen untuk legenda: nilai > 0 yang membulat ke 0,0 ditulis "<0,1%" (bukan "0,0%" yang menyiratkan kosong). -#}
+{% macro pct_text(seg) -%}{% if seg.bytes > 0 and seg.pct < 0.1 %}&lt;0,1%{% else %}{{ seg.pct|num(1) }}%{% endif %}{%- endmacro %}
+
+{#- Satu baris legenda untuk bilah komposisi: penanda + nama + ukuran + persen. Penanda berbeda BENTUK/POLA selain warna. -#}
+{% macro legend_row(seg, cls) -%}
+<li class="legend-row">
+  <span class="swatch seg-{{ cls }}" aria-hidden="true"></span>
+  <span class="legend-name">{{ seg.label }}{% if seg.regen %} <span class="chip chip-plain" title="Bisa dibuat ulang lewat Analisis ulang">bisa dibuat ulang</span>{% endif %}</span>
+  <span class="legend-size mono num">{{ seg.bytes|bytes }}</span>
+  <span class="legend-pct muted num">{{ pct_text(seg) }}</span>
+</li>
+{%- endmacro %}
+
+{% macro sort_th(key, label, current, extra='') -%}
+<th scope="col" class="{{ extra }}" aria-sort="{{ 'descending' if (current == key and key != 'nama') else ('ascending' if current == key else 'none') }}">
+  <a class="sort-link" href="/storage?urut={{ key }}" {% if current == key %}aria-current="true"{% endif %}>{{ label }}{% if current == key %}<span class="sr-only"> (diurutkan)</span>{% endif %}</a>
+</th>
+{%- endmacro %}
+
+{% block content %}
+<div class="container page">
+  <div class="page-head">
+    <h1>Penyimpanan</h1>
+    <form method="post" action="/storage/scan" class="page-actions" data-submit-lock>
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit" class="btn btn-primary">{{ icon('refresh', 16) }}<span>{{ 'Periksa ulang disk' if scan else 'Periksa disk' }}</span></button>
+    </form>
+  </div>
+
+  {{ notice_box(notice) }}
+
+  {#- ===================== 1. Disk server ===================== -#}
+  {% if host %}
+  <section class="card" aria-labelledby="host-title">
+    <div class="card-head">
+      <h2 id="host-title">Disk server</h2>
+      <span class="muted hint">{{ host.used_pct|num }}% terpakai</span>
+    </div>
+
+    <p class="summary summary-{{ 'error' if host.free_pct < 15 else 'ok' }}" role="status" aria-atomic="true">
+      {{ icon('alert-triangle' if host.free_pct < 15 else 'check-circle') }}
+      <span>{{ host.free|bytes }} bebas dari {{ host.total|bytes }}</span>
+    </p>
+
+    <div class="stackbar" role="img"
+         aria-label="Disk server: {% for s in host.segments %}{{ s.label }} {{ s.bytes|bytes }} ({{ s.pct|num(1) }}%){{ '; ' if not loop.last }}{% endfor %}">
+      {% for s in host.segments %}{% if s.bytes > 0 and s.pct >= 0.1 %}<span class="stackbar-seg seg-{{ s.key }}" data-pct="{{ s.pct }}"></span>{% endif %}{% endfor %}
+    </div>
+    <ul class="legend">
+      {% for s in host.segments %}
+      <li class="legend-row">
+        <span class="swatch seg-{{ s.key }}" aria-hidden="true"></span>
+        <span class="legend-name">{{ s.label }}</span>
+        <span class="legend-size mono num">{{ s.bytes|bytes }}</span>
+        <span class="legend-pct muted num">{{ pct_text(s) }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+
+    <p class="muted hint">
+      Kartu “Disk data” di Beranda mengukur <strong>seluruh disk server</strong>, bukan hanya data aplikasi. Bagian “hal lain” (sistem, image Docker,
+      cache build, log) tidak terlihat dari web: lihat <a href="#panduan">Panduan server</a>.
+      {% if app_estimated %}Bagian “dipakai aplikasi” masih <strong>perkiraan dari catatan database</strong>; tekan <em>Periksa disk</em> untuk ukuran sebenarnya.{% endif %}
+      “Cadangan sistem berkas” dihitung dari selisih total, terpakai, dan bebas; biasanya ruang yang disisihkan sistem berkas untuk administrator.
+    </p>
+  </section>
+  {% endif %}
+
+  {#- ===================== 2. Isi penyimpanan aplikasi ===================== -#}
+  <section class="card" aria-labelledby="comp-title">
+    <div class="card-head">
+      <h2 id="comp-title">Isi penyimpanan aplikasi</h2>
+      <span class="muted hint">
+        {% if scan %}Ukuran di disk · diperiksa {{ time_el(scan.taken_at) }} ({{ scan.seconds|num(1) }} dtk){% else %}Dari catatan database{% endif %}
+      </span>
+    </div>
+
+    {% if scan_failed %}
+    <div class="alert alert-error" role="status">{{ icon('alert-triangle') }}<span>Pemeriksaan disk terakhir gagal, jadi yang tampil adalah catatan database. Coba lagi, atau lihat log server.</span></div>
+    {% endif %}
+    {% if scan and scan.partial %}
+    <div class="alert alert-warn" role="status">{{ icon('alert-triangle') }}
+      <span>Pemeriksaan berhenti sebelum selesai (batas waktu atau jumlah berkas terlampaui), jadi angka di bawah adalah <strong>batas bawah</strong>.</span></div>
+    {% endif %}
+
+    {% if comp.known %}
+    <div class="stackbar" role="img"
+         aria-label="Komposisi penyimpanan aplikasi: {% for s in comp.segments %}{{ s.label }} {{ s.bytes|bytes }} ({{ s.pct|num(1) }}%){{ '; ' if not loop.last }}{% endfor %}">
+      {% for s in comp.segments %}{% if s.bytes > 0 and s.pct >= 0.1 %}<span class="stackbar-seg seg-{{ s.key }}" data-pct="{{ s.pct }}"></span>{% endif %}{% endfor %}
+    </div>
+    <ul class="legend">
+      {% for s in comp.segments %}{{ legend_row(s, s.key) }}{% endfor %}
+      <li class="legend-row legend-total">
+        <span class="swatch" aria-hidden="true"></span>
+        <span class="legend-name">Total</span>
+        <span class="legend-size mono num">{{ comp.known|bytes }}</span>
+        <span class="legend-pct"></span>
+      </li>
+    </ul>
+    {% else %}
+    <p class="muted">Belum ada data yang tersimpan.</p>
+    {% endif %}
+
+    {% if not scan %}
+    <p class="muted hint">Database dan sisa sementara baru muncul setelah <em>Periksa disk</em>. Angka dari catatan database tidak mencakup log, indeks, atau berkas yang tidak tercatat.</p>
+    {% endif %}
+  </section>
+
+  {#- ===================== 3. Per APK ===================== -#}
+  <section class="card" aria-labelledby="apk-title">
+    <div class="card-head">
+      <h2 id="apk-title">Per APK</h2>
+      <span class="muted hint" role="status" aria-atomic="true">{{ data.count|num }} APK</span>
+    </div>
+
+    {% if items %}
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Penyimpanan per APK (gulir horizontal bila perlu)">
+      <table class="table storage-table">
+        <thead>
+          <tr>
+            {{ sort_th('nama', 'Nama', sort) }}
+            {{ sort_th('total', 'Total', sort, 'num') }}
+            <th scope="col" class="num">APK asli</th>
+            {{ sort_th('dekompilasi', 'Hasil dekompilasi', sort, 'num') }}
+            <th scope="col" class="num">Lampiran &amp; AI</th>
+            {% if scan %}<th scope="col" class="num" title="Ukuran sebenarnya di disk untuk hasil dekompilasi + lampiran">Di disk</th>{% endif %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for it in items %}
+          <tr>
+            <th scope="row" class="cell-name">
+              {% if it.analysis_id %}<a href="/analyses/{{ it.analysis_id }}">{{ it.name }}</a>{% else %}{{ it.name }}{% endif %}
+              {% if it.name != it.file %}<span class="muted file-sub">{{ it.file }}</span>{% endif %}
+              {% if it.active %}<span class="file-sub">{{ status_badge(it.status) }} <span class="muted">ukuran belum final</span></span>{% endif %}
+            </th>
+            <td class="num mono"><strong>{{ it.total|bytes }}</strong></td>
+            <td class="num mono">{{ it.apk|bytes }}</td>
+            <td class="num mono">{{ it.decompile|bytes }}</td>
+            <td class="num mono">{{ it.files|bytes }}{% if it.files_count %}<span class="muted file-sub">{{ it.files_count|num }} berkas</span>{% endif %}</td>
+            {% if scan %}<td class="num mono">{{ it.on_disk|bytes }}</td>{% endif %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="muted hint">
+      <strong>Hasil dekompilasi</strong> bisa dibuat ulang lewat <em>Analisis ulang</em> selama APK aslinya masih ada. APK asli, lampiran, dan hasil AI
+      <strong>tidak</strong> bisa dibuat ulang. Angka dari catatan database; kolom “Di disk” (setelah <em>Periksa disk</em>) adalah ukuran sebenarnya.
+    </p>
+    {% else %}
+    <div class="empty">
+      <div class="empty-icon">{{ icon('archive', 28) }}</div>
+      <h3>Belum ada APK</h3>
+      <p class="muted">Setelah Anda mengunggah APK, ukuran masing-masing akan tampil di sini.</p>
+    </div>
+    {% endif %}
+  </section>
+
+  {#- ===================== 4. Konsistensi ===================== -#}
+  <section class="card" aria-labelledby="cons-title">
+    <div class="card-head">
+      <h2 id="cons-title">Pemeriksaan konsistensi</h2>
+    </div>
+
+    {% if not scan %}
+    <p class="muted">Tekan <em>Periksa disk</em> untuk mencocokkan catatan database dengan isi disk: folder tanpa pemilik, dan catatan yang berkasnya hilang.</p>
+    {% else %}
+    {% set n_orphan = scan.orphan_work|length + scan.orphan_files|length + scan.orphan_uploads|length + scan.unknown_work|length %}
+    {% set n_missing = scan.missing_uploads|length + scan.missing_files|length %}
+    {% set n_all = n_orphan + n_missing %}
+
+    <p class="summary summary-{{ 'error' if n_all else 'ok' }}" role="status" aria-atomic="true">
+      {{ icon('alert-triangle' if n_all else 'check-circle') }}
+      <span>{% if n_all %}{{ n_all|num }} hal perlu diperiksa ({{ n_orphan|num }} tanpa pemilik di disk, {{ n_missing|num }} tercatat tetapi berkasnya hilang){% else %}Catatan database dan isi disk cocok{% endif %}</span>
+    </p>
+
+    {% if scan.recent %}
+    <p class="muted hint">{{ scan.recent|length|num }} item baru dibuat (kurang dari 10 menit) tidak dihitung sebagai tanpa pemilik; kemungkinan sedang dikerjakan.</p>
+    {% endif %}
+
+    {% macro orphan_table(rows, what) %}
+    <div class="table-wrap" tabindex="0" role="region" aria-label="{{ what }} (gulir horizontal bila perlu)">
+      <table class="table table-compact">
+        <thead><tr><th scope="col">Nama</th><th scope="col" class="num">Ukuran di disk</th><th scope="col" class="num">Berkas</th><th scope="col">Terakhir diubah</th></tr></thead>
+        <tbody>
+          {% for r in rows[:limit] %}
+          <tr>
+            <th scope="row" class="mono break">{{ r.name }}</th>
+            <td class="num mono">{{ r.disk|bytes }}{% if r.partial %}<span class="muted">+</span>{% endif %}</td>
+            <td class="num mono">{{ r.files|num if r.files is defined else '–' }}</td>
+            <td>{{ time_el(r.mtime) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if rows|length > limit %}<p class="muted hint">Menampilkan {{ limit|num }} terbesar dari {{ rows|length|num }}.</p>{% endif %}
+    {% endmacro %}
+
+    {% if scan.orphan_work %}
+    <details class="f-details">
+      <summary>{{ scan.orphan_work|length|num }} folder hasil dekompilasi tanpa catatan ({{ scan.orphan_work|sum(attribute='disk')|bytes }})</summary>
+      <p class="muted">Ada di <code>work/</code> tetapi analisisnya tidak ada di database, mis. sisa penghapusan yang terputus.</p>
+      {{ orphan_table(scan.orphan_work, 'Folder hasil dekompilasi tanpa catatan') }}
+    </details>
+    {% endif %}
+    {% if scan.orphan_files %}
+    <details class="f-details">
+      <summary>{{ scan.orphan_files|length|num }} folder lampiran/hasil AI tanpa catatan ({{ scan.orphan_files|sum(attribute='disk')|bytes }})</summary>
+      <p class="muted">Ada di <code>files/</code> tetapi analisisnya tidak ada di database.</p>
+      {{ orphan_table(scan.orphan_files, 'Folder lampiran tanpa catatan') }}
+    </details>
+    {% endif %}
+    {% if scan.orphan_uploads %}
+    <details class="f-details">
+      <summary>{{ scan.orphan_uploads|length|num }} berkas APK tanpa catatan ({{ scan.orphan_uploads|sum(attribute='disk')|bytes }})</summary>
+      <p class="muted">Ada di <code>uploads/</code> tetapi tidak cocok dengan APK mana pun di database.</p>
+      {{ orphan_table(scan.orphan_uploads, 'Berkas APK tanpa catatan') }}
+    </details>
+    {% endif %}
+    {% if scan.unknown_work %}
+    <details class="f-details">
+      <summary>{{ scan.unknown_work|length|num }} berkas liar di folder hasil dekompilasi</summary>
+      <p class="muted">Folder <code>work/</code> seharusnya hanya berisi folder per analisis.</p>
+      <ul class="plain-list">{% for r in scan.unknown_work[:limit] %}<li class="mono break">{{ r.name }}</li>{% endfor %}</ul>
+    </details>
+    {% endif %}
+    {% if scan.missing_uploads %}
+    <details class="f-details" open>
+      <summary>{{ scan.missing_uploads|length|num }} APK tercatat tetapi berkas aslinya hilang</summary>
+      <p class="muted">Akibatnya <em>Analisis ulang</em> tidak bisa dijalankan untuk APK ini; hasil yang sudah ada tetap bisa dibuka.</p>
+      <ul class="plain-list">{% for r in scan.missing_uploads[:limit] %}<li><span class="break">{{ r.name }}</span> <span class="muted mono">{{ r.size|bytes }}</span></li>{% endfor %}</ul>
+    </details>
+    {% endif %}
+    {% if scan.missing_files %}
+    <details class="f-details" open>
+      <summary>{{ scan.missing_files|length|num }} lampiran/hasil AI tercatat tetapi berkasnya hilang</summary>
+      <p class="muted">Halaman Berkas masih menampilkannya, tetapi tidak bisa dibuka atau diunduh.</p>
+      <ul class="plain-list">{% for r in scan.missing_files[:limit] %}<li><span class="break">{{ r.name }}</span> <span class="muted">· analisis #{{ r.analysis_id }} · {{ 'lampiran' if r.kind == 'upload' else 'hasil AI' }}</span></li>{% endfor %}</ul>
+    </details>
+    {% endif %}
+    {% endif %}
+
+    <div class="card-foot">
+      <p class="muted hint">
+        Halaman ini hanya untuk <strong>melihat</strong>; tombol pembersihan belum ada. Untuk menghapus APK beserta seluruh hasilnya, pakai tombol <em>Hapus</em> di halaman analisisnya.
+      </p>
+    </div>
+  </section>
+
+  {#- ===================== 5. Panduan server ===================== -#}
+  <section class="card" aria-labelledby="panduan-title" id="panduan">
+    <div class="card-head"><h2 id="panduan-title">Panduan server</h2></div>
+    <p class="muted">Docker, log, dan sistem berada di luar jangkauan web (aplikasi ini sengaja tidak memegang akses Docker). Jalankan perintah ini langsung di server.</p>
+    <span class="sr-only" role="status" aria-live="polite" data-copy-status></span>
+
+    {% macro cmd(text, why) %}
+    <div class="codeblock">
+      <div class="codeblock-bar">
+        <span class="mono muted">{{ why }}</span>
+        <button type="button" class="btn btn-ghost btn-sm" data-copy="{{ text }}" aria-label="Salin perintah: {{ text }}">{{ icon('copy', 16) }}<span>Salin</span></button>
+      </div>
+      <pre><code>{{ text }}</code></pre>
+    </div>
+    {% endmacro %}
+
+    {{ cmd('df -h /', 'Ruang disk keseluruhan') }}
+    {{ cmd('docker system df', 'Ringkasan image, kontainer, volume, dan cache build') }}
+    {{ cmd('docker system df -v', 'Rincian ukuran per volume dan per image') }}
+    {{ cmd('docker builder prune --filter until=168h', 'Buang cache build yang lebih tua dari 7 hari') }}
+    <p class="muted hint">Perintah terakhir hanya menyentuh cache build, bukan kontainer yang berjalan, image yang dipakai, atau volume data. Efeknya, build berikutnya bisa lebih lambat.</p>
+
+    <div class="alert alert-warn" role="note">
+      {{ icon('alert-triangle') }}
+      <div><strong>Jangan jalankan</strong> <code>docker system prune -a --volumes</code> atau <code>docker volume prune</code>. Keduanya dapat menghapus volume
+        data aplikasi (APK, hasil analisis, database) dan tidak bisa dibatalkan.</div>
+    </div>
+  </section>
+</div>
+{% endblock %}
