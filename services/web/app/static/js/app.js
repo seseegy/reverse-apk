@@ -110,6 +110,29 @@
     }, 2000);
   }
 
+  // Menu atas bisa digulir di ponsel (lihat .header-row nav di app.css): pastikan halaman yang sedang dibuka terlihat. Hanya mengubah scrollLeft
+  // menu itu sendiri, tidak menggulir halaman.
+  (function () {
+    var nav = $(".header-row nav"), cur = nav && $("a[aria-current]", nav);
+    if (!nav || !cur || nav.scrollWidth <= nav.clientWidth) return;
+    nav.scrollLeft = Math.max(0, cur.getBoundingClientRect().left - nav.getBoundingClientRect().left + nav.scrollLeft - 16);
+  })();
+
+  // Tombol "Salin" pada blok perintah statis (halaman Penyimpanan). Hasilnya diumumkan lewat region status tersembunyi.
+  $all("[data-copy]").forEach(function (btn) {
+    var label = $("span", btn), idle = label ? label.textContent : "Salin";
+    btn.addEventListener("click", function () {
+      var status = $("[data-copy-status]");
+      function flash(text, announce) {
+        if (label) label.textContent = text;
+        if (status) status.textContent = announce;
+        setTimeout(function () { if (label) label.textContent = idle; }, 1500);
+      }
+      copyText(btn.getAttribute("data-copy")).then(function () { flash("Tersalin", "Perintah disalin"); },
+                                                   function () { flash("Gagal", "Gagal menyalin; pilih teksnya secara manual"); });
+    });
+  });
+
   // Waktu server (UTC) -> zona waktu browser. Teks UTC tetap sebagai cadangan tanpa JS.
   $all("time[data-local]").forEach(function (el) {
     var d = new Date(el.getAttribute("datetime"));
