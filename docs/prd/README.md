@@ -14,6 +14,7 @@ PRD dibagi per bagian supaya bisa direview dan dikerjakan bertahap.
 | 06 | [Web UI](06-web-ui.md) | Halaman, alur pengguna, kebutuhan UX |
 | 07 | [Infra & Security](07-infra-security.md) | Deploy di VPS, jaringan, isolasi, auth, backup |
 | 08 | [Roadmap](08-roadmap.md) | Milestone, urutan kerja, definisi selesai |
+| 09 | [Paket multi-APK & bengkel](09-bundles-and-workbench.md) | **Rencana**: XAPK/APKS/APKM/AAB, membangun & menandatangani APK, shell AI di kontainer terpisah |
 
 ## Konvensi
 - ID requirement: `FR-<bagian>.<no>` (fungsional), `NFR-<bagian>.<no>` (non-fungsional).

@@ -20,7 +20,7 @@
 ## 4. Bukan tujuan (non-goals)
 - Multi-user, billing, registrasi publik.
 - **Eksekusi** APK (dynamic analysis, emulator, Frida di server). MVP hanya analisis statis.
-- Repackaging / patching / signing APK. (P2, lihat roadmap)
+- Repackaging / patching / signing APK. (P2, lihat roadmap) — *Rencana perubahan: dijadikan tujuan P1 lewat [09](09-bundles-and-workbench.md); pernyataan ini tetap berlaku sampai PR B di sana dikerjakan.*
 - Mendukung iOS (IPA). (P2)
 - Layanan untuk pihak ketiga.
 
