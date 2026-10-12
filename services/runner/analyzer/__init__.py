@@ -5,4 +5,4 @@ Keluaran di work/<id>/index/: index.sqlite, findings.jsonl, summary.json, done.j
 Semua isi yang dibaca berasal dari APK yang TIDAK TEPERCAYA: tidak dieksekusi, tidak di-eval, regex dibatasi.
 """
 
-VERSION = 2
+VERSION = 3   # 3: layout/menu/navigation ikut diindeks untuk pencarian (LAYOUT_INDEX_VERSION di web/app/codeindex.py)

@@ -37,6 +37,11 @@ MAX_WARN_KINDS = 60
 
 TEXT_RES_SUFFIXES = (".xml", ".json", ".txt", ".properties", ".html", ".js", ".yml", ".yaml", ".cfg", ".conf", ".ini", ".pem", ".config")
 MAX_RES_BYTES = 512 * 1024
+# Folder resource yang HANYA diindeks untuk pencarian (tata letak layar, menu, alur navigasi), termasuk varian kualifier
+# (layout-land, layout-v21, menu-sw600dp ...). Tidak ikut pemindaian secret/URL seperti scan_resource: isinya hampir seluruhnya
+# deklarasi UI, dan menambahkannya akan mengubah jumlah temuan/string yang sudah ada di tab Temuan & Jaringan.
+SEARCH_ONLY_RES_DIRS = re.compile(r"^(?:layout|menu|navigation)(?:-[A-Za-z0-9+_.\-]+)?$")
+MAX_SEARCH_ONLY_BYTES = 64 * 1024 * 1024   # total teks layout yang diindeks; melindungi ukuran indeks pada APK berlayout sangat banyak
 MAX_SMALI_ONLY_FILE = 2 * 1024 * 1024
 MAX_SMALI_ONLY_BYTES = 200 * 1024 * 1024   # total teks smali-saja yang dipindai; melindungi waktu & ukuran indeks
 
@@ -47,6 +52,7 @@ class ScanStats:
     app_classes: int = 0
     lib_classes: int = 0
     resource_files: int = 0
+    layout_files: int = 0              # layout/menu/navigation yang diindeks (hanya pencarian)
     skipped_large: list[str] = field(default_factory=list)
     decompile_failures: int = 0       # berkas dengan method yang gagal didekompilasi
     methods_not_decompiled: int = 0
@@ -116,6 +122,7 @@ class Scanner:
         self._seen_endpoint_keys: set[tuple[str, str]] = set()
         self._java_rels: set[str] = set()       # berkas Java hasil jadx yang ada (untuk mendeteksi class yang hilang dari jadx)
         self._smali_only_bytes = 0
+        self._layout_bytes = 0
 
     # ------------------------------------------------------------------ string & secret
     def _add_string(self, kind: str, value: str, rel: str, line: int, *, host: str | None = None,
@@ -412,6 +419,21 @@ class Scanner:
                                         "medium", "Nilai string resource berentropi tinggi dengan nama yang menyiratkan rahasia. "
                                         "Heuristik: verifikasi manual diperlukan.", value, rel, lines, m.start(), False, value)
 
+    def index_layout_resource(self, path: Path) -> bool:
+        """Indeks pencarian saja (tanpa pemindaian secret/URL): layout, menu, navigation. True bila berkas masuk indeks."""
+        try:
+            if path.stat().st_size > MAX_RES_BYTES:
+                return False
+        except OSError:
+            return False
+        text = read_text(path, MAX_RES_BYTES)
+        if text is None or self._layout_bytes + len(text) > MAX_SEARCH_ONLY_BYTES:
+            return False
+        self._layout_bytes += len(text)
+        self.index.add_code(_rel(path, self.work), text)
+        self.stats.layout_files += 1
+        return True
+
     # ------------------------------------------------------------------ orkestrasi
     def run(self) -> None:
         sources = self.work / "jadx" / "sources"
@@ -441,6 +463,16 @@ class Scanner:
         if manifest.is_file():
             self.scan_resource(manifest)
         self.log(f"I: {n:,} berkas resource/aset teks dipindai")
+        res_dir = self.work / "apktool" / "res"
+        try:
+            layout_dirs = sorted(d for d in res_dir.iterdir() if d.is_dir() and not d.is_symlink() and SEARCH_ONLY_RES_DIRS.match(d.name))
+        except OSError:
+            layout_dirs = []
+        for d in layout_dirs:
+            for p in iter_files(d, (".xml",)):
+                self.index_layout_resource(p)
+        if self.stats.layout_files:
+            self.log(f"I: {self.stats.layout_files:,} layout/menu/navigation diindeks untuk pencarian")
         if self.stats.smali_fallback_files:
             self.log(f"I: {self.stats.smali_fallback_files} berkas smali dipindai sebagai cadangan "
                      f"(method yang gagal didekompilasi jadx)")

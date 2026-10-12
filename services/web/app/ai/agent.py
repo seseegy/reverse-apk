@@ -44,6 +44,11 @@ Peta: get_overview, get_manifest, class_info (hierarki, method, status komponen)
 Menemukan titik masuk: search_code (kata kunci seperti login, token, encrypt, okhttp, baseUrl, SharedPreferences, WebView), list_strings, \
 get_findings.
 Bukti baris: get_class, get_method, read_file (path persis seperti sitasi; juga smali, resource, manifest).
+Menelusuri folder: list_dir (satu folder, tidak rekursif; tanpa path = daftar akar). Pakai bila Anda tidak tahu nama berkasnya, terutama \
+resource UI: apktool/res/layout (teks layar, id tombol, android:onClick), res/menu, res/navigation, res/xml, res/values, assets. \
+Alurnya: list_dir -> pilih berkas -> read_file. search_code juga mencari isi layout/menu/navigation (cari id/teks tombol, mis. btn_login) tetapi hanya token utuh atau awalannya, jadi \
+bagian tengah nama (feed_url di edit_feed_url_item) tidak ketemu; coba kata lain atau telusuri dengan list_dir; \
+bila hasil search_code memuat PERHATIAN soal indeks lama, layout belum ikut dicari, jadi telusuri dengan list_dir.
 Alur NYATA dari bytecode: find_xrefs (siapa memakai class/method/field/string), find_callees (isi sebuah method ringkas), \
 find_paths (jalur panggilan statis dari titik A ke B).
 
