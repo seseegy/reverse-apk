@@ -108,6 +108,9 @@ Jenis ditentukan dari **isi arsip**, bukan ekstensi (seperti lampiran di 07). Ek
 | FR-9.26 | Audit log: `build_requested`, `build_approved`, `build_rejected`, `build_done`, `build_failed`, `build_download`, masing-masing dengan `analysis_id`, nomor build, SHA-256 diff, dan SHA-256 hasil | P1 |
 | FR-9.27 | Build dapat dibatalkan (seperti job lain), dan hasil sementara dibersihkan oleh *housekeeping* runner | P1 |
 | FR-9.28 | Batas: maks. N build per analisis yang disimpan (usul 5), kuota disk build ikut `MIN_FREE_GB`/`MAX_OUTPUT_MB` | P1 |
+| FR-9.40 | **Layar persetujuan harus tahan perubahan yang sangat banyak** (pemilik: jenis perubahan "apa saja, sangat banyak"): diff dikelompokkan per berkas dengan jumlah baris tambah/hapus, dapat dicari dan disaring (smali / resource / manifest / aset biner), berkas terbesar dan paling banyak berubah di atas, dan setiap berkas dapat dibuka penuh. Persetujuan terikat pada **SHA-256 diff**: bila ruang kerja berubah lagi setelah diajukan, persetujuan lama tidak berlaku | P1 |
+| FR-9.41 | Verifikasi (FR-9.24) membaca `targetSdkVersion`/`minSdkVersion` dan menampilkan peringatan jelas bila APK **tidak akan terpasang di Android 14+** (target SDK di bawah 23 ditolak oleh sistem terlepas dari tanda tangan). Tidak memblokir unduhan | P1 |
+| FR-9.42 | Ruang kerja punya **titik simpan** (*snapshot*) yang dibuat sistem sebelum tiap permintaan build dan dapat dipulihkan ("Kembali ke titik simpan N"), karena perubahan banyak dan bertahap oleh AI mudah salah arah | P2 |
 
 ### Hal yang **tidak** dijanjikan (harus tampil di UI dan README)
 - **Tanda tangan berbeda dari aslinya.** APK hasil tidak bisa memperbarui aplikasi asli yang sudah terpasang; harus mencopot yang lama (data aplikasinya hilang).
@@ -194,9 +197,53 @@ Modifikasi hanya untuk APK yang **milik pengguna atau yang pengguna berwenang me
 
 PR B memakai kembali jalur *spool* yang sudah ada dan bisa diuji tanpa AI sama sekali, sehingga bagian paling sensitif (tanda tangan) terbukti dulu sebelum AI diberi akses.
 
+## Hasil riset dan keputusan tambahan (12 Okt 2026)
+
+### Perangkat target: Android 14 ke atas
+- Tanda tangan **v2 + v3 sudah mencukupi**; v1 tidak diperlukan. Tidak ada alasan menurunkan skema demi perangkat lama.
+- Android 14 menolak memasang aplikasi yang `targetSdkVersion`-nya di bawah 23. APK lama seperti itu tidak akan terpasang walau ditandatangani benar → FR-9.41.
+- Pemasangan tetap manual oleh pengguna (`adb install` atau pemasang paket). Untuk hasil berbentuk paket split, pemasang biasa tidak membukanya; `merged.apk` (satu berkas) adalah bentuk yang paling mudah dipasang.
+
+### Jenis perubahan: "apa saja, sangat banyak"
+Konsekuensi untuk rancangan:
+- Ini **membenarkan shell bebas** (keputusan 4): tool khusus per jenis perubahan tidak akan cukup.
+- Beban pindah ke **layar persetujuan** (FR-9.40): diff besar membuat orang cenderung menyetujui tanpa membaca. Karena itu diff dikelompokkan, dapat disaring, dan terikat hash.
+- Ruang kerja dan keluaran build membesar bersama ukuran APK → titik simpan (FR-9.42) dan kuota (di bawah).
+- Tidak ada penyaringan jenis perubahan. Pengaman yang berlaku tetap sama untuk semuanya: pernyataan wewenang saat menyetujui, audit log, persetujuan manual, dan tidak ada tombol bagikan/terbitkan.
+
+### Batas ukuran: hingga 1 GB
+`MAX_UPLOAD_MB` satu variabel yang dibaca `web` **dan** Caddy (`docker-compose.yml`), jadi cukup satu nilai (1024). Tetapi batas lain dirancang untuk APK jauh lebih kecil dan **akan menolak atau menggagalkan** berkas besar. Nilai "usul" di bawah hanyalah titik awal; angka akhir **harus diukur** dengan APK/XAPK besar sungguhan di PR A (pelajaran BE-09: ukur, jangan tebak).
+
+| Pengaturan | Sekarang | Masalah untuk berkas hingga 1 GB | Usul awal |
+|---|---|---|---|
+| `MAX_UPLOAD_MB` | 200 | batas unggah itu sendiri | 1024 |
+| `ZIP_MAX_ENTRY_MB` | 512 | **satu APK di dalam paket bisa >512 MB** → ditolak sebagai "entri terlalu besar" | 1024 |
+| `ZIP_MAX_UNCOMPRESSED_MB` | 3072 | paket 1 GB berisi APK yang sudah terkompresi hampir tidak mengecil; tetapi APK 1 GB bisa membesar 2–3× | naik bila terukur perlu |
+| `MAX_OUTPUT_MB` (runner) | 3072 | hasil dekompilasi APK sebesar itu bisa melampaui 3 GB → "keluaran terlalu besar" | diukur |
+| `JADX_HEAP` / `mem_limit` runner | 2 GB / 3 GB | jadx untuk APK sangat besar bisa kehabisan memori; VPS hanya 8 GB total (jumlah `mem_limit` web + worker + redis + caddy saja sudah 1,6 GB, belum termasuk runner 3 GB dan sistem) | diukur; **tidak bisa dinaikkan sembarangan** |
+| `TIMEOUT_JADX` / `TIMEOUT_APKTOOL` / `JOB_TIMEOUT` | 900 / 300 / 2700 detik | kemungkinan terlalu pendek | diukur |
+| `MIN_FREE_GB` / `JOB_MIN_FREE_GB` | 15 / 5 | hasil dekompilasi + ruang kerja `bench` + build bisa puluhan GB per APK | disesuaikan dengan disk VPS |
+| `BENCH_WORKSPACE_MAX_MB` (baru) | — | bawaan 2048 usulan terlalu kecil untuk APK 1 GB | skala dengan ukuran |
+| Cloudflare | proxy dimatikan (`docs/deploy.md`) | bila dinyalakan, batas body ±100 MB (paket gratis) membuat unggahan >100 MB gagal | tetap "DNS only" |
+
+Selain itu, `max_size` Caddy dan pembacaan unggahan sudah streaming ke disk (NFR-1.1), jadi 1 GB tidak membebani memori `web`; yang perlu dipantau adalah waktu unggah dan sesi (`SESSION_MAX_AGE` 12 jam sudah mencukupi).
+
+### Isolasi `bench`: data VPS
+VPS: kernel `6.8.0-146-generic` x86_64, Docker `29.9.0`, profil `apparmor` + `seccomp builtin`, LSM aktif: `lockdown, capability, landlock, yama, apparmor`, `max_user_namespaces=31245`.
+- **Landlock aktif di kernel host** → opsi 2 realistis. Yang belum diketahui: apakah profil seccomp bawaan Docker 29 mengizinkan syscall Landlock **di dalam kontainer**.
+- `bwrap` (opsi 3) kemungkinan diblokir di dalam kontainer oleh seccomp/AppArmor bawaan, walau namespace diaktifkan di host.
+- **Cara membuktikan**: `scripts/bench-probe.sh` menjalankan uji di kontainer dengan pengaturan yang sama seperti rencana `bench` (tanpa jaringan, rootfs read-only, non-root, `cap-drop ALL`, `no-new-privileges`). Skrip Python-nya (`scripts/bench-probe.py`) sudah diuji di sandbox pengembangan, termasuk uji negatif (pengurungan dimatikan sengaja → dilaporkan BOCOR). Pembungkus Docker-nya **belum pernah dijalankan** (sandbox pengembangan tidak punya Docker); hanya sintaksnya yang diperiksa.
+- Keputusan: bila `bench-probe.sh` lulus di VPS → opsi 2 (Landlock; perintah AI dikurung ke folder ruang kerja analisis yang aktif + folder alat baca-saja + `/tmp`). Bila gagal → opsi 1.
+
+### Temuan alat
+- **jadx** mencantumkan `.aab`, `.xapk`, `.apkm`, `.apks` sebagai masukan yang didukung (README cabang utama). Artinya analisis kode dapat berjalan **tanpa** menggabung dulu; penggabungan tetap dibutuhkan untuk apktool (tab Manifes) dan untuk modifikasi. Versi yang dipin (1.5.6) belum dicocokkan dengan README itu; dibuktikan dengan sampel nyata di PR A.
+- **Sampel dari pemilik (12 Okt 2026)**: `sample.xapk/.apks/.apkm/.aab` ternyata **placeholder** (isi `AndroidManifest.xml` berupa teks "PLACEHOLDER", `classes.dex` 40 byte, `toc.pb` berisi teks). Strukturnya benar dan berguna untuk **tes pendeteksi jenis** (nama berkas dan kolom `manifest.json` / `info.json`), tetapi **tidak bisa** dibuka apktool/jadx/APKEditor, jadi tidak membuktikan gabung atau dekompilasi. Sampel nyata tetap dibutuhkan.
+- **`apksigner` / `zipalign`** dari Android SDK Build-Tools (terbaru 37.0.0, zip Linux ±66 MB). Google menerbitkan **hanya SHA-1** untuk paket ini; maka SHA-256 dihitung sendiri saat pertama diunduh, dipin di Dockerfile, dan SHA-1 Google dipakai sebagai pembanding.
+- Dokumentasi Google menegaskan `zipalign` dijalankan **sebelum** `apksigner` (menandatangani lalu mengubah berkas membatalkan tanda tangan) → sudah di FR-9.22.
+
 ## Pertanyaan terbuka
-- [OPEN] Isolasi antar analisis di `bench` (opsi 1/2/3 di atas).
-- [OPEN] Batas ukuran unggah untuk paket. Bawaan 200 MB (`MAX_UPLOAD_MB`) mungkin terlalu kecil untuk XAPK game; OBB tidak diekstrak tetapi tetap ikut terunggah. Usul: tetap 200 MB dulu, naikkan bila perlu.
-- [OPEN] Memastikan jadx 1.5.6 membuka `.aab` dengan benar dan apakah `merged.apk` dari APKEditor lulus `apktool d` untuk sampel nyata. Diuji pada PR A dengan sampel nyata sebelum klaim "didukung" ditulis di UI.
-- [OPEN] Sumber dan versi `apksigner`/`zipalign` (Android build-tools) yang di-pin SHA-256-nya.
+- [OPEN] Isolasi antar analisis di `bench`: data VPS sudah ada (Landlock aktif); menunggu hasil `scripts/bench-probe.sh` di VPS.
+- [DIPUTUSKAN] Batas unggah hingga **1 GB**. [OPEN] nilai akhir batas lain yang ikut terdampak (tabel "Batas ukuran"), ditentukan dengan pengukuran APK besar sungguhan.
+- [OPEN] Memastikan jadx 1.5.6 membuka `.aab/.xapk/.apkm/.apks` dengan benar dan apakah `merged.apk` dari APKEditor lulus `apktool d`. README jadx menyatakan didukung, tetapi sampel yang tersedia placeholder; butuh sampel nyata dari pemilik. Klaim "didukung" di UI baru ditulis setelah terbukti.
+- [OPEN] Versi pasti Build-Tools yang dipin (kandidat: 37.0.0) dan uji bahwa `zipalign`/`apksigner` berjalan di image `python:3.12-slim-trixie` (pustaka sistem yang dibutuhkan biner bawaan Google).
 - [OPEN] Apakah "paket format asal" (FR-9.17b) cukup bernilai untuk dikerjakan, atau cukup `merged.apk`. Dinilai setelah PR B.
