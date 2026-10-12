@@ -219,6 +219,11 @@ def list_classes(ctx: ToolContext, args: dict) -> dict:
     return out
 
 
+# Indeks dari analyzer lama tidak memuat layout/menu/navigation; tanpa catatan ini AI mengira "tidak ada hasil" = "tidak ada di layout".
+_STALE_LAYOUT_NOTE = {True: " PERHATIAN: indeks ini dibuat analyzer lama, jadi res/layout, res/menu, dan res/navigation BELUM ikut dicari. "
+                            "Telusuri dengan list_dir (mis. apktool/res/layout) + read_file, atau minta pengguna menjalankan ulang analisis statis."}
+
+
 def search_code(ctx: ToolContext, args: dict) -> dict:
     query = _str(args, "query")
     r = codeindex.search_code(ctx.work, ctx.analysis_id, query, "app" if not args.get("include_libraries") else "all",
@@ -235,7 +240,8 @@ def search_code(ctx: ToolContext, args: dict) -> dict:
     return {"kueri": ctx.redactor.text(query), "class_cocok": [{"class": f"{c['package']}.{c['name']}" if c["package"] else c["name"],
                                               "berkas": c["path"]} for c in r["classes"]],
             "hasil": hits, "dipotong": r["truncated"],
-            "catatan": "Pencarian token (bukan regex). Gunakan get_class/get_method untuk membaca kode lengkap."}
+            "catatan": "Pencarian token (bukan regex). Gunakan get_class/get_method untuk membaca kode lengkap." + _STALE_LAYOUT_NOTE.get(
+                bool((r.get("analyzer_version") or 0) < codeindex.LAYOUT_INDEX_VERSION), "")}
 
 
 def _read_source(ctx: ToolContext, name: str, fmt: str) -> tuple[str, str, dict]:
@@ -650,10 +656,85 @@ def read_file(ctx: ToolContext, args: dict) -> dict:
     if data is None:
         raise ToolError("berkas tidak ditemukan. Pakai path persis dari hasil tool lain, mis. jadx/sources/pkg/Kelas.java, "
                         "apktool/smali_classes7/pkg/Kelas.smali, apktool/res/xml/network_security_config.xml, apktool/AndroidManifest.xml; "
-                        "atau lampiran/<id>, hasil_ai/<path> (lihat list_files).")
+                        "atau lampiran/<id>, hasil_ai/<path> (lihat list_files). Tidak tahu path-nya? Telusuri foldernya dengan list_dir.")
     if data.get("binary"):
         raise ToolError("berkas biner tidak ditampilkan")
     return _page(ctx, path, data["text"], start, end, bool(data["truncated"]))
+
+
+# Akar yang bisa dijelajahi AI = akar yang bisa dibaca read_file (path persis seperti sitasi).
+_LIST_ROOTS = (
+    ("jadx/sources", "java", "kode Java hasil jadx"),
+    ("jadx/resources", "jres", "resource hasil jadx (XML, aset)"),
+    ("apktool", "smali", "hasil apktool: smali*/ (smali SEMUA class), res/ (layout, menu, values, xml), assets/, AndroidManifest.xml"),
+)
+_RES_HINT = ("res/: layout* = tata letak layar (teks, id tombol, onClick), menu* = menu, navigation* = alur antarlayar, values* = string/warna/"
+             "tema, xml* = konfigurasi (mis. network_security_config), drawable*/mipmap* = gambar (lihat dengan view_image).")
+
+
+def list_dir(ctx: ToolContext, args: dict) -> dict:
+    """Isi SATU folder (tidak rekursif) di hasil dekompilasi. Tanpa path = daftar akar. Path keluaran = path masukan read_file."""
+    raw = _str(args, "path", required=False).replace("\\", "/").strip().strip("/")
+    flt = _str(args, "filter", required=False)
+    limit = _opt_limit(args)
+    offset = _int(args, "offset", 0, 0)
+
+    if not raw:
+        roots = []
+        for prefix, root, what in _LIST_ROOTS:
+            if codeindex.list_dir(ctx.work, ctx.analysis_id, root, "", max_entries=1) is not None:
+                roots.append({"path": prefix, "isi": what})
+        if not roots:
+            raise ToolError("belum ada hasil dekompilasi untuk dijelajahi")
+        return {"ringkas": f"{len(roots)} akar", "akar": roots,
+                "catatan": "Panggil list_dir lagi dengan salah satu path ini. Lampiran pengguna dan berkas buatan Anda: pakai list_files."}
+    if raw.startswith(("lampiran", "hasil_ai")):
+        raise ToolError("lampiran pengguna dan berkas buatan Anda tidak ada di sini: pakai list_files")
+
+    for prefix, root, _what in _LIST_ROOTS:
+        if raw == prefix:
+            rel = ""
+            break
+        if raw.startswith(prefix + "/"):
+            rel = raw[len(prefix) + 1:]
+            break
+    else:                                # tanpa awalan = relatif terhadap apktool/ (sama dengan read_file)
+        prefix, root, rel = "apktool", "smali", raw
+    shown = prefix + ("/" + rel.strip("/") if rel.strip("/") else "")
+
+    r = codeindex.list_dir(ctx.work, ctx.analysis_id, root, rel, merge_chains=False, readable_only=True, name_filter=flt)
+    if r is None:
+        raise ToolError(f"folder tidak ditemukan: {shown}. Mungkin path-nya berkas (pakai read_file) atau salah ketik; "
+                        "mulai dari list_dir tanpa path, lalu turun satu tingkat demi satu tingkat.")
+    rows = [("d", f"{prefix}/{e['path']}", 0) for e in r["entries"] if e["type"] == "dir"]
+    rows += [("f", f"{prefix}/{e['path']}", e["size"]) for e in r["entries"] if e["type"] == "file"]
+    total = len(rows)
+    if offset and offset >= total:
+        raise ToolError(f"{shown} hanya berisi {total} entri" + (f" yang cocok dengan filter '{flt}'" if flt else ""))
+    rows = rows[offset:]
+    if limit is not None:
+        rows = rows[:limit]
+    budget, used, chosen = max(1000, ctx.cfg.max_tool_chars - 800), 0, []
+    for row in rows:                     # muat sebanyak anggaran karakter; sisanya dilanjutkan dengan offset
+        cost = len(row[1]) + 32
+        if chosen and used + cost > budget:
+            break
+        used += cost
+        chosen.append(row)
+    nxt = offset + len(chosen)
+    dirs = [p for k, p, _ in chosen if k == "d"]
+    files = [{"path": p, "ukuran": _fmt(sz)} for k, p, sz in chosen if k == "f"]
+    out: dict[str, Any] = {"ringkas": f"{len(dirs)} folder, {len(files)} berkas di {shown}" + (f" (filter '{flt}')" if flt else ""),
+                           "path": shown, "total": total, "folder": dirs, "berkas": files}
+    notes = ["Bukan rekursif. Pakai path persis ini untuk read_file (teks) atau view_image (gambar)."]
+    if nxt < total and (limit is None or len(rows) > len(chosen)):
+        out["lanjut"] = f"panggil lagi dengan offset={nxt} (atau persempit dengan filter)"
+    if r["truncated"]:
+        notes.append("Folder berisi lebih dari 3000 entri, jadi daftar ini tidak lengkap; pakai filter untuk mempersempit.")
+    if root == "smali" and rel.strip("/") == "res":
+        notes.append(_RES_HINT)
+    out["catatan"] = " ".join(notes)
+    return out
 
 
 # ---------------------------------------------------------------- berkas: lampiran pengguna & buatan AI
@@ -772,8 +853,10 @@ TOOLS: dict[str, tuple[Callable[[ToolContext, dict], dict], dict]] = {
     "list_classes": (list_classes, {"description": "Daftar class dalam satu package.",
                                     "properties": {"package": {"type": "string"}, "limit": {"type": "integer"}},
                                     "required": ["package"]}),
-    "search_code": (search_code, {"description": "Cari token/kata di seluruh kode (bukan regex). Gunakan kata kunci seperti login, token, "
-                                                 "encrypt, okhttp, baseUrl, SharedPreferences.",
+    "search_code": (search_code, {"description": "Cari token/kata di seluruh kode DAN di layout/menu/navigation (bukan regex). Yang dicocokkan adalah "
+                                                 "token utuh atau awalannya: 'feed_url' tidak menemukan 'edit_feed_url_item', 'ProgressBar' tidak "
+                                                 "menemukan 'CircularProgressBar'. Gunakan kata kunci seperti login, token, encrypt, okhttp, baseUrl, "
+                                                 "SharedPreferences, atau id/teks tombol (btn_login).",
                                   "properties": {"query": {"type": "string"}, "include_libraries": {"type": "boolean"}},
                                   "required": ["query"]}),
     "get_class": (get_class, {"description": "Baca kode sebuah class (nomor baris disertakan). Besar -> dipotong, lanjutkan dengan start_line. Bila jadx tidak menghasilkan Java untuk class itu, otomatis diberi smali (cek field 'format' & 'berkas').",
@@ -819,6 +902,13 @@ TOOLS: dict[str, tuple[Callable[[ToolContext, dict], dict], dict]] = {
                                              "Juga lampiran pengguna (lampiran/<id>, besar dibaca bertahap) dan berkas buatan Anda (hasil_ai/<path>).",
                               "properties": {"path": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}},
                               "required": ["path"]}),
+    "list_dir": (list_dir, {"description": "Daftar isi SATU folder di hasil dekompilasi (tidak rekursif), dengan path yang sama persis seperti read_file/sitasi. "
+                                           "Tanpa path = daftar akar (jadx/sources, jadx/resources, apktool). Pakai untuk MENEMUKAN berkas yang tidak bisa "
+                                           "ditebak namanya, terutama resource: apktool/res (layout, menu, navigation, values, xml, drawable), apktool/assets. "
+                                           "Contoh: path='apktool/res/layout', filter='login'. Folder besar: lanjutkan dengan offset.",
+                            "properties": {"path": {"type": "string", "description": "folder, mis. apktool/res/layout; kosong = daftar akar"},
+                                           "filter": {"type": "string", "description": "hanya nama yang memuat teks ini (tanpa beda huruf besar/kecil)"},
+                                           "limit": {"type": "integer"}, "offset": {"type": "integer"}}}),
     "list_files": (list_files_tool, {"description": "Daftar lampiran pengguna (id, nama, jenis, ukuran) dan berkas buatan Anda (hasil_ai/...) pada analisis ini.",
                                      "properties": {}}),
     "write_file": (write_file, {"description": "BUAT atau ganti berkas teks/kode (py, js, md, json, yaml, sh, java, kt, smali, html, sql, ...) di folder "

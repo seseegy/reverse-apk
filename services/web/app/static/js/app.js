@@ -1078,6 +1078,7 @@
     list_strings: function (a) { return "Daftar string" + (a.kind ? " " + a.kind : "") + (a.filter ? " “" + a.filter + "”" : ""); },
     get_findings: function (a) { return "Temuan statis" + (a.category ? " (" + a.category + ")" : ""); },
     read_file: function (a) { return "Baca " + baseName(a.path) + (a.start_line ? ":" + a.start_line + (a.end_line ? "-" + a.end_line : "") : ""); },
+    list_dir: function (a) { return "Lihat folder " + (a.path ? String(a.path).replace(/\/+$/, "").split("/").slice(-2).join("/") : "(akar)") + (a.filter ? " “" + a.filter + "”" : ""); },
     list_files: function () { return "Daftar berkas & lampiran"; },
     write_file: function (a) { return (a.mode === "append" ? "Sambung " : "Tulis ") + baseName(a.path); },
     edit_file: function (a) { return "Ubah " + baseName(a.path); },

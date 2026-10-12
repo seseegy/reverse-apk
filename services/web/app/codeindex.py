@@ -25,6 +25,7 @@ from rvcore.fsutil import read_json_under, resolve_under
 MAX_VIEW_BYTES = 2 * 1024 * 1024
 MAX_TREE_ENTRIES = 3000
 QUERY_TIMEOUT_S = 2.0
+LAYOUT_INDEX_VERSION = 3   # versi analyzer pertama yang mengindeks layout/menu/navigation (analyzer/__init__.py VERSION)
 SEARCH_LIMIT = 100
 PROBE_LIMIT = 301   # kecocokan sebanyak ini atau lebih dianggap 'umum': hasil dipotong tanpa pengurutan relevansi
 
@@ -69,8 +70,17 @@ def _resolve(work: Path, analysis_id: int, root: str, rel: str) -> Path | None:
 
 
 # ------------------------------------------------------------------------- pohon
-def list_dir(work: Path, analysis_id: int, root: str, rel: str) -> dict[str, Any] | None:
-    """Isi satu direktori (lazy). Direktori berisi satu-subdirektori digabung seperti paket Java (a.b.c)."""
+def list_dir(work: Path, analysis_id: int, root: str, rel: str, *, merge_chains: bool = True, readable_only: bool = False,
+             name_filter: str = "", max_entries: int = MAX_TREE_ENTRIES) -> dict[str, Any] | None:
+    """Isi satu direktori (lazy). Bawaan (dipakai penampil kode di UI): direktori berisi satu-subdirektori digabung seperti paket Java.
+
+    Pilihan untuk tool AI (UI tidak memakainya, jadi perilaku UI tidak berubah):
+      merge_chains=False  daftar datar apa adanya (path selalu selevel di bawah `rel`, tidak melompat beberapa tingkat);
+      readable_only=True  di akar `smali` (apktool/) hanya sertakan entri yang boleh dibaca read_file (smali*, res, assets, unknown,
+                          AndroidManifest.xml) - `original/`, `lib/`, `apktool.yml` tidak pernah bisa dibuka, jadi tidak ditawarkan;
+      name_filter         hanya entri yang namanya memuat teks ini (tanpa beda huruf besar/kecil); diterapkan SEBELUM batas jumlah;
+      max_entries         batas jumlah entri (bawaan MAX_TREE_ENTRIES).
+    """
     target = _resolve(work, analysis_id, root, rel)
     if target is None or not target.is_dir():
         return None
@@ -83,18 +93,24 @@ def list_dir(work: Path, analysis_id: int, root: str, rel: str) -> dict[str, Any
     except OSError:
         return None
     base_rel = rel.strip("/")
+    needle = name_filter.strip().lower()
+    top_level_filter = readable_only and root == "smali" and not base_rel
     for e in entries:
         try:
             if e.is_symlink():
                 continue
-            if len(dirs) + len(files) >= MAX_TREE_ENTRIES:
+            if top_level_filter and not e.name.startswith(_SMALI_PREFIXES):
+                continue
+            if needle and needle not in e.name.lower():
+                continue
+            if len(dirs) + len(files) >= max_entries:
                 truncated = True
                 break
             sub = f"{base_rel}/{e.name}" if base_rel else e.name
             if e.is_dir(follow_symlinks=False):
                 label, cur = e.name, Path(e.path)
                 # Gabungkan rantai paket Java yang hanya berisi satu direktori: com/example/app -> com.example.app
-                for _ in range(12):
+                for _ in range(12 if merge_chains else 0):
                     try:
                         kids = [k for k in os.scandir(cur) if not k.is_symlink()]
                     except OSError:
@@ -236,13 +252,18 @@ def search_code(work: Path, analysis_id: int, q: str, scope: str = "all", *, lim
     started = time.perf_counter()
     fts = to_fts_query(q)
     result: dict[str, Any] = {"query": q, "hits": [], "classes": [], "available": False, "ms": 0, "error": None,
-                              "truncated": False}
+                              "truncated": False, "analyzer_version": None}
     if fts is None:
         return result
     with open_index(work, analysis_id) as conn:
         if conn is None:
             return result
         result["available"] = True
+        try:
+            row = conn.execute("SELECT value FROM meta WHERE key = 'analyzer_version'").fetchone()
+            result["analyzer_version"] = int(row[0]) if row and str(row[0]).isdigit() else None
+        except sqlite3.DatabaseError:
+            pass
         try:
             def run():
                 lib_filter = "AND coalesce(c.is_lib, 0) = 0 " if scope == "app" else ""

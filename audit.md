@@ -337,6 +337,7 @@ Ditulis sesi berikutnya, setelah tiap temuan diverifikasi ulang dari kode dan di
 | Sesi kosong saat anggaran habis (tidak ada di audit awal) | #29 | `budget.check()` dipindah sebelum `create_chat_session()`. |
 | UI-08 | #32 | Konfirmasi "Batalkan" **hanya saat berjalan**. Catatan koreksi atas §4: membatalkan job berjalan **tidak** sepenuhnya tanpa kerugian — `_finish_cancelled` langsung menghapus hasil sementara `apktool/` dan `jadx/`, jadi harus diulang dari awal. Saat masih antre tidak ada yang hilang, jadi tanpa konfirmasi. |
 | UI-06 | #33 | Bahasa seragam Indonesia pada **teks yang tampil**: Dashboard → **Beranda**, Upload → **Unggah**, Chat → **Percakapan**, Manifest → **Manifes** (menu, tab, judul tab browser, tombol, pesan galat server dan JS, `README`/`docs/deploy.md`). **Sengaja tidak diubah** karena itu kode, bukan tampilan: alamat (`/chat`, `/upload`, `/manifest`), kelas CSS, `id`, `data-*`, nama tool AI dan prompt, nilai aksi audit `upload`, log operator, dan PRD (istilah konseptual). `tests/test_ui_language.py` memeriksa teks yang terlihat di 9 halaman; Chromium memastikan tidak ada kata lama di layar setelah JavaScript berjalan. |
+| AI tak bisa menelusuri resource (tidak ada di audit awal) | #36 | Tool baca-saja **`list_dir`** (satu folder, tidak rekursif; path keluaran = path masukan `read_file`) dan **layout/menu/navigation ikut diindeks pencarian** (analyzer v3). Layout sengaja hanya masuk pencarian, **tidak** ikut pemindaian secret/URL, jadi tab Temuan & Jaringan tidak berubah. Rincian ukur di §10.7. |
 
 ### 10.2 Hasil pengukuran
 
@@ -446,3 +447,26 @@ Chip sitasi dinaikkan 18px → **24px**. Yang tadinya 982 elemen di bawah 44px k
 ### 10.6 Cara mengulang pengukuran
 
 Alat di §9 (`/projects/.scratch`) **sudah hilang**; risiko QA-01 sudah terjadi. Pengukuran di atas memakai Playwright + Chromium di luar repo, dan sengaja **tidak** ditambahkan ke CI (unduhan Chromium ±115 MB). Tes yang ada di `tests/` menjalankan aplikasi web tanpa jaringan (Redis & provider AI tidak terjangkau); worker, runner, analyzer, dan stack Docker penuh belum tercakup.
+
+### 10.7 `list_dir` & indeks layout (12 Okt 2026)
+
+**Masalah.** AI bisa membaca resource lewat `read_file`, tetapi hanya bila tahu path persisnya, dan `search_code` tidak menjangkau `res/layout`, `res/menu`, `res/navigation`, maupun `jadx/resources` (analyzer hanya mengindeks Java, smali, `res/values|xml|raw`, `assets`, manifest). Jadi pertanyaan seperti "layar mana yang punya tombol login?" tak terjawab.
+
+**Biaya indeks** (diukur dengan `Scanner` + `IndexWriter` sungguhan pada hasil `apktool` dua aplikasi open-source F-Droid, SHA-256 APK dicocokkan dengan indeks F-Droid; indeks "lama" = perilaku sebelum perubahan):
+
+| Aplikasi | Layout+menu+navigation | Dokumen FTS | Halaman terpakai (lama → baru) | Waktu |
+|---|---|---|---|---|
+| AntennaPod 3.12.2 | 293 berkas / 420 KB teks | 2.216 → 2.509 | 33.756 → 34.412 KB (**+656 KB**) | 2,01 → 2,06 s |
+| NewPipe 0.29.1 | 231 berkas / 423 KB teks | 2.372 → 2.603 | 42.836 → 43.452 KB (**+616 KB**) | 2,15 → 2,18 s |
+
+- Biaya nyata ±0,6 MB per aplikasi (±1,5% dari indeks). Pada Compose-only app (NexLoad) hampir nol karena nyaris tanpa layout.
+- **Jangan membandingkan ukuran berkas**: pada NewPipe berkas indeks tampak *mengecil* 352 KB, padahal itu artefak halaman kosong SQLite (*freelist* turun 968 KB). Yang sah dibandingkan adalah halaman terpakai (`page_count − freelist_count`). Pengukuran diulang 3× dan identik, jadi ini bukan derau acak.
+- Temuan (3) dan string (73) pada AntennaPod **identik** sebelum/sesudah, termasuk file, baris, dan count.
+
+**Kebenaran dasar.** `RecyclerView` ditemukan di 20 berkas layout = hasil `grep` langsung (20). `ProgressBar` 24 vs 25: yang terlewat adalah `CircularProgressBar` (kata di tengah token); `feed_url` tidak menemukan `edit_feed_url_item`. Keduanya **keterbatasan lama pencarian token** (token utuh atau awalannya), bukan berkas yang hilang dari indeks, dan kini ditulis di deskripsi tool & prompt.
+
+**Batas pengaman.** Per berkas 512 KB (sama dengan `scan_resource`), total layout 64 MB per analisis, symlink diabaikan, hanya `.xml` di folder `layout*|menu*|navigation*` (termasuk varian kualifier). Folder XML lain (`drawable`, `anim`, `color`) sengaja tidak diindeks.
+
+**Analisis lama.** Indeks buatan analyzer < v3 tidak memuat layout. `search_code` kini menambahkan peringatan ke AI ("tidak ada hasil" ≠ "tidak ada di layout") sampai pengguna menekan **Jalankan analisis statis** lagi.
+
+**Belum diukur.** APK sangat besar (ratusan MB) dengan puluhan ribu layout; batas 64 MB melindungi, tetapi waktu `index.finish` pada kasus itu tidak diukur. Pengujian dijalankan di sandbox pengembangan, bukan di runner/VPS.
