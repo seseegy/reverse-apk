@@ -78,6 +78,12 @@ services:
       AI_MAX_IMAGE_MB: ${AI_MAX_IMAGE_MB:-10}
       AI_INLINE_ATTACH_CHARS: ${AI_INLINE_ATTACH_CHARS:-16000}
       AI_REDACT_SECRETS: ${AI_REDACT_SECRETS:-1}
+      AI_SHELL_ENABLED: ${AI_SHELL_ENABLED:-0}
+      AI_SHELL_TIMEOUT: ${AI_SHELL_TIMEOUT:-60}
+      AI_SHELL_MAX_TIMEOUT: ${AI_SHELL_MAX_TIMEOUT:-120}
+      AI_SHELL_MAX_CALLS_PER_TURN: ${AI_SHELL_MAX_CALLS_PER_TURN:-40}
+      AI_SHELL_MAX_OUTPUT_CHARS: ${AI_SHELL_MAX_OUTPUT_CHARS:-12000}
+      AI_SHELL_SPOOL: /data/benchspool
       AI_DAY_OFFSET_HOURS: ${AI_DAY_OFFSET_HOURS:-7}
       AI_MODELS_FILE: /config/ai_models.json
     secrets:
@@ -87,6 +93,8 @@ services:
       - work:/data/work
       - files:/data/files
       - db:/data/db
+      - bench:/data/bench          # web hanya MENGHAPUS ruang kerja saat analisis dihapus; tidak pernah membaca isinya (data tak tepercaya)
+      - benchspool:/data/benchspool
       - ./config:/config:ro
     networks: [edge, backend]
     depends_on:
@@ -205,6 +213,51 @@ services:
     cpus: 2
     pids_limit: 512
 
+  # Shell terisolasi untuk tool AI `shell_run` (PRD 09, Bagian C). DIMATIKAN dari sisi web secara bawaan (AI_SHELL_ENABLED=0); layanan ini tetap berjalan
+  # tetapi hanya menunggu. TANPA JARINGAN dan TANPA RAHASIA: tidak ada kunci AI, DB, Redis, files, atau keystore. Memasang uploads (baca saja), work (BACA SAJA;
+  # Landlock lebih jauh menutup work/<id>/index) dan volume khusus bench (ruang kerja) + benchspool (antrean dari web). Tiap perintah dikurung Landlock ke
+  # satu analisis; bila Landlock tidak tersedia perintah DITOLAK (gagal tertutup). Uji: `make bench-selftest`.
+  bench:
+    build:
+      context: ./services
+      dockerfile: bench/Dockerfile
+    restart: unless-stopped
+    init: true
+    network_mode: none
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,size=256m,nosuid
+    environment:
+      DATA_DIR: /data
+      BENCH_SPOOL: /data/benchspool
+      BENCH_CMD_MAX_TIMEOUT: ${AI_SHELL_MAX_TIMEOUT:-120}
+      BENCH_CMD_MAX_OUTPUT_KB: ${BENCH_CMD_MAX_OUTPUT_KB:-64}
+      BENCH_WORKSPACE_MAX_MB: ${BENCH_WORKSPACE_MAX_MB:-2048}
+      BENCH_FILE_MAX_MB: ${BENCH_FILE_MAX_MB:-256}
+      BENCH_NPROC: ${BENCH_NPROC:-2048}
+      BENCH_IDLE_EXIT: ${BENCH_IDLE_EXIT:-900}
+    volumes:
+      - uploads:/data/uploads:ro
+      - work:/data/work:ro
+      - bench:/data/bench
+      - benchspool:/data/benchspool
+    depends_on:
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bench-daemon", "--health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    mem_limit: 1g
+    cpus: 1
+    pids_limit: 512
+
 networks:
   # Caddy <-> web. Berjaringan keluar (web akan memanggil DeepSeek untuk chat di M3).
   edge: {}
@@ -218,6 +271,8 @@ volumes:
   files:     # lampiran chat (up/) + berkas buatan AI (ai/) per analisis; HANYA web yang memasangnya, dan tidak ikut terhapus saat "Analisis ulang"
   db:        # SQLite (WAL); hanya web & worker — runner TIDAK punya akses
   spool:     # antrean berkas worker -> runner; hanya worker & runner
+  bench:     # ruang kerja shell AI per analisis (bench/<id>/); web memasangnya untuk membersihkan, bench untuk bekerja
+  benchspool: # antrean web -> bench (perintah shell AI); HANYA web & bench, terpisah dari spool worker/runner
   redisdata:
   caddy_data:
   caddy_config:

@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""Daemon bench: menjalankan perintah shell yang disusun AI, di kontainer TANPA JARINGAN, tiap perintah dikurung Landlock (PRD 09, Bagian C).
+
+Isolasi (ditegakkan oleh docker-compose.yml): network_mode none, non-root, rootfs read-only, cap_drop ALL, no-new-privileges, batas memori/CPU/PID.
+Kontainer ini TIDAK punya rahasia: bukan kunci AI, bukan DB, bukan Redis, bukan keystore.
+
+Kepercayaan: request datang dari `web` lewat volume `benchspool`, dan web menjalankan AI yang bisa dibujuk isi APK. Maka:
+  * daemon hanya menerima `analysis_id` (angka), `sha256` (heksa 64), `command` (teks) dan `timeout` (angka); path dihitung SENDIRI (policy.py);
+  * setiap perintah dikurung Landlock di PROSES ANAK, GAGAL TERTUTUP (lihat landlock.py / confined_exec.py);
+  * daemon `non-dumpable` supaya perintah AI tidak bisa menyuntik kode ke proses daemon yang tidak dikurung.
+
+Satu perintah pada satu waktu. Setelah BENCH_IDLE_EXIT detik tanpa pekerjaan, daemon keluar dan Docker memulai kontainer segar (ruang kerja ada di volume).
+"""
+
+from __future__ import annotations
+
+import os
+import signal
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+from bench import executor, landlock, policy
+from rvcore import shellspool as SP
+from rvcore.fsutil import safe_rmtree
+
+DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
+DIRS = policy.Dirs(DATA_DIR)
+SPOOL = SP.make_spool(os.environ.get("BENCH_SPOOL", str(DATA_DIR / "benchspool")))
+
+
+def _int_env(name: str, default: int, lo: int, hi: int) -> int:
+    try:
+        v = int(os.environ.get(name, default))
+    except ValueError:
+        return default
+    return max(lo, min(hi, v))
+
+
+LIMITS = executor.Limits(
+    max_timeout=_int_env("BENCH_CMD_MAX_TIMEOUT", 120, 1, 3600),
+    output_bytes=_int_env("BENCH_CMD_MAX_OUTPUT_KB", 64, 1, 4096) * 1024,
+    workspace_bytes=_int_env("BENCH_WORKSPACE_MAX_MB", 2048, 1, 1_000_000) * 1024 * 1024,
+    file_bytes=_int_env("BENCH_FILE_MAX_MB", 256, 1, 100_000) * 1024 * 1024,
+    nproc=_int_env("BENCH_NPROC", 2048, 8, 1_000_000),
+)
+IDLE_EXIT = _int_env("BENCH_IDLE_EXIT", 900, 0, 10**7)
+HEARTBEAT_EVERY, HEALTH_MAX_AGE, TICK, STALE_FILE_SECONDS = 5.0, 20.0, 0.2, 3600
+STOP = threading.Event()
+
+
+def say(msg: str) -> None:
+    print(time.strftime("%Y-%m-%dT%H:%M:%S"), msg, flush=True)
+
+
+def validate_run(job: dict[str, Any]) -> tuple[int, str, int, str | None]:
+    """Periksa request. Melempar ValueError dengan pesan aman. Tidak ada path dari web yang dipakai."""
+    aid = job.get("analysis_id")
+    if not isinstance(aid, int) or isinstance(aid, bool) or not (1 <= aid < 2**31):
+        raise ValueError("analysis_id tidak valid")
+    command = job.get("command")
+    if not isinstance(command, str) or not command.strip() or "\x00" in command or len(command) > SP.MAX_COMMAND_CHARS:
+        raise ValueError("perintah tidak valid")
+    timeout = job.get("timeout")
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout < 1:
+        raise ValueError("timeout tidak valid")
+    sha = job.get("sha256")
+    if sha is not None and (not isinstance(sha, str) or not policy.SHA256_RE.match(sha)):
+        raise ValueError("sha256 tidak valid")
+    return aid, command, min(timeout, LIMITS.max_timeout), sha
+
+
+def run_job(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
+    op = job.get("op")
+    if op != SP.OP_RUN:
+        return {"status": SP.STATUS_REFUSED, "message": "operasi tidak dikenal"}
+    try:
+        aid, command, timeout, sha = validate_run(job)
+    except ValueError as exc:
+        return {"status": SP.STATUS_REFUSED, "message": f"permintaan ditolak: {exc}"}
+    say(f"[{job_id}] mulai analisis={aid} timeout={timeout}s perintah={len(command)} karakter")
+    return executor.run_confined(DIRS, LIMITS, analysis_id=aid, command=command, timeout=timeout, sha256=sha, job_id=job_id,
+                                 cancel=lambda: SPOOL.cancel_requested(job_id), heartbeat=lambda: SPOOL.write_heartbeat("busy", job_id))
+
+
+def housekeeping() -> None:
+    cutoff = time.time() - STALE_FILE_SECONDS
+    for d in (SPOOL.results, SPOOL.cancel, SPOOL.tmp, SPOOL.running):
+        try:
+            for p in d.iterdir():
+                try:
+                    if p.stat().st_mtime < cutoff:
+                        p.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    n = sweep_orphan_workspaces()
+    if n:
+        say(f"penyapu: {n} ruang kerja yatim dihapus")
+
+
+ORPHAN_GRACE_SECONDS = 3600      # ruang kerja yang baru disentuh tidak disapu (analisis ulang menghapus work/<id> sesaat)
+
+
+def sweep_orphan_workspaces(now: float | None = None) -> int:
+    """Hapus bench/<id> yang analisisnya sudah tidak ada. Daemon TIDAK punya DB (tanpa rahasia); petunjuknya: work/<id> sudah hilang DAN seluruh ruang kerja tidak
+    disentuh selama ORPHAN_GRACE_SECONDS. Ini JARING PENGAMAN (web menghapus ruang kerja saat hapus analisis); salah menghapus = kehilangan pekerjaan pengguna,
+    jadi sangat konservatif:
+      * `work/` harus ada dan berisi sesuatu (volume belum terpasang / kosong BUKAN berarti semua analisis dihapus);
+      * aktivitas = mtime TERBARU di seluruh pohon ruang kerja, bukan folder akarnya (mtime folder tidak berubah saat berkas di subfolder diedit);
+      * 'Analisis ulang' menghapus work/<id> sesaat: ada masa tenggang satu jam."""
+    removed = 0
+    cutoff = (now if now is not None else time.time()) - ORPHAN_GRACE_SECONDS
+    try:
+        if not any(DIRS.work.iterdir()):
+            return 0
+        entries = list(os.scandir(DIRS.bench))
+    except OSError:
+        return 0
+    for e in entries:
+        try:
+            if not e.name.isdigit() or e.is_symlink() or not e.is_dir(follow_symlinks=False):
+                continue
+            if (DIRS.work / e.name).exists() or executor.latest_activity(Path(e.path)) > cutoff:
+                continue
+            safe_rmtree(e.path)
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def abort_orphans() -> None:
+    for job_id in SPOOL.running_job_ids():
+        SPOOL.finish(job_id, {"status": SP.STATUS_FAILED, "message": "bench dimulai ulang saat perintah berjalan"})
+
+
+def health() -> int:
+    age = SPOOL.heartbeat_age()
+    return 0 if age is not None and age <= HEALTH_MAX_AGE else 1
+
+
+def selfcheck() -> bool:
+    abi = landlock.abi_version()
+    say(f"Landlock ABI v{abi}" if abi else "PERINGATAN: Landlock TIDAK tersedia; setiap perintah akan DITOLAK (gagal tertutup)")
+    return abi > 0
+
+
+def main() -> int:
+    if "--health" in sys.argv:
+        return health()
+    if "--check" in sys.argv:
+        return 0 if selfcheck() else 1
+    signal.signal(signal.SIGTERM, lambda *_: STOP.set())
+    signal.signal(signal.SIGINT, lambda *_: STOP.set())
+    landlock.make_non_dumpable()
+    executor.enable_subreaper()
+    SPOOL.ensure_dirs()
+    DIRS.bench.mkdir(parents=True, exist_ok=True)
+    selfcheck()
+    abort_orphans()
+    say(f"bench siap: data={DATA_DIR} timeout<={LIMITS.max_timeout}s keluaran<={LIMITS.output_bytes // 1024}KB ruang kerja<={LIMITS.workspace_bytes // (1024 * 1024)}MB")
+    last_hb = last_house = 0.0
+    last_work = time.monotonic()
+    while not STOP.is_set():
+        claimed = SPOOL.claim_next()
+        if claimed is not None:
+            job_id, job = claimed
+            try:
+                result = run_job(job_id, job)
+            except Exception as exc:  # noqa: BLE001 - satu job buruk tak boleh mematikan daemon
+                say(f"[{job_id}] galat internal: {type(exc).__name__}")
+                result = {"status": SP.STATUS_FAILED, "message": f"galat internal bench ({type(exc).__name__})"}
+            SPOOL.finish(job_id, result)
+            say(f"[{job_id}] selesai: {result.get('status')} {int(result.get('duration_ms') or 0)}ms")
+            last_work = time.monotonic()
+            continue
+        now = time.monotonic()
+        if now - last_hb >= HEARTBEAT_EVERY:
+            SPOOL.write_heartbeat("idle")
+            last_hb = now
+        if now - last_house >= 300:
+            housekeeping()
+            last_house = now
+        if IDLE_EXIT and now - last_work > IDLE_EXIT:
+            say("idle terlalu lama: keluar agar Docker memulai kontainer segar")
+            return 0
+        STOP.wait(TICK)
+    say("berhenti")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

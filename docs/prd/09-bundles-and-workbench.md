@@ -1,6 +1,6 @@
 # 09 — Paket multi-APK & bengkel modifikasi
 
-> **Status: Bagian A (paket multi-APK) SEBAGIAN SUDAH ADA; Bagian B dan C masih RENCANA, belum ada kode.** Yang sudah ada (PR A, lihat "Status PR A" di bawah): unggah `.xapk` dan `.apks`, base APK diekstrak di runner dan dianalisis. Yang belum: `.apkm`, `.aab`, penggabungan split, analisis split, dan seluruh Bagian B/C. Selama Bagian B/C belum dikerjakan, pernyataan di 00 §4, 05 "Prinsip", dan 07 "Model ancaman" **tetap berlaku apa adanya** (tidak ada shell, tidak ada penulisan APK, tidak ada tanda tangan). Tiap PR implementasi di bagian "Urutan kerja" mengubah pernyataan itu bersamaan dengan kodenya.
+> **Status: Bagian A (XAPK/APKS) dan Bagian C (shell AI) SEBAGIAN SUDAH ADA; Bagian B (membangun & menandatangani APK) masih RENCANA, belum ada kode.** Shell AI (PR C, lihat "Status PR C") **mati secara bawaan** dan sengaja lebih sempit dari rancangan: tanpa build/tanda tangan, tanpa `bench_diff`/`request_build`/`get_build_status`, dan tanpa `apktool`/`jadx` di dalam `bench`. Selama Bagian B belum dikerjakan, tidak ada penulisan APK dan tidak ada tanda tangan.
 
 ## Tujuan
 Dua kemampuan baru, dikerjakan terpisah supaya risikonya terkendali:
@@ -274,6 +274,62 @@ Kedua master pada sampel APKS default **identik** (173 entri, CRC sama semua). I
 - Satu XAPK dan dua APKS: sampel sangat sedikit.
 
 **Keputusan isolasi `bench` (hasil `scripts/bench-probe.sh` di VPS pemilik, 12 Okt 2026):** kernel `6.8.0-146-generic`, Docker 29.9.0, kontainer `python:3.12-slim-trixie` uid 10001. **Landlock ABI v4 berfungsi** (berkas di dalam folder terbaca; baca, tulis, dan daftar folder di luar ditolak). User namespace diblokir (`EPERM`), jadi bwrap (opsi 3) tidak bisa dipakai. **Keputusan: opsi 2 (Landlock).** Opsi 1 (salin per sesi + uid terpisah) tidak diperlukan. Catatan: probe memakai `docker run` polos; pengaturan layanan `bench` yang sebenarnya (`cap_drop`, `read_only`, `seccomp`) harus diuji ulang saat PR C dikerjakan.
+
+## Status PR C (12 Okt 2026): shell AI (`shell_run`)
+
+**Sudah ada, MATI secara bawaan** (`AI_SHELL_ENABLED=0`). Kode: `services/bench/` (daemon, kebijakan, Landlock, eksekutor, `bench-selftest`), `services/rvcore/shellspool.py` (protokol web↔bench), tool `shell_run` di `ai/tools.py`, `docker-compose.yml` (layanan `bench`, volume `bench` dan `benchspool`), `make bench-selftest`.
+
+**Sengaja lebih sempit dari rancangan Bagian C** (alasannya: bagian yang tidak bisa dibuktikan di sini tidak dikirim):
+| Rancangan | Yang dikerjakan | Alasan |
+|----|----|----|
+| FR-9.30 `shell_run` | **Ya** | |
+| FR-9.31 `bench_diff`, FR-9.32 `request_build`, FR-9.33 `get_build_status`, FR-9.34 | **Tidak** | Bergantung Bagian B (build, `signer`, persetujuan) yang belum ada. AI **tidak** punya tool untuk membangun, menandatangani, atau menyetujui apa pun |
+| Alat `apktool`, `jadx`, `aapt2`, `zipalign` di `bench` | **Tidak** (hanya `bash`, `coreutils`, `grep/sed/awk`, `find`, `unzip/zip`, `file`, `xxd`, `diff`, `patch`, `python3`) | Tanpa Java image tetap kecil; hasil apktool/jadx sudah ada di `$WORK`. Konsekuensi: AI bisa mengubah **salinan** smali/resource di `$WS`, tetapi tidak bisa membangun APK |
+| FR-9.14/9.39 ruang kerja "salinan `apktool`" dibuat lazily | Ruang kerja `bench/<id>/` **kosong**, dibuat saat perintah pertama; AI menyalin sendiri dari `$WORK` | Lebih sederhana; tidak ada salinan otomatis berukuran ratusan MB |
+| FR-9.35 perintah dan keluaran tampil (terlipat), tersimpan di `chat_message.tool_calls` | **Ya**, dibatasi (perintah 2000, stdout 6000, stderr 3000 karakter, sudah diredaksi) | |
+| FR-9.36 batas per giliran | Jumlah perintah (`AI_SHELL_MAX_CALLS_PER_TURN`, bawaan 40) dan waktu per perintah; total keluaran memakai `AI_MAX_TURN_TOOL_CHARS` yang sudah ada | |
+| FR-9.37 redaksi | **Ya**: stdout, stderr, **perintah**, dan argumen yang disimpan/dikirim ke UI | Lihat temuan kebocoran argumen di `audit.md` 10.11 |
+| FR-9.38 antarmuka ruang kerja untuk pengguna | **Tidak** | P2 |
+| Daur ulang kontainer per analisis | `BENCH_IDLE_EXIT` (bawaan 900 dtk idle) | Ruang kerja ada di volume dan bertahan |
+
+**Keputusan isolasi antar analisis: Landlock (opsi 2)**, berdasarkan hasil `bench-probe.sh` di VPS pemilik (ABI v4). Setiap perintah berjalan di proses anak (`bench.confined_exec`) yang memasang Landlock lalu `exec bash`. **GAGAL TERTUTUP**: bila Landlock tidak tersedia/gagal dipasang, atau uji kenari (daftar folder di luar aturan harus ditolak) tidak lulus, bash **tidak pernah dijalankan**; daemon hanya menganggap perintah berjalan bila "penanda terkurung" sudah ditulis lewat pipa sebelum `exec` (sehingga `exit 121` dari perintah AI tidak tertukar dengan kegagalan pengurungan).
+
+**Aturan akses (daftar putih; `policy.py`)**, semua path dihitung daemon dari `analysis_id` (angka) dan `sha256` (heksa 64), tidak pernah dari web:
+- **Baca**: sistem (`/usr`, `/bin`, `/lib*`, `/etc`, `/opt`), `work/<id>/{apktool,jadx,logs,manifest.json}`, dan APK analisis itu (`uploads/<sha>.apk`, satu berkas).
+- **Tulis**: `bench/<id>/` (`$WS`) dan folder sementara job.
+- **Tertutup**: **`work/<id>/index/`** (berisi nilai rahasia mentah; alasan yang sama dengan penjelajah folder), analisis lain, ruang kerja lain, `db`, `files`, `spool`, `benchspool`, dan **daftar isi** `/data`, `work/<id>`, `uploads`, `bench`. Akibat yang disengaja: `ls $WORK` ditolak (Landlock tidak punya "daftar folder tanpa membuka anak-anaknya"), sedangkan `ls $WORK/apktool` bisa. Hal ini dijelaskan di prompt tool agar AI tidak menganggapnya galat.
+
+**Kontainer `bench`**: `network_mode: none`, `read_only`, non-root (uid 10001), `cap_drop: ALL`, `no-new-privileges`, tmpfs `/tmp`, `mem_limit 1g`, `pids_limit 512`. **Tanpa** kunci AI, DB, Redis, `files`, `spool` runner, keystore, dan Docker socket (diperiksa oleh `tests/test_shell_tool.py`). `work` dan `uploads` dipasang **baca saja**.
+
+**Batas per perintah**: timeout (bawaan 60 dtk, maks. 120), keluaran (kepala+ekor, 64 KB/aliran di bench lalu `AI_SHELL_MAX_OUTPUT_CHARS` di web), ukuran satu berkas (256 MB), kuota ruang kerja (2048 MB, ditolak sebelum jalan), `RLIMIT_NPROC`, `RLIMIT_CPU`, tanpa core dump. Seluruh keturunan (termasuk `setsid`/double-fork, dan proses yang mengabaikan `SIGTERM`) dimatikan sesudah tiap perintah (subreaper + `SIGKILL`). Daemon `non-dumpable` supaya perintah AI tidak bisa menyuntik kode ke daemon yang tidak dikurung.
+
+**Kepercayaan di kedua arah**: bench menolak request yang bidangnya tidak valid (`analysis_id`, `sha256`, tipe, panjang); web memperlakukan hasil bench sebagai data tak tepercaya (ukuran berkas dicek **sebelum** dibaca, symlink ditolak, JSON ketat, tiap bidang dinormalkan, `parse_result` tidak pernah melempar).
+
+**Audit**: `ai_shell_run` mencatat `analysis_id`, status, kode keluar, panjang perintah, durasi, jumlah karakter keluaran. **Isi perintah dan keluaran tidak dicatat** (bisa memuat rahasia dari APK).
+
+**Terbukti** (sandbox; kernel 6.1, Landlock ABI v2; Python 3.12; sebagai `nobody` bila relevan):
+| Bukti | Hasil |
+|----|----|
+| Pengurungan nyata | 24 upaya baca/tulis/hapus/tautan/`..`/`/proc/self/root`/symlink di luar daftar putih **semua ditolak**, tanpa satu pun umpan bocor; kontrol positif (manifest/jadx/APK sendiri, tulis di `$WS`, `python3`) berjalan |
+| Gagal tertutup | Landlock dimatikan di proses pembantu → `refused`, perintah tidak jalan; tiap lapis (Landlock-error, kenari, penanda) dipaksa gagal **sendirian** dan masing-masing menolak |
+| Ujian menyeluruh | Server web asli (`AI_SHELL_ENABLED=1`) + `bench-daemon` asli sebagai `nobody` + "model" palsu yang meminta tool; analisis NewPipe NYATA (7.095 berkas Java): **23 dari 23 cek lulus**: alur normal, tiga upaya injeksi (baca `index/`, baca analisis lain, `/proc/1/environ`) ditolak kernel, `$WS` bertahan antar giliran dan hasil dekompilasi asli tidak berubah, rahasia dalam perintah tidak bocor di event/UI/halaman muat-ulang/DB/audit, **Batal menghentikan `sleep 60` dalam 2,2 dtk** tanpa proses sisa, bench mati → galat tool yang jelas |
+| Browser (Chromium) | Kartu perintah+keluaran terlipat di 1280 dan 375 px; keluaran jahat (`<img onerror>`, `<script>`) tampil sebagai teks (`window.__pwned` tetap kosong, nol elemen `<img>`/`<script>`); target sentuh 44 px; tanpa luber; tanpa galat JS/CSP |
+| Tes | `tests/test_shell_bench.py` (86), `tests/test_shell_tool.py` (49), `tests/test_spool.py` (9, spool sebelumnya tanpa tes); suite 692 lulus; urutan terbalik lulus; urutan acak hanya 10 error lama `test_files_page` |
+| Mutasi | **79 mutasi unik: 77 tertangkap, 2 setara.** Awalnya 16 lolos; 14 ditutup dengan tes baru yang memaksa **tiap lapis gagal sendirian**, 2 dibuktikan setara (L1: jalur kedua tetap melempar, terukur; X12: disapu ulang di tiga tempat). Pengecualian jujur: L5 (`NO_NEW_PRIVS`) tertangkap oleh tes yang mensimulasikan kegagalan `prctl`, bukan oleh perilaku kernel, karena sandbox ini sudah `NoNewPrivs: 1` |
+
+**Temuan yang mengubah rancangan:**
+1. **`RLIMIT_NPROC` dihitung per UID di seluruh host** (terukur: 90 proses lain dengan uid sama membuat perintah yang hanya butuh 40 proses gagal pada batas 100). Karena web/worker/runner/bench memakai uid 10001, nilai kecil membuat perintah sah gagal secara acak. Batas bawaan dinaikkan ke 2048 dan pembatas proses yang tepat per kontainer adalah `pids_limit` (cgroup).
+2. **Uid terpisah untuk bench tidak dipakai**: web (10001) tidak bisa menghapus ruang kerja milik uid lain (terukur: EACCES), padahal hapus analisis harus membersihkannya. Dipertahankan satu uid; isolasi antar analisis ditegakkan Landlock, bukan uid.
+3. **Argumen tool yang disimpan memuat perintah mentah** (lihat `audit.md` 10.11).
+
+**Keterbatasan dan yang BELUM terbukti (penting sebelum menyalakan `AI_SHELL_ENABLED`):**
+- **Belum dijalankan di Docker.** Sandbox tidak punya daemon Docker. Yang nyata: daemon, Landlock, eksekutor, spool, web, agent. Yang belum: `network_mode: none`, `read_only`, `cap_drop`, `pids_limit`, `mem_limit`, `Dockerfile` bench, dan interaksi profil seccomp/AppArmor Docker dengan syscall Landlock. **Jalankan `make bench-selftest` di VPS** (kegagalan Landlock membuatnya gagal keras, bukan lolos diam-diam); itu satu-satunya bukti yang sah untuk lingkungan produksi.
+- Sandbox memakai **Landlock ABI v2**, VPS pemilik v4. Perbedaannya: pada v4 ada pembatasan TCP (lapis kedua selain `network_mode: none`); itu tidak teruji di sini. Pada ABI < 4, satu-satunya penghalang jaringan adalah kontainer. `bench-selftest` menyebut lapis mana yang menahan.
+- Perintah AI **tidak bisa** menjalankan alat Java (`apktool`, `jadx`) atau mengakses jaringan, dan **tidak bisa** membangun/menandatangani APK.
+- Redaksi memakai pola yang sama dengan tool lain: **bukan jaminan** (string rahasia tanpa pola dikenal tetap bisa lolos); keluaran shell, seperti isi APK, dikirim ke provider AI.
+- Perintah yang disusun AI dikurung, tetapi di dalam `$WS` AI bebas membuat berkas/proses selama batas waktu; proses yang melepaskan diri dimatikan setelah perintah selesai.
+- Penyapu ruang kerja yatim (jaring pengaman bila web gagal menghapus) ada di daemon, sangat konservatif (penanda aktivitas, `mtime` terbaru di seluruh pohon, masa tenggang 1 jam, tidak jalan bila `work/` kosong). Ia menghapus data, jadi diuji ketat; versi pertamanya menghapus ruang kerja yang sedang dipakai (lihat `audit.md` 10.11).
+- Nama berkas non-UTF-8 di `$WS` tidak dipengaruhi (tidak ada tampilan daftar berkas ruang kerja untuk pengguna).
 
 ## Pertanyaan terbuka
 - [DIPUTUSKAN] Isolasi antar analisis di `bench`: **Landlock (opsi 2)**, berdasarkan `scripts/bench-probe.sh` di VPS (lihat Status PR A). [OPEN] diuji ulang dengan pengaturan kontainer `bench` yang sebenarnya.

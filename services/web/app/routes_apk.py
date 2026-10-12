@@ -20,7 +20,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 from starlette.requests import ClientDisconnect
 
-from rvcore import store
+from rvcore import shellspool, store
 from rvcore.db import tx
 from rvcore.fsutil import read_json_under, safe_rmtree
 
@@ -971,6 +971,12 @@ def _delete(apk_id: int, ip: str) -> str:
     for analysis_id in ids:
         safe_rmtree(layout.work_dir(analysis_id))
         file_store.remove_all(analysis_id)         # lampiran & berkas buatan AI (baris DB sudah hilang lewat CASCADE)
+        # Ruang kerja shell AI (bench). Web hanya MENGHAPUS (safe_rmtree tidak mengikuti symlink) dan tidak pernah membaca isinya: itu data tak tepercaya.
+        # Langsung, bukan lewat daemon bench, agar tetap bersih walau bench sedang mati. (Uid sama dengan bench: uid terpisah membuat web EACCES, terukur.)
+        try:
+            safe_rmtree(shellspool.workspace_dir(layout.root / "bench", analysis_id))
+        except OSError:
+            log.exception("gagal menghapus ruang kerja bench analisis %s", analysis_id)
     try:
         path = layout.upload_path(row["sha256"])
         path.unlink(missing_ok=True)

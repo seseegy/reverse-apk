@@ -69,6 +69,14 @@ class AIConfig:
     # (hemat satu putaran tool); yang lebih besar dibaca model lewat read_file secara bertahap.
     max_image_bytes: int = 10 * 1024 * 1024
     inline_attach_chars: int = 16000
+    # Shell untuk AI (tool shell_run; PRD 09 Bagian C). MATI secara bawaan: perintah berjalan di kontainer `bench` terpisah (tanpa jaringan, tanpa
+    # rahasia, tiap perintah dikurung Landlock). Nyalakan hanya setelah `make bench-selftest` lulus di server Anda.
+    shell_enabled: bool = False
+    shell_timeout_s: int = 60                 # batas waktu bawaan satu perintah (AI boleh meminta lebih kecil; bench membatasi dari atas)
+    shell_max_timeout_s: int = 120            # batas atas yang boleh diminta AI
+    shell_max_calls_per_turn: int = 40        # jumlah perintah per giliran (0 = tanpa batas)
+    shell_max_output_chars: int = 12000       # keluaran per perintah yang dikirim kembali ke model (setelah redaksi)
+    shell_spool_dir: str = "/data/benchspool"
 
     @property
     def enabled(self) -> bool:
@@ -126,4 +134,10 @@ def load_ai_config() -> AIConfig:
         tool_timeout_s=_float("AI_TOOL_TIMEOUT", 60.0),
         max_image_bytes=int(_float("AI_MAX_IMAGE_MB", 10.0) * 1024 * 1024),
         inline_attach_chars=_int("AI_INLINE_ATTACH_CHARS", 16000, 0, 100_000_000),
+        shell_enabled=os.environ.get("AI_SHELL_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"},     # beda dengan redaksi: SALAH-nya = mati
+        shell_timeout_s=_int("AI_SHELL_TIMEOUT", 60, 1, 3600),
+        shell_max_timeout_s=_int("AI_SHELL_MAX_TIMEOUT", 120, 1, 3600),
+        shell_max_calls_per_turn=_int("AI_SHELL_MAX_CALLS_PER_TURN", 40, 0, 100_000),
+        shell_max_output_chars=_int("AI_SHELL_MAX_OUTPUT_CHARS", 12000, 500, 1_000_000),
+        shell_spool_dir=os.environ.get("AI_SHELL_SPOOL", "/data/benchspool").strip() or "/data/benchspool",
     )

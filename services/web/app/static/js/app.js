@@ -1137,7 +1137,8 @@
     list_files: function () { return "Daftar berkas & lampiran"; },
     write_file: function (a) { return (a.mode === "append" ? "Sambung " : "Tulis ") + baseName(a.path); },
     edit_file: function (a) { return "Ubah " + baseName(a.path); },
-    view_image: function (a) { return "Lihat gambar " + baseName(a.path); }
+    view_image: function (a) { return "Lihat gambar " + baseName(a.path); },
+    shell_run: function (a) { return "Jalankan: " + String(a.command || "").replace(/\s+/g, " ").trim(); }
   };
   function toolLabel(name, argsText) {
     var a = null;
@@ -1170,6 +1171,25 @@
         if (summary) { sub.textContent = summary; sub.hidden = false; }
         time.textContent = fmtDur(ms === undefined ? Date.now() - t0 : ms);
         li.setAttribute("aria-label", label.textContent + (ok ? ": berhasil" : ": gagal"));
+      },
+      // Rincian perintah shell (terlipat). SEMUA teks dari server/model lewat textContent, tidak pernah innerHTML. Data sudah diredaksi di server.
+      detail: function (d) {
+        if (!d || typeof d !== "object") return;
+        var det = document.createElement("details"); det.className = "tstep-out";
+        var sum = document.createElement("summary"); sum.textContent = "Perintah & keluaran";
+        det.appendChild(sum);
+        function block(title, text, cls) {
+          if (typeof text !== "string" || !text) return;
+          var h = document.createElement("span"); h.className = "tstep-out-h"; h.textContent = title;
+          var pre = document.createElement("pre"); pre.className = "tstep-pre" + (cls ? " " + cls : ""); pre.tabIndex = 0;
+          pre.textContent = text; pre.setAttribute("aria-label", title);
+          det.appendChild(h); det.appendChild(pre);
+        }
+        block("Perintah", d.command, "tstep-cmd");
+        block("stdout", d.stdout);
+        block("stderr", d.stderr, "tstep-err");
+        if (typeof d.exit_code === "number") { var ex = document.createElement("span"); ex.className = "tstep-out-h"; ex.textContent = "Kode keluar: " + d.exit_code; det.appendChild(ex); }
+        body.appendChild(det);
       }
     };
     return api;
@@ -1443,6 +1463,8 @@
       items.forEach(function (li) {
         var st = makeStep(li.getAttribute("data-tool"), li.getAttribute("data-args") || "");
         st.done(li.getAttribute("data-ok") === "1", li.getAttribute("data-summary") || "", 0);
+        var raw = li.getAttribute("data-detail");
+        if (raw) { try { st.detail(JSON.parse(raw)); } catch (_) { /* rincian rusak: kartu tetap tampil tanpa rincian */ } }
         st.li.querySelector(".tstep-time").textContent = "";
         ul.replaceChild(st.li, li);
       });
@@ -1737,6 +1759,7 @@
       function draftLabel(name, path) {
         if (name === "write_file") return "Menulis " + (path ? baseName(path) : "berkas");
         if (name === "edit_file") return "Menyusun perubahan " + (path ? baseName(path) : "berkas");
+        if (name === "shell_run") return "Menyusun perintah shell";
         return "Menyiapkan " + name;
       }
 
@@ -1769,7 +1792,7 @@
       };
       v.onToolEnd = function (d) {
         var rec = stepById[d.id];
-        if (rec) { rec.step.done(!!d.ok, d.summary || (d.ok ? "ok" : "galat"), typeof d.ms === "number" ? d.ms : Date.now() - rec.t0); running = Math.max(0, running - 1); sumText(); }
+        if (rec) { rec.step.done(!!d.ok, d.summary || (d.ok ? "ok" : "galat"), typeof d.ms === "number" ? d.ms : Date.now() - rec.t0); if (d.detail) rec.step.detail(d.detail); running = Math.max(0, running - 1); sumText(); }
         if (!running) { label("Asisten melanjutkan setelah menjalankan tool…"); if (!v.raw) v.setTyping(true); }
         scrollDown(false);
       };

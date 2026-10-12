@@ -24,7 +24,7 @@ parse_value() {
 # Variabel yang diteruskan compose ke container mana pun: yang muncul sebagai ${NAMA...} atau "NAMA:" di bagian environment.
 forwarded=" $(grep -oE '\$\{[A-Z][A-Z0-9_]*' "$COMPOSE_FILE_PATH" | tr -d '${' | sort -u | tr '\n' ' ') "
 
-SERVICES="${SERVICES:-web worker runner caddy}"
+SERVICES="${SERVICES:-web worker runner bench caddy}"
 SECRETISH='^(SECRET_KEY|REDIS_PASSWORD|AI_API_KEY)$'
 bad=0; ok=0; ignored=0
 declare -a keys=()

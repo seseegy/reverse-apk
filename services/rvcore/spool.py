@@ -48,7 +48,11 @@ def new_job_id(analysis_id: int, stage: str) -> str:
 
 
 class Spool:
-    def __init__(self, root: str | os.PathLike[str]) -> None:
+    def __init__(self, root: str | os.PathLike[str], *, id_re: "re.Pattern[str]" = JOB_ID_RE, max_request: int = MAX_REQUEST_BYTES) -> None:
+        # Bawaan = perilaku worker<->runner. Spool lain (bench, shellspool.py) memakai pola id dan batas ukurannya sendiri, dan HARUS
+        # berada di direktori/volume terpisah: claim_next mengklaim apa saja yang lolos `id_re` di requests/.
+        self.id_re = id_re
+        self.max_request = max_request
         self.root = Path(root)
         self.requests = self.root / "requests"
         self.running = self.root / "running"
@@ -64,13 +68,13 @@ class Spool:
     # ------------------------------------------------------------ worker side
     def submit(self, job: dict[str, Any]) -> None:
         job_id = job["job_id"]
-        if not JOB_ID_RE.match(job_id):
+        if not self.id_re.match(job_id):
             raise ValueError("job_id tidak valid")
         self.ensure_dirs()
         atomic_write_json(self.requests / f"{job_id}.json", self.tmp, job)
 
     def request_cancel(self, job_id: str) -> None:
-        if not JOB_ID_RE.match(job_id):
+        if not self.id_re.match(job_id):
             return
         self.ensure_dirs()
         try:
@@ -138,7 +142,7 @@ class Spool:
             return None
         for path in names:
             job_id = path.stem
-            if not JOB_ID_RE.match(job_id):
+            if not self.id_re.match(job_id):
                 self._discard(path)
                 continue
             target = self.running / path.name
@@ -147,7 +151,7 @@ class Spool:
             except OSError:
                 continue
             try:
-                if target.stat().st_size > MAX_REQUEST_BYTES:
+                if target.stat().st_size > self.max_request:
                     raise ValueError("request terlalu besar")
                 job = json.loads(target.read_text(encoding="utf-8"))
                 if not isinstance(job, dict) or job.get("job_id") != job_id:
@@ -174,7 +178,7 @@ class Spool:
 
     def running_job_ids(self) -> list[str]:
         try:
-            return [p.stem for p in self.running.iterdir() if p.suffix == ".json" and JOB_ID_RE.match(p.stem)]
+            return [p.stem for p in self.running.iterdir() if p.suffix == ".json" and self.id_re.match(p.stem)]
         except OSError:
             return []
 

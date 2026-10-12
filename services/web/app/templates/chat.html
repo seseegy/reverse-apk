@@ -88,7 +88,7 @@
           {% if m.tool_calls %}
           <details class="msg-tools"><summary>{{ m.tool_calls|length }} langkah tool</summary>
             <ul class="plain-list">
-              {% for t in m.tool_calls %}<li data-tool="{{ t.name }}" data-args="{{ t.args }}" data-ok="{{ 1 if t.ok else 0 }}" data-summary="{{ t.summary }}"><span class="mono">{{ t.name }}</span> <span class="muted mono break">{{ t.args }}</span>
+              {% for t in m.tool_calls %}<li data-tool="{{ t.name }}" data-args="{{ t.args }}" data-ok="{{ 1 if t.ok else 0 }}" data-summary="{{ t.summary }}"{% if t.detail %} data-detail='{{ t.detail|tojson|forceescape }}'{% endif %}><span class="mono">{{ t.name }}</span> <span class="muted mono break">{{ t.args }}</span>
                 <span class="{{ 'ok' if t.ok else 'bad' }} hint">{{ t.summary }}</span></li>{% endfor %}
             </ul></details>
           {% endif %}

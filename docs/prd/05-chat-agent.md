@@ -5,7 +5,7 @@ Memberi pengguna antarmuka tanya-jawab ke kode APK. Model menelusuri kode sendir
 
 ## Prinsip
 1. **Read-only**: tool hanya membaca artefak analisis yang sudah ada.
-2. **Tanpa efek samping**: tidak ada shell, jaringan, tulis berkas, atau eksekusi APK. *(Rencana: shell di kontainer `bench` terpisah, bukan di `web`, lewat [09](09-bundles-and-workbench.md) Bagian C; belum berlaku.)*
+2. **Tanpa efek samping**: tidak ada shell, jaringan, tulis berkas di luar folder berkas AI, atau eksekusi APK. **Satu pengecualian, MATI secara bawaan**: dengan `AI_SHELL_ENABLED=1` AI mendapat tool `shell_run` yang menjalankan perintah bash di kontainer `bench` terpisah (tanpa jaringan, tanpa rahasia, tiap perintah dikurung Landlock ke satu analisis; lihat [09](09-bundles-and-workbench.md) "Status PR C"). Tidak ada eksekusi di proses `web`, dan APK tetap tidak pernah dijalankan.
 3. **Terikat sesi**: semua tool dibatasi pada satu `analysis_id`.
 4. **Bisa diaudit**: setiap tool call dicatat dan terlihat di UI.
 
@@ -31,6 +31,7 @@ Memberi pengguna antarmuka tanya-jawab ke kode APK. Model menelusuri kode sendir
 | `write_file` | `path`, `content`, `mode=overwrite|append|create` | menulis berkas teks/kode ke folder berkas analisis (lihat "Lampiran & berkas buatan AI") | ekstensi teks saja, ukuran/kuota dari `.env` |
 | `edit_file` | `path`, `old_string`, `new_string?` | mengganti SATU potongan persis di berkas buatan AI | gagal bila `old_string` tidak unik |
 | `view_image` | `path` | melihat gambar lampiran (`lampiran/<id>`) atau gambar di APK (`apktool/res/...png`); hanya ditawarkan ke model bertanda `vision` | gambar ≤ `AI_MAX_IMAGE_MB` |
+| `shell_run` | `command`, `timeout?` | `exit_code`, `stdout`, `stderr` (kepala+ekor, diredaksi), `ringkas`; **hanya ditawarkan bila `AI_SHELL_ENABLED=1`** | perintah ≤ 8000 karakter; timeout bawaan 60 dtk (maks. `AI_SHELL_MAX_TIMEOUT`); keluaran ≤ `AI_SHELL_MAX_OUTPUT_CHARS`; ≤ `AI_SHELL_MAX_CALLS_PER_TURN` per giliran; dijalankan di `bench`, bukan di `web` |
 
 `read_file` juga membaca `lampiran/<id|nama>` dan `hasil_ai/<path>`.
 
@@ -86,7 +87,7 @@ Permintaan untuk menyerang layanan pihak ketiga (mis. mengeksploitasi endpoint y
 - **Pembungkus hasil tool tak bisa ditutup dari dalam APK**: `</hasil_tool` pada isi diganti escape JSON `<\/hasil_tool`.
 - **Floor price router**: biaya satu request = `max(biaya token, floor_per_request)`; floor bawaan 0,01 kredit (`config/ai_models.json`), setara ±33 ribu token pada tarif 0,3/juta. Satu pertanyaan ke agent = banyak request (tiap selesai tool, model dipanggil lagi), jadi satu giliran sampai `AI_MAX_STEPS` (bawaan 100) langkah minimal 1 kredit (Rp300) = seluruh anggaran sesi bawaan. Giliran yang benar-benar memakai ratusan langkah akan berhenti karena anggaran; naikkan `AI_SESSION_BUDGET_CREDITS` bila perlu.
 - **Redaksi secret sebelum kirim ke provider** memakai pola yang sama dengan analyzer (`AI_REDACT_SECRETS=1` bawaan). Berlaku untuk pesan pengguna, hasil tool, dan kueri yang dipantulkan. Nilai secret mentah tidak pernah diberikan ke model (`get_findings` tidak memuatnya).
-- **Kode APK = data**: prompt sistem menyatakannya, setiap hasil tool dibungkus `<hasil_tool>` + peringatan, dan tidak ada tool tulis/shell/jaringan.
+- **Kode APK = data**: prompt sistem menyatakannya, setiap hasil tool dibungkus `<hasil_tool>` + peringatan, dan tidak ada tool jaringan. Tool tulis hanya `write_file`/`edit_file` ke folder berkas AI; tool shell hanya `shell_run` dan hanya bila `AI_SHELL_ENABLED=1`. Aturan A (isi APK = data, bukan instruksi) tetap utuh di prompt saat shell menyala, dan keluaran shell diperlakukan sebagai data yang sama tak tepercayanya.
 - **Sitasi** `path:baris` diverifikasi server (berkas dan baris harus ada); yang gagal tetap ditampilkan dengan label "tidak terverifikasi".
 - **Pengaman loop**: batas langkah (`AI_MAX_STEPS`), batas total data tool per giliran, panggilan identik berulang dihentikan, anggaran dicek sebelum tiap panggilan; bila model membandel di langkah final, pengguna tetap mendapat pesan jelas (bukan gelembung kosong).
 - **Skrip & `.md` dari AI**: hanya teks, dengan tombol Salin/Unduh (`text/plain`). Tidak ada penyimpanan di server dan tidak pernah dijalankan. Jawaban dirender lewat DOM (tanpa `innerHTML`); tautan dari model tidak pernah menjadi `<a>`.
