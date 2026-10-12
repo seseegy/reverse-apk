@@ -21,7 +21,7 @@ make doctor      # periksa kesehatan
 Panduan lengkap untuk VPS: [docs/deploy.md](docs/deploy.md).
 
 ## Perintah
-`make help` menampilkan semuanya: `init`, `password`, `up`, `down`, `restart`, `logs`, `ps`, `update`, `runner-selftest`, `doctor`, `test`.
+`make help` menampilkan semuanya: `init`, `password`, `up`, `down`, `restart`, `logs`, `ps`, `update`, `runner-selftest`, `bench-selftest`, `net-check` (shell AI dan jaringannya, lihat `.env.example`), `doctor`, `test`.
 
 Tes (tanpa Docker): `pip install -r services/web/requirements.txt -r tests/requirements.txt` lalu `make test`. CI menjalankannya di setiap PR.
 

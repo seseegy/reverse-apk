@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Uji mandiri image bench: BUKTI isolasi dari dalam kontainer sungguhan. Keluar dengan kode != 0 bila ada yang gagal.
 
-Dijalankan lewat `make bench-selftest`, yang memakai opsi isolasi yang sama dengan layanan asli (--network none, --read-only, --cap-drop ALL,
-non-root, no-new-privileges). JALANKAN INI di server Anda sebelum menyalakan AI_SHELL_ENABLED=1: yang tidak bisa dibuktikan dari luar kontainer
+Dijalankan lewat `make bench-selftest`, yang memakai opsi isolasi yang sama dengan layanan asli (jaringan internal `benchnet`, --read-only, --cap-drop ALL,
+non-root, no-new-privileges). Bila AI_SHELL_NET_ALLOW terisi (BENCH_NET_PROXY terset) ada bagian tambahan yang membuktikan jaringan terkunci ke proxy `egress`. JALANKAN INI di server Anda sebelum menyalakan AI_SHELL_ENABLED=1: yang tidak bisa dibuktikan dari luar kontainer
 adalah apakah Landlock benar-benar bekerja di bawah profil seccomp/AppArmor Docker Anda.
 
 Cara kerja: membuat DATA UMPAN di folder sementara (analisis dengan index/ berisi 'rahasia', analisis lain, database) lalu menjalankan perintah
@@ -12,6 +12,7 @@ lewat executor yang SAMA dengan produksi. Setiap yang seharusnya ditolak HARUS d
 from __future__ import annotations
 
 import os
+import shlex
 import socket
 import sys
 import tempfile
@@ -20,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.environ.get("PYTHONPATH", "/app").split(":")[0])
 
-from bench import executor, landlock, policy  # noqa: E402
+from bench import executor, landlock, netprobe, policy  # noqa: E402
 
 failed = False
 UMPAN = "UMPAN-RAHASIA-JANGAN-BOCOR"
@@ -50,7 +51,7 @@ for host in ("1.1.1.1", "8.8.8.8"):
             break
     except OSError:
         pass
-report(not reachable, "jaringan terisolasi", "koneksi keluar gagal (benar)" if not reachable else "internet TERJANGKAU")
+report(not reachable, "jaringan terisolasi (selftest sendiri tidak punya rute ke internet)", "koneksi keluar gagal (benar)" if not reachable else "internet TERJANGKAU")
 env_leaks = sorted(k for k in os.environ if any(t in k.upper() for t in ("API_KEY", "SECRET", "PASSWORD", "TOKEN", "REDIS")))
 report(not env_leaks, "tidak ada rahasia di environment", "bersih" if not env_leaks else "ditemukan: " + ", ".join(env_leaks))
 
@@ -86,8 +87,8 @@ executor.enable_subreaper()
 D = str(data)
 
 
-def run(cmd: str, timeout: int = 15) -> dict:
-    return executor.run_confined(dirs, limits, analysis_id=1, command=cmd, timeout=timeout, sha256=SHA, job_id="s1-selftest0001")
+def run(cmd: str, timeout: int = 15, net: "executor.NetConfig | None" = None) -> dict:
+    return executor.run_confined(dirs, limits, analysis_id=1, command=cmd, timeout=timeout, sha256=SHA, job_id="s1-selftest0001", net=net)
 
 
 def must_work(name: str, cmd: str, expect: str = "") -> None:
@@ -133,15 +134,58 @@ must_block("symlink ke index/ lalu baca", "ln -s $WORK/index $WS/s && cat $WS/s/
 must_block("lewat /proc/self/root", "cat /proc/self/root$WORK/index/findings.jsonl")
 must_block("lewat ..", "cat $WS/../2/catatan.txt")
 must_block("lingkungan daemon (/proc/<ppid>/environ)", "cat /proc/$PPID/environ")
-# Jaringan dari DALAM perintah AI. Dua lapis: (1) network_mode none pada kontainer (cek di atas), (2) Landlock TCP (ABI >= 4). Cek ini hanya bermakna bila
-# lapis 1 terbukti; bila tidak, hasilnya TIDAK membuktikan apa pun tentang Landlock dan ditandai jelas.
+# Jaringan dari DALAM perintah AI TANPA konfigurasi jaringan (keadaan bawaan). Dua lapis: (1) jaringan internal tanpa rute keluar (cek di atas), (2) Landlock TCP
+# (ABI >= 4). Cek ini hanya bermakna bila lapis 1 terbukti; bila tidak, hasilnya TIDAK membuktikan apa pun tentang Landlock dan ditandai jelas.
 net = run("python3 -c \"import socket; socket.create_connection(('1.1.1.1', 443), timeout=3)\"")
 net_blocked = net["status"] == "ok" and net["exit_code"] != 0
 if abi >= 4:
     report(net_blocked, "jaringan dari perintah AI ditolak (lapis Landlock TCP, ABI >= 4)", "ditolak" if net_blocked else "TIDAK ditolak")
 else:
     report(not reachable and net_blocked, f"jaringan dari perintah AI ditolak (hanya lapis kontainer; Landlock ABI v{abi} belum mengunci TCP)",
-           "ditolak oleh network_mode none" if (not reachable and net_blocked) else ("kontainer TIDAK terisolasi: lapis satu-satunya tidak ada" if reachable else "TIDAK ditolak"))
+           "ditolak oleh jaringan internal" if (not reachable and net_blocked) else ("kontainer TIDAK terisolasi: lapis satu-satunya tidak ada" if reachable else "TIDAK ditolak"))
+
+# --- 3b. jaringan lewat proxy egress (hanya bila diminta: AI_SHELL_NET_ALLOW terisi -> compose mengisi BENCH_NET_PROXY)
+PROBE = Path(executor.__file__).with_name("netprobe.py")
+(data / "bench/1/netprobe.py").write_text(PROBE.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+def probe(args: str, net: "executor.NetConfig | None" = None) -> str:
+    r = run(f"python3 $WS/netprobe.py {args}", timeout=20, net=net)
+    return (r["stdout"].strip().splitlines() or [f"(tanpa keluaran: status={r['status']} exit={r['exit_code']} {r['stderr'][:80]!r})"])[-1]
+
+
+# DNS: nama publik TIDAK boleh bisa di-resolve dari perintah AI (kalau bisa, DNS menjadi jalan keluar data yang melewati daftar putih host).
+dns_pub = probe("resolve example.com")
+report(dns_pub == "NXDOMAIN", "DNS publik tidak bisa di-resolve dari perintah AI (tidak ada jalan keluar lewat DNS)", dns_pub if dns_pub != "NXDOMAIN" else "tidak bisa (benar)")
+
+proxy_raw = os.environ.get("BENCH_NET_PROXY", "").strip()
+if not proxy_raw:
+    print("[ -- ] jaringan shell AI mati (AI_SHELL_NET_ALLOW kosong): bagian proxy dilewati. Isi AI_SHELL_NET_ALLOW di .env lalu `docker compose up -d` dan jalankan lagi.")
+elif abi < 4:
+    print(f"[ -- ] BENCH_NET_PROXY={proxy_raw} tetapi Landlock ABI v{abi} < 4: daemon akan MENGANTIKAN jaringan dengan MATI (tidak ada pengunci TCP). Bagian proxy dilewati.")
+else:
+    phost, _, pport = proxy_raw.rpartition(":")
+    NET = executor.NetConfig(phost, int(pport))
+    got = probe("direct 1.1.1.1 443", NET)
+    report(got == "ERRNO EACCES", "dengan jaringan menyala: TCP langsung ke internet ditolak Landlock (EACCES)", got)
+    got = probe(f"direct {phost} 80", NET)
+    report(got == "ERRNO EACCES", "dengan jaringan menyala: port lain pada host proxy ditolak Landlock (EACCES)", got)
+    reach = probe(f"direct {phost} {pport}", NET)
+    report(reach == "CONNECTED", f"proxy {phost}:{pport} terjangkau dari perintah AI", "ya" if reach == "CONNECTED" else reach)
+    report(probe(f"resolve {phost}", NET).startswith("RESOLVED"), f"nama kontainer `{phost}` bisa di-resolve (DNS Docker bekerja pada jaringan internal)")
+    if reach == "CONNECTED":
+        for target in (t.replace("{proxy}", f"{phost}:{pport}") for t in netprobe.DENY_TARGETS):
+            got = probe(f"connect {phost} {pport} {target}", NET)
+            report(got.startswith("STATUS 4") and got.split()[1] == "403", f"proxy menolak {target}", got)
+    else:
+        print("[ -- ] penolakan proxy tidak diuji karena proxy tidak terjangkau (jalankan `docker compose up -d egress`)")
+    url = os.environ.get("SELFTEST_NET_URL", "").strip()
+    if url:
+        r = run(f"curl -sS -m 20 -o /dev/null -w '%{{http_code}}' {shlex.quote(url)}", timeout=30, net=NET)
+        code = r["stdout"].strip()
+        report(r["exit_code"] == 0 and code.isdigit() and code != "000", f"jalur penuh ke {url} lewat proxy", f"HTTP {code}" if r["exit_code"] == 0 else f"exit={r['exit_code']} {r['stderr'][:150]!r}")
+    else:
+        print("[ -- ] jalur penuh ke internet tidak diuji (butuh URL nyata): `make net-check URL=https://api.contoh.com/health`")
 
 # --- 4. batas dan pembersihan
 r = run("sleep 30", timeout=2)

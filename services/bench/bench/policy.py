@@ -62,7 +62,7 @@ def canary_path(dirs: Dirs, analysis_id: int) -> str:
     return str(dirs.bench)
 
 
-def env_for(dirs: Dirs, analysis_id: int, sha256: str | None, scratch: Path, job_id: str) -> dict[str, str]:
+def env_for(dirs: Dirs, analysis_id: int, sha256: str | None, scratch: Path, job_id: str, proxy: str | None = None) -> dict[str, str]:
     aid = int(analysis_id)
     env = {
         "PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(scratch), "TMPDIR": str(scratch), "LANG": "C.UTF-8", "TERM": "dumb",
@@ -71,4 +71,9 @@ def env_for(dirs: Dirs, analysis_id: int, sha256: str | None, scratch: Path, job
     }
     if sha256 is not None and SHA256_RE.match(sha256):
         env["APK"] = str(dirs.uploads / f"{sha256}.apk")
+    if proxy:
+        # Satu-satunya jalan keluar: proxy `egress` (hanya CONNECT/HTTPS). Klien yang mengabaikan variabel ini tidak punya rute lain (jaringan internal + Landlock TCP).
+        for k in ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY", "ALL_PROXY", "all_proxy"):
+            env[k] = proxy
+        env["NO_PROXY"] = env["no_proxy"] = ""
     return env

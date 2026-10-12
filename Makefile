@@ -2,7 +2,7 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 COMPOSE ?= docker compose
 
-.PHONY: help init password up down restart logs ps update runner-selftest bench-selftest ai-check env-check doctor test
+.PHONY: help init password up down restart logs ps update runner-selftest bench-selftest net-check ai-check env-check doctor test
 
 help: ## Tampilkan daftar perintah
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[32m%-16s\033[0m %s\n", $$1, $$2}'
@@ -47,9 +47,16 @@ runner-selftest: ## Uji runner: alat benar-benar bisa bekerja + bukti isolasi (j
 	$(COMPOSE) build runner
 	$(COMPOSE) run --rm --no-deps runner runner-selftest
 
-bench-selftest: ## Uji bench: BUKTI isolasi shell AI dari dalam kontainer (jalankan SEBELUM AI_SHELL_ENABLED=1)
-	$(COMPOSE) build bench
+bench-selftest: ## Uji bench: BUKTI isolasi shell AI dari dalam kontainer (jalankan SEBELUM AI_SHELL_ENABLED=1; bila AI_SHELL_NET_ALLOW terisi, juga bukti jaringan)
+	$(COMPOSE) build bench egress
+	$(COMPOSE) up -d --no-deps egress
 	$(COMPOSE) run --rm --no-deps --entrypoint python3 bench /usr/local/bin/bench-selftest
+
+net-check: ## Uji jalur penuh jaringan shell AI ke satu URL lewat proxy egress: make net-check URL=https://api.contoh.com/ (host harus ada di AI_SHELL_NET_ALLOW)
+	@test -n "$(URL)" || { echo "Pemakaian: make net-check URL=https://host/jalur"; exit 1; }
+	$(COMPOSE) build bench egress
+	$(COMPOSE) up -d --no-deps egress
+	$(COMPOSE) run --rm --no-deps -e SELFTEST_NET_URL="$(URL)" --entrypoint python3 bench /usr/local/bin/bench-selftest
 
 ai-check: ## Uji provider AI (koneksi, streaming, tool calling, pemakaian token) memakai kunci di .env
 	$(COMPOSE) run --rm --no-deps web python -m app.ai.check

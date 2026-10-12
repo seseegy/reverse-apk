@@ -5,7 +5,7 @@ Memberi pengguna antarmuka tanya-jawab ke kode APK. Model menelusuri kode sendir
 
 ## Prinsip
 1. **Read-only**: tool hanya membaca artefak analisis yang sudah ada.
-2. **Tanpa efek samping**: tidak ada shell, jaringan, tulis berkas di luar folder berkas AI, atau eksekusi APK. **Satu pengecualian, MATI secara bawaan**: dengan `AI_SHELL_ENABLED=1` AI mendapat tool `shell_run` yang menjalankan perintah bash di kontainer `bench` terpisah (tanpa jaringan, tanpa rahasia, tiap perintah dikurung Landlock ke satu analisis; lihat [09](09-bundles-and-workbench.md) "Status PR C"). Tidak ada eksekusi di proses `web`, dan APK tetap tidak pernah dijalankan.
+2. **Tanpa efek samping**: tidak ada shell, jaringan, tulis berkas di luar folder berkas AI, atau eksekusi APK. **Satu pengecualian, MATI secara bawaan**: dengan `AI_SHELL_ENABLED=1` AI mendapat tool `shell_run` yang menjalankan perintah bash di kontainer `bench` terpisah (tanpa rahasia, tiap perintah dikurung Landlock ke satu analisis; tanpa jaringan secara bawaan, dan hanya bila pemilik mengisi `AI_SHELL_NET_ALLOW` lewat proxy keluar berdaftar putih; lihat [09](09-bundles-and-workbench.md) "Status PR C" dan "Status PR D"). Tidak ada eksekusi di proses `web`, dan APK tetap tidak pernah dijalankan.
 3. **Terikat sesi**: semua tool dibatasi pada satu `analysis_id`.
 4. **Bisa diaudit**: setiap tool call dicatat dan terlihat di UI.
 
