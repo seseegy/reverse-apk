@@ -257,7 +257,7 @@
       if (data && data.error) return data.error;
       if (xhr.status === 413) return "Berkas melebihi batas ukuran server.";
       if (xhr.status === 401) return "Sesi berakhir. Muat ulang halaman lalu masuk lagi.";
-      return "Upload gagal (HTTP " + xhr.status + ").";
+      return "Unggah gagal (HTTP " + xhr.status + ").";
     }
 
     function upload(file) {
@@ -271,7 +271,7 @@
 
       progress.value = 0;
       progressBox.hidden = false;
-      statusEl.textContent = "Memulai upload…";
+      statusEl.textContent = "Memulai unggah…";
       setBusy(true);
 
       xhr.upload.onprogress = function (e) {
@@ -280,7 +280,7 @@
         progress.value = pct;
         statusEl.textContent = pct < 100
           ? "Mengunggah " + pct + "% (" + fmtBytes(e.loaded) + " dari " + fmtBytes(e.total) + ")…"
-          : "Upload selesai. Memvalidasi dan menyimpan…";
+          : "Unggah selesai. Memvalidasi dan menyimpan…";
       };
       xhr.onload = function () {
         setBusy(false);
@@ -307,7 +307,7 @@
       xhr.onerror = function () {
         setBusy(false);
         progressBox.hidden = true;
-        showErrors([{ field: null, message: "Koneksi terputus saat upload. Periksa jaringan lalu coba lagi." }]);
+        showErrors([{ field: null, message: "Koneksi terputus saat mengunggah. Periksa jaringan lalu coba lagi." }]);
       };
       xhr.ontimeout = xhr.onerror;
       xhr.send(file);
@@ -1065,7 +1065,7 @@
   function baseName(p) { var s = String(p || "").split("/"); return s[s.length - 1]; }
   var TOOL_LABELS = {
     get_overview: function () { return "Ringkasan aplikasi"; },
-    get_manifest: function () { return "Baca manifest"; },
+    get_manifest: function () { return "Baca manifes"; },
     list_packages: function (a) { return "Daftar package" + (a.prefix ? " " + a.prefix : ""); },
     list_classes: function (a) { return "Daftar class di " + (a["package"] || "?"); },
     search_code: function (a) { return "Cari “" + (a.query || "") + "”"; },

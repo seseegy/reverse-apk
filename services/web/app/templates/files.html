@@ -54,7 +54,7 @@
     <div class="files-head">
       <div>
         <h2 id="files-title">Berkas</h2>
-        <p class="muted hint">Lampiran dari chat dan berkas yang dibuat asisten untuk APK ini. Tersimpan terpisah dari hasil dekompilasi: <strong>tidak hilang saat “Analisis ulang”</strong>, dan ikut terhapus bersama APK.</p>
+        <p class="muted hint">Lampiran dari percakapan dan berkas yang dibuat asisten untuk APK ini. Tersimpan terpisah dari hasil dekompilasi: <strong>tidak hilang saat “Analisis ulang”</strong>, dan ikut terhapus bersama APK.</p>
       </div>
       <div class="files-quota" role="group" aria-label="Pemakaian penyimpanan berkas">
         {% set pct = (used / quota * 100) if quota else 0 %}
@@ -76,8 +76,8 @@
     <div class="files-empty">
       <span class="empty-icon">{{ icon('file-code', 28) }}</span>
       <p><strong>Belum ada berkas buatan asisten.</strong></p>
-      <p class="muted">Minta lewat Chat, mis. “buatkan skrip Frida untuk hook fungsi login” atau “tulis laporan alur login dalam Markdown”. Berkas yang dibuat (py, js, md, json, dan lainnya) muncul di sini dan di bawah jawabannya.</p>
-      <a class="btn btn-primary btn-sm" href="/analyses/{{ an.id }}/chat">{{ icon('message-square', 16) }}<span>Buka Chat</span></a>
+      <p class="muted">Minta lewat Percakapan, mis. “buatkan skrip Frida untuk hook fungsi login” atau “tulis laporan alur login dalam Markdown”. Berkas yang dibuat (py, js, md, json, dan lainnya) muncul di sini dan di bawah jawabannya.</p>
+      <a class="btn btn-primary btn-sm" href="/analyses/{{ an.id }}/chat">{{ icon('message-square', 16) }}<span>Buka Percakapan</span></a>
     </div>
     {% endif %}
   </section>
@@ -94,7 +94,7 @@
     <div class="files-empty">
       <span class="empty-icon">{{ icon('paperclip', 28) }}</span>
       <p><strong>Belum ada lampiran.</strong></p>
-      <p class="muted">Di Chat, klik <em>Lampirkan</em>, seret berkas ke percakapan, atau tempel tangkapan layar (Ctrl+V). Maks {{ (max_file / 1048576)|round|int }} MB per berkas.</p>
+      <p class="muted">Di Percakapan, klik <em>Lampirkan</em>, seret berkas ke percakapan, atau tempel tangkapan layar (Ctrl+V). Maks {{ (max_file / 1048576)|round|int }} MB per berkas.</p>
     </div>
     {% endif %}
   </section>

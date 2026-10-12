@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
 {% from "_parts.html" import status_badge, time_el, notice_box %}
-{% block title %}Dashboard · reverse-apk{% endblock %}
+{% block title %}Beranda · reverse-apk{% endblock %}
 
 {% block header %}{% include "_header.html" %}{% endblock %}
 
@@ -11,7 +11,7 @@
     <h1>APK</h1>
     <div class="page-actions">
       <a class="btn btn-primary" href="/upload">
-        {{ icon('upload', 16) }}<span>Upload APK</span>
+        {{ icon('upload', 16) }}<span>Unggah APK</span>
       </a>
     </div>
   </div>
@@ -82,9 +82,9 @@
     <div class="empty-icon">{{ icon('upload', 28) }}</div>
     <h2 id="empty-title">Belum ada APK</h2>
     <p class="muted">
-      Upload APK pertama Anda untuk dibongkar dengan jadx dan apktool. Hasilnya tersimpan dan bisa dibuka lagi kapan saja.
+      Unggah APK pertama Anda untuk dibongkar dengan jadx dan apktool. Hasilnya tersimpan dan bisa dibuka lagi kapan saja.
     </p>
-    <a class="btn btn-primary" href="/upload">{{ icon('upload', 16) }}<span>Upload APK</span></a>
+    <a class="btn btn-primary" href="/upload">{{ icon('upload', 16) }}<span>Unggah APK</span></a>
   </section>
   {% endif %}
 

@@ -69,7 +69,7 @@ Biasanya selesai dalam beberapa detik. Lalu buka **https://apk.revers3.my.id**.
    ```
    Semua baris harus `[OK ]`: termasuk "jaringan terisolasi", "rootfs read-only", dan "apktool/jadx dapat bekerja"
    (menjalankan alat sungguhan, bukan hanya `--version`). Perintah ini keluar dengan kode 0 hanya jika semua lulus.
-6. Uji alur utama: buka **Upload**, pilih sebuah APK (centang pernyataan otorisasi), dan pastikan halaman analisis
+6. Uji alur utama: buka **Unggah**, pilih sebuah APK (centang pernyataan otorisasi), dan pastikan halaman analisis
    menampilkan tahap *Validasi → apktool → jadx → Selesai* secara live.
 
 ## Analisis statis (M2)
@@ -94,7 +94,7 @@ Anggaran dalam *kredit* (`AI_DAILY_BUDGET_CREDITS`, `AI_SESSION_BUDGET_CREDITS`)
 Harga per model ada di `config/ai_models.json` (kredit per 1 juta token): sesuaikan dengan portal, lalu `docker compose restart web`.
 Bandingkan angka token dari `make ai-check` dengan selisih saldo di portal untuk memastikan harga input/output.
 
-**Chat agent:** buka tab **Chat** pada sebuah analisis. Pertanyaan contoh: "Di mana base URL API?", "Bagaimana alur login?",
+**Chat agent:** buka tab **Percakapan** pada sebuah analisis. Pertanyaan contoh: "Di mana base URL API?", "Bagaimana alur login?",
 "Buatkan skrip Python untuk mendekripsi string di Crypto.java". Hasil berupa teks dengan tombol **Salin/Unduh**; skrip tidak pernah
 dijalankan aplikasi. Butuh analisis statis selesai (agar pencarian tersedia). Ekspor percakapan ke `.md` dari panel samping.
 
@@ -116,7 +116,7 @@ lebih besar gagal di tepi; gunakan "DNS only" untuk host ini atau naikkan paket.
 | `spool` | antrean berkas worker → runner | worker, runner |
 
 SQLite mode WAL membutuhkan filesystem lokal host (volume Docker biasa). Jangan memetakan `db` ke NFS/SMB.
-Hasil dekompilasi bisa besar (puluhan–ratusan MB per APK): pantau kartu **Disk data** di dashboard.
+Hasil dekompilasi bisa besar (puluhan–ratusan MB per APK): pantau kartu **Disk data** di **Beranda**.
 Upload ditolak otomatis bila sisa disk < `MIN_FREE_GB` (bawaan 15 GB).
 
 **Lampiran & berkas AI.** Batas dari `.env`: `ATTACH_MAX_MB` (per berkas, bawaan 25), `FILES_QUOTA_MB` (total per APK, 1024), `FILES_MAX_COUNT` (2000), `AI_MAX_IMAGE_MB` (10). `ATTACH_MAX_MB` juga dibaca Caddy, jadi setelah mengubahnya jalankan `docker compose up -d caddy web`. Volume `files` baru dibuat otomatis oleh `make up`; backup ikut volume ini bila Anda ingin menyimpan hasil kerja AI. Berkas dihapus bersama APK-nya. Tombol gambar hanya aktif untuk model bertanda `"vision": true` di `config/ai_models.json`; jalankan `make ai-check` untuk membuktikan model Anda benar-benar bisa melihat gambar.

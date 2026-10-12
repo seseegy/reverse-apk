@@ -51,11 +51,11 @@
     {%- if counts.total %} <span class="tab-count">{{ counts.total }}</span>{% endif %}</a>
   <a href="/analyses/{{ an.id }}/network"{% if tab == 'network' %} aria-current="page"{% endif %}>Jaringan</a>
   <a href="/analyses/{{ an.id }}/code"{% if tab == 'code' %} aria-current="page"{% endif %}>Kode</a>
-  <a href="/analyses/{{ an.id }}/chat{% if chat_active_sid %}?s={{ chat_active_sid }}{% endif %}" data-chat-tab data-analysis-id="{{ an.id }}" data-chat-active="{{ 1 if chat_active_sid else 0 }}"{% if tab == 'chat' %} aria-current="page"{% endif %}>Chat
+  <a href="/analyses/{{ an.id }}/chat{% if chat_active_sid %}?s={{ chat_active_sid }}{% endif %}" data-chat-tab data-analysis-id="{{ an.id }}" data-chat-active="{{ 1 if chat_active_sid else 0 }}"{% if tab == 'chat' %} aria-current="page"{% endif %}>Percakapan
     {%- if chat_active_sid %} <span class="tab-live" data-tab-live title="Asisten sedang bekerja"><span class="sr-only">(asisten sedang bekerja)</span></span>{% endif %}</a>
   <a href="/analyses/{{ an.id }}/files"{% if tab == 'files' %} aria-current="page"{% endif %}>Berkas
     {%- if files_count %} <span class="tab-count">{{ files_count }}</span>{% endif %}</a>
-  <a href="/analyses/{{ an.id }}/manifest"{% if tab == 'manifest' %} aria-current="page"{% endif %}>Manifest</a>
+  <a href="/analyses/{{ an.id }}/manifest"{% if tab == 'manifest' %} aria-current="page"{% endif %}>Manifes</a>
 </nav>
 
 {#- Analisis lama (M1) atau analisis statis gagal: tawarkan menjalankannya tanpa dekompilasi ulang. -#}

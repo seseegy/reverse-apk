@@ -2,7 +2,7 @@
 {% from "_icons.html" import icon %}
 {% from "_parts.html" import status_badge, sev %}
 {% set title = an.app_label or an.filename_display %}
-{% block title %}Manifest · {{ title }} · reverse-apk{% endblock %}
+{% block title %}Manifes · {{ title }} · reverse-apk{% endblock %}
 
 {% block header %}{% include "_header.html" %}{% endblock %}
 
@@ -30,14 +30,14 @@
   {% if not manifest %}
   <section class="card empty" aria-labelledby="nm-title">
     <div class="empty-icon">{{ icon('file', 28) }}</div>
-    <h2 id="nm-title">Manifest belum tersedia</h2>
+    <h2 id="nm-title">Manifes belum tersedia</h2>
     <p class="muted">
       {% if snap.status in ('queued', 'running') %}
-      Manifest muncul setelah tahap apktool selesai. Pantau di tab <a href="/analyses/{{ an.id }}">Ringkasan</a>.
+      Manifes muncul setelah tahap apktool selesai. Pantau di tab <a href="/analyses/{{ an.id }}">Ringkasan</a>.
       {% elif snap.status == 'cancelled' %}
-      Analisis dibatalkan sebelum manifest selesai diringkas.
+      Analisis dibatalkan sebelum manifes selesai diringkas.
       {% else %}
-      Manifest tidak bisa diringkas untuk analisis ini. Lihat log di tab <a href="/analyses/{{ an.id }}">Ringkasan</a>.
+      Manifes tidak bisa diringkas untuk analisis ini. Lihat log di tab <a href="/analyses/{{ an.id }}">Ringkasan</a>.
       {% endif %}
     </p>
   </section>

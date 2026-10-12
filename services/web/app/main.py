@@ -108,7 +108,7 @@ GENERIC_ERROR = ("Permintaan tidak bisa diproses", "Server menolak permintaan in
 # Cadangan bila template halaman galat sendiri ikut gagal dirender (tanpa gaya/skrip inline: tetap patuh CSP).
 FALLBACK_500 = ('<!doctype html><html lang="id"><head><meta charset="utf-8"><title>Terjadi galat di server</title></head><body>'
                 "<h1>Terjadi galat di server</h1><p>Permintaan Anda tidak bisa diselesaikan. Coba lagi sebentar lagi.</p>"
-                '<p><a href="/">Kembali ke dashboard</a></p></body></html>')
+                '<p><a href="/">Kembali ke beranda</a></p></body></html>')
 
 
 def _wants_html(request: Request) -> bool:
