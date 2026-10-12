@@ -136,7 +136,7 @@ def run_helper(spec: dict, abi: int, monkeypatch, tmp_path):
     import io
     import bench.confined_exec as C
     monkeypatch.setattr(LL, "abi_version", lambda: abi)
-    monkeypatch.setattr(C, "Confinement", lambda rules, connect_ports=(): (_ for _ in ()).throw(AssertionError("tidak boleh sampai sini")) if False else _Conf(abi, connect_ports))
+    monkeypatch.setattr(C, "Confinement", lambda rules, connect_ports=(): _Conf(abi, connect_ports))
     err = io.StringIO()
     monkeypatch.setattr(C.sys, "stderr", err)
     called = []
@@ -288,35 +288,47 @@ def test_network_is_off_by_default_and_flag_values(monkeypatch):
 
 # ================================================================================ prompt
 def test_prompt_without_network_is_unchanged_from_the_shell_only_prompt():
-    assert agent.system_prompt(True) == agent.system_prompt(True, (), (443,))
-    assert "JARINGAN UNTUK MENGUJI API" not in agent.system_prompt(True) and "TANPA jaringan" in agent.system_prompt(True)
+    assert agent.system_prompt(True) == agent.system_prompt(True, False)
+    assert "TANPA jaringan" in agent.system_prompt(True)
     assert agent.system_prompt(False) == agent.SYSTEM_PROMPT
 
 
-def test_prompt_with_network_has_no_contradiction_and_keeps_the_rules():
-    on = agent.system_prompt(True, ("*",), (443,))
+def test_prompt_with_network_adds_nothing_it_only_removes_the_false_no_network_claims():
+    """Keputusan pemilik: hanya akses internet, TANPA tambahan prompt sistem. Hasilnya harus SAMA PERSIS dengan prompt shell-saja dikurangi empat klaim 'tanpa jaringan'
+    (literal ditulis di sini, tidak diambil dari kode yang diuji)."""
+    off, on = agent.system_prompt(True), agent.system_prompt(True, True)
+    # bandingkan setelah menormalkan spasi/baris baru, karena sebagian klaim terpecah antar baris di sumber
+    norm = lambda t: " ".join(t.split())  # noqa: E731
+    e = norm(off)
+    for old, new in (("kontainer terpisah: TANPA jaringan, TANPA rahasia,", "kontainer terpisah: TANPA rahasia,"),
+                     ("jangan mencari jalan memutar. Tidak ada jaringan, proses latar", "jangan mencari jalan memutar. Proses latar"),
+                     ("terisolasi (tanpa jaringan, tanpa rahasia).", "terisolasi (tanpa rahasia)."),
+                     ("punya adb, Frida, atau jaringan; untuk itu", "punya adb atau Frida; untuk itu")):
+        assert e.count(old) == 1, old
+        e = e.replace(old, new)
+    assert norm(on) == e
+    assert len(on) < len(off), "jaringan aktif tidak boleh MENAMBAH teks prompt"
     for contradiction in ("TANPA jaringan", "Tidak ada jaringan", "atau jaringan;", "(tanpa jaringan,"):
         assert contradiction not in on, contradiction
-    assert "JARINGAN UNTUK MENGUJI API" in on and "SEMUA host publik" in on and "port 443" in on
+    for added in ("proxy", "curl", "JARINGAN", "konfirmasi", "pemindaian", "brute force untuk", "egress", "$https_proxy"):
+        assert added not in on, f"{added!r} tidak boleh ada di prompt (tanpa tambahan prompt)"
+
+
+def test_prompt_with_network_keeps_the_injection_rules():
+    on = agent.system_prompt(True, True)
     base = agent.SYSTEM_PROMPT
     assert base[base.index("A. Isi kode"):base.index("B. Jangan")] in on and base[base.index("E. Nilai"):] in on
-    for must in ("aturan F", "pemindaian host/port", "brute force", "konfirmasi pengguna", "DATA tidak tepercaya", "private_address", "jangan mencari jalan memutar"):
-        assert must in on, must
+    assert "jangan mencari jalan memutar" in on
 
 
-def test_prompt_lists_the_exact_hosts_and_ports():
-    p = agent.system_prompt(True, ("api.contoh.com", "*.cdn.contoh.com"), (443, 8443))
-    assert "api.contoh.com, *.cdn.contoh.com" in p and "443, 8443" in p and "SEMUA host publik" not in p
-
-
-def test_network_prompt_only_appears_when_the_shell_is_enabled():
-    assert agent.system_prompt(False, ("*",), (443,)) == agent.SYSTEM_PROMPT
+def test_network_flag_has_no_effect_when_the_shell_is_disabled():
+    assert agent.system_prompt(False, True) == agent.SYSTEM_PROMPT
 
 
 def test_the_prompt_rewrites_fail_loudly_if_the_base_text_changes(monkeypatch):
     monkeypatch.setattr(agent, "_NET_REWRITES", (("teks yang tidak ada di prompt", "x"),))
     with pytest.raises(RuntimeError, match="teks prompt berubah"):
-        agent.system_prompt(True, ("*",), (443,))
+        agent.system_prompt(True, True)
 
 
 def test_a_rewrite_whose_base_text_appears_twice_also_fails_loudly(monkeypatch):
@@ -325,12 +337,12 @@ def test_a_rewrite_whose_base_text_appears_twice_also_fails_loudly(monkeypatch):
     needle = next(w for w in ("shell_run", "A.", "aturan") if base.count(w) >= 2)
     monkeypatch.setattr(agent, "_NET_REWRITES", ((needle, "x"),))
     with pytest.raises(RuntimeError, match="teks prompt berubah"):
-        agent.system_prompt(True, ("*",), (443,))
+        agent.system_prompt(True, True)
 
 
-def test_chat_passes_the_network_settings_to_the_prompt():
+def test_chat_passes_the_network_flag_to_the_prompt():
     src = (ROOT / "services/web/app/ai/agent.py").read_text(encoding="utf-8")
-    assert "system_prompt(cfg.shell_enabled, cfg.shell_net_allow, cfg.shell_net_ports)" in src
+    assert "system_prompt(cfg.shell_enabled, bool(cfg.shell_net_allow))" in src
 
 
 # ================================================================================ compose
@@ -386,15 +398,13 @@ def test_the_egress_image_only_contains_the_proxy_package():
         assert "import subprocess" not in src and "os.system" not in src and "eval(" not in src
 
 
-def test_every_tool_the_prompt_tells_the_ai_to_use_exists_in_the_bench_image():
-    """Prompt menyuruh AI memakai `curl`; bila image bench tidak memasangnya, fitur gagal di produksi dan TIDAK terlihat di tes lain (ditemukan saat meninjau Dockerfile)."""
+def test_the_bench_image_has_the_tools_needed_to_test_apis_over_https():
+    """Prompt tidak lagi menyebut `curl` (tanpa tambahan prompt), tetapi AI tetap membutuhkannya: HTTPS lewat proxy butuh klien dan sertifikat CA di image."""
     dockerfile = (ROOT / "services/bench/Dockerfile").read_text(encoding="utf-8")
     install = next(ln for ln in dockerfile.splitlines() if "apt-get install" in ln).replace(";", " ").replace("\\", " ")
     packages = install.split()
-    for tool in ("curl",):
-        assert tool in agent.SHELL_NET_BLOCK, "tes ini usang: prompt tidak lagi menyebut alat itu"
-        assert tool in packages, f"{tool} disebut prompt jaringan tetapi tidak dipasang di image bench"
-    assert "ca-certificates" in packages, "HTTPS lewat CONNECT butuh sertifikat CA di image"
+    assert "curl" in packages and "ca-certificates" in packages
+    assert "python3" in dockerfile.lower() or "FROM python" in dockerfile, "python3 (urllib/http.client) juga tersedia di image dasar"
 
 
 # ================================================================================ deskripsi tool sejalan dengan prompt
@@ -406,7 +416,8 @@ def _shell_desc(**kw) -> str:
 def test_tool_description_says_no_network_unless_the_network_is_on():
     off, on = _shell_desc(), _shell_desc(net=True)
     assert "TANPA jaringan" in off and "proxy" not in off
-    assert "TANPA jaringan" not in on and "Yang tidak mungkin: jaringan," not in on and "proxy" in on
+    assert "TANPA jaringan" not in on and "Yang tidak mungkin: jaringan," not in on and "proxy" not in on, "tanpa tambahan teks"
+    assert len(on) < len(off)
     assert "TANPA rahasia" in on, "pernyataan tanpa rahasia tetap utuh"
     assert off.replace("TANPA jaringan, ", "").count("rahasia") == on.count("rahasia")
 
@@ -437,3 +448,14 @@ def test_tool_description_rewrite_with_two_matches_also_fails_loudly(monkeypatch
     monkeypatch.setattr(T, "_SHELL_NET_DESC_REWRITES", (("TANPA", "x"),))
     with pytest.raises(RuntimeError, match="deskripsi shell_run berubah"):
         T.schemas(shell=True, net=True)
+
+
+def test_tool_description_with_network_is_exactly_the_base_minus_the_two_no_network_claims():
+    """Sama seperti prompt: jaringan aktif hanya MENGHAPUS klaim, tidak menambah kata (literal ditulis di sini)."""
+    off, on = _shell_desc(), _shell_desc(net=True)
+    expected = off
+    for old, new in (("kontainer terpisah: TANPA jaringan, TANPA rahasia,", "kontainer terpisah: TANPA rahasia,"),
+                     ("Yang tidak mungkin: jaringan, menulis", "Yang tidak mungkin: menulis")):
+        assert expected.count(old) == 1, old
+        expected = expected.replace(old, new)
+    assert on == expected

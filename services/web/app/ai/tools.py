@@ -1029,11 +1029,11 @@ VISION_ONLY = frozenset({"view_image"})     # tidak ditawarkan ke model yang tid
 SHELL_ONLY = frozenset({"shell_run"})       # hanya ditawarkan bila AI_SHELL_ENABLED=1
 
 
-# Deskripsi shell_run yang dilihat model harus sejalan dengan prompt: bila jaringan aktif, "TANPA jaringan" diganti (dua pernyataan yang bertentangan membuat model ragu
+# Deskripsi shell_run yang dilihat model: bila jaringan aktif, klaim "TANPA jaringan" DIHAPUS (tanpa menambah teks; pernyataan yang bertentangan membuat model ragu
 # atau menolak memakai jaringan). Teks dasar yang berubah = galat keras, bukan penggantian diam-diam yang meleset.
 _SHELL_NET_DESC_REWRITES = (
-    ("kontainer terpisah: TANPA jaringan, TANPA rahasia,", "kontainer terpisah: TANPA rahasia; jaringan HANYA lewat proxy HTTPS terbatas (lihat prompt sistem),"),
-    ("Yang tidak mungkin: jaringan, menulis", "Yang tidak mungkin: jaringan selain lewat proxy itu, menulis"),
+    ("kontainer terpisah: TANPA jaringan, TANPA rahasia,", "kontainer terpisah: TANPA rahasia,"),
+    ("Yang tidak mungkin: jaringan, menulis", "Yang tidak mungkin: menulis"),
 )
 
 
