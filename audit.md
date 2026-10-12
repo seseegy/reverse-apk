@@ -484,3 +484,17 @@ Lihat `docs/prd/10-storage.md`. Ringkasan temuan yang berguna di luar halaman it
 - `tests/test_files_page.py`: pada urutan acak, 10 tes `ERROR` (`UNIQUE constraint failed: apk.sha256`) karena fixture memakai hash tetap. Urutan normal dan terbalik lulus.
 - `tests/test_chat_input.py::test_normal_message_is_stored_trimmed`: kadang gagal pada urutan terbalik (1 dari 8 di `main` bersih, 3 dari 8 di cabang ini; sampel terlalu kecil untuk menyimpulkan perbedaan). Menunggu baris DB dari thread giliran chat di latar, jadi perlombaan waktu.
 
+### 10.9 Penjelajah folder (12 Okt 2026, tahap 3)
+
+Lihat `docs/prd/10-storage.md`. Temuan yang berguna di luar halaman itu:
+
+- **Nilai rahasia disimpan MENTAH di `work/<id>/index/`** (`findings.jsonl` field `secret`, tabel `code` di `index.sqlite`; contoh `AKIAIOSFODNN7EXAMPLE` tersimpan apa adanya di keduanya). Aplikasi menjaganya dengan tidak pernah mengirim nilai itu ke browser kecuali lewat tombol "Tampilkan nilai" yang tercatat (`secret_reveal`). Konsekuensi: **setiap fitur baru yang menyajikan berkas dari `work/` harus menutup `index/`**. Penjelajah memakai daftar putih; ada tes khusus untuk ini. Folder `index/` tidak dienkripsi di disk, jadi siapa pun dengan akses shell/volume ke VPS membacanya.
+- **Starlette/klien menormalkan jalur URL**: `/x/1/../index` menjadi `/x/index`, dan `%2e%2e`, `%00`, `%5c` didekode sebelum rute. Karena itu penjelajah mengirim jalur lewat **query**, bukan path-parameter; penjaga di kode tidak boleh mengandalkan "klien tidak akan mengirim `..`".
+- **Symlink di dalam akar**: `resolve_under` saja tidak cukup, karena `work/1/jadx -> work/1/index` tetap berada di bawah akar. Perlu perbandingan realpath dengan jalur yang diminta. Terbukti dengan mutasi (3 tes gagal bila perbandingan dihapus).
+- **Tes logika lulus, halaman HTTP galat 500**: satu nama berkas non-UTF-8 menjatuhkan seluruh halaman karena `urlencode` di template. Hanya terlihat setelah halaman dijalankan sungguhan. Pelajaran: untuk data dari disk, uji sampai HTML.
+- **Mutasi menemukan 3 celah tes nyata** (`O_NOFOLLOW`, penolakan symlink di `list_dir`, `db` di tabel akar): lapisan atas menutupi lapisan bawah sehingga tidak pernah teruji. Diperbaiki dengan tes yang memanggil tiap lapisan langsung. Total 33 mutasi: 27 tertangkap, 6 setara (ditutup tumpang-tindih, bukan celah).
+- **Cek otomatis "tanpa luber horizontal" tidak cukup**: di 375 px nama berkas terhimpit satu-dua huruf per baris dan tombol terpotong, tetapi halaman tidak meluber. Hanya terlihat di tangkapan layar. Diperbaiki (kolom tanggal disembunyikan, tombol ikon 44×44 px).
+- Aturan sentuh 44 px aplikasi hanya berlaku untuk `pointer: coarse` atau lebar ≤640 px; mengukurnya di desktop menghasilkan positif palsu. Diuji dengan emulasi sentuh.
+
+**Belum terbukti:** semua diukur di sandbox, bukan di VPS pemilik; folder dengan jutaan entri pada disk dingin belum diukur; di 320 px tabel masih sedikit bergulir (±9 px).
+

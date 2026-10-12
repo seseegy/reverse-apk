@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_parts.html" import time_el %}
+{% block title %}Jelajah{% if lst %} · {{ lst.crumbs[-1][0] }}{% endif %} · Penyimpanan · reverse-apk{% endblock %}
+
+{% block header %}{% include "_header.html" %}{% endblock %}
+
+{#- Penjelajah folder (PRD 10, tahap 3). HANYA MEMBACA: melihat isi dan mengunduh. Tidak ada tombol hapus di sini.
+    Semua nama datang dari disk (tidak tepercaya): selalu di-escape oleh Jinja, tidak pernah masuk atribut tanpa urlencode. -#}
+{% macro url(root, path, page=1) -%}
+/storage/jelajah?akar={{ root|urlencode }}{% if path %}&amp;jalur={{ path|urlencode }}{% endif %}{% if page > 1 %}&amp;hal={{ page }}{% endif %}
+{%- endmacro %}
+
+{% block content %}
+<div class="container page">
+  <a class="back-link" href="/storage">{{ icon('arrow-left', 16) }}<span>Kembali ke Penyimpanan</span></a>
+  <div class="page-head"><h1>Jelajah penyimpanan</h1></div>
+
+  <p class="muted">Hanya <strong>melihat dan mengunduh</strong>; tidak ada yang bisa diubah dari sini. Folder <code>index/</code> di setiap analisis dan database
+    sengaja <strong>tidak ditampilkan</strong> (berisi nilai rahasia mentah dan data internal).</p>
+
+  {% if not akar %}
+  {#- ========== pilih akar ========== -#}
+  <section class="card" aria-labelledby="roots-title">
+    <div class="card-head"><h2 id="roots-title">Pilih folder</h2></div>
+    <ul class="plain-list roots-list">
+      {% for r in roots %}
+      <li>
+        {% if r.exists %}
+        <a class="btn btn-ghost" href="{{ url(r.id, '') }}">{{ icon('folder', 16) }}<span>{{ r.label }}</span></a>
+        <span class="muted hint mono">{{ r.id }}/</span>
+        {% else %}<span class="muted">{{ r.label }} (belum ada)</span>{% endif %}
+      </li>
+      {% endfor %}
+      <li><span class="muted">{{ icon('folder', 16) }} Database <span class="hint">(tidak dapat dijelajahi; ukurannya ada di halaman Penyimpanan)</span></span></li>
+    </ul>
+  </section>
+
+  {% elif not_found %}
+  <section class="card empty" aria-labelledby="nf-title">
+    <div class="empty-icon">{{ icon('alert-triangle', 28) }}</div>
+    <h2 id="nf-title">Folder tidak ditemukan</h2>
+    <p class="muted">Jalur ini tidak ada, bukan folder, atau tidak boleh dibuka.</p>
+    <a class="btn btn-primary" href="/storage/jelajah">Kembali ke daftar folder</a>
+  </section>
+
+  {% else %}
+  {#- ========== isi folder ========== -#}
+  <section class="card" aria-labelledby="dir-title">
+    <nav aria-label="Lokasi" class="crumbs">
+      <ol>
+        <li><a href="/storage/jelajah">Jelajah</a></li>
+        {% for label, p in lst.crumbs %}
+        <li>{% if loop.last %}<span aria-current="page">{{ label }}</span>{% else %}<a href="{{ url(lst.root, p) }}">{{ label }}</a>{% endif %}</li>
+        {% endfor %}
+      </ol>
+    </nav>
+
+    <div class="card-head">
+      <h2 id="dir-title">{{ lst.crumbs[-1][0] }}</h2>
+      <span class="muted hint" role="status" aria-atomic="true">{{ lst.total|num }} entri{% if lst.truncated %}+{% endif %}</span>
+    </div>
+
+    {% if lst.truncated %}
+    <div class="alert alert-warn" role="status">{{ icon('alert-triangle') }}
+      <span>Folder ini berisi lebih banyak entri daripada yang dapat dipindai ({{ 200000|num }}); daftar ini <strong>tidak lengkap</strong>.</span></div>
+    {% endif %}
+
+    {% if lst.entries %}
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Isi folder (gulir horizontal bila perlu)">
+      <table class="table table-compact browse-table">
+        <thead><tr><th scope="col">Nama</th><th scope="col" class="num">Ukuran di disk</th><th scope="col">Terakhir diubah</th><th scope="col"><span class="sr-only">Aksi</span></th></tr></thead>
+        <tbody>
+          {% for e in lst.entries %}
+          <tr>
+            <th scope="row" class="cell-name break">
+              {% if e.is_dir %}
+              <a class="entry-dir" href="{{ url(lst.root, e.path) }}">{{ icon('folder', 16) }}<span class="mono">{{ e.name }}/</span></a>
+              {% else %}
+              <span class="entry-file">{{ icon('file', 16) }}<span class="mono">{{ e.name }}</span></span>
+              {% endif %}
+            </th>
+            <td class="num mono">{% if e.is_dir %}–{% else %}{{ e.size|bytes }}{% endif %}</td>
+            <td>{{ time_el(e.mtime) }}</td>
+            <td class="cell-action">
+              {% if not e.is_dir %}
+              <button type="button" class="btn btn-ghost btn-sm" data-browse-view data-root="{{ lst.root }}" data-path="{{ e.path }}" aria-label="Lihat {{ e.name }}">{{ icon('eye', 16) }}<span>Lihat</span></button>
+              <a class="btn btn-ghost btn-sm" href="/storage/jelajah/unduh?akar={{ lst.root|urlencode }}&amp;jalur={{ e.path|urlencode }}" download aria-label="Unduh {{ e.name }}">{{ icon('download', 16) }}<span>Unduh</span></a>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% if lst.pages > 1 %}
+    <nav class="pager" aria-label="Halaman daftar">
+      {% if lst.page > 1 %}<a class="btn btn-ghost btn-sm" href="{{ url(lst.root, lst.path, lst.page - 1) }}" rel="prev">{{ icon('arrow-left', 16) }}<span>Sebelumnya</span></a>
+      {% else %}<span class="btn btn-ghost btn-sm" aria-disabled="true">{{ icon('arrow-left', 16) }}<span>Sebelumnya</span></span>{% endif %}
+      <span class="pager-info muted hint" role="status" aria-atomic="true">{{ ((lst.page - 1) * page_size + 1)|num }}–{{ ([lst.page * page_size, lst.total]|min)|num }} dari {{ lst.total|num }}
+        <span class="pager-page">(halaman {{ lst.page|num }} dari {{ lst.pages|num }})</span></span>
+      {% if lst.page < lst.pages %}<a class="btn btn-ghost btn-sm" href="{{ url(lst.root, lst.path, lst.page + 1) }}" rel="next"><span>Berikutnya</span>{{ icon('arrow-right', 16) }}</a>
+      {% else %}<span class="btn btn-ghost btn-sm" aria-disabled="true"><span>Berikutnya</span>{{ icon('arrow-right', 16) }}</span>{% endif %}
+    </nav>
+    {% endif %}
+    {% else %}
+    <p class="muted">Folder ini kosong.</p>
+    {% endif %}
+
+    {% if lst.undecodable %}
+    <p class="muted hint">{{ icon('info', 14) }} {{ lst.undecodable|num }} entri tidak ditampilkan karena namanya bukan teks UTF-8 yang valid (tidak bisa dibuka lewat alamat web).</p>
+    {% endif %}
+
+    {% if lst.hidden %}
+    <p class="muted hint">{{ icon('info', 14) }} {{ lst.hidden|length|num }} entri sengaja tidak ditampilkan:
+      {% for h in lst.hidden[:6] %}<code>{{ h }}</code>{% if not loop.last %}, {% endif %}{% endfor %}{% if lst.hidden|length > 6 %}, …{% endif %}.</p>
+    {% endif %}
+  </section>
+
+  {#- Panel pratinjau teks: diisi oleh app.js lewat textContent (tidak pernah innerHTML). -#}
+  <section class="card" id="browse-preview" aria-labelledby="preview-title" hidden>
+    <div class="card-head">
+      <h2 id="preview-title">Pratinjau</h2>
+      <button type="button" class="btn btn-ghost btn-sm" data-browse-close>{{ icon('x', 16) }}<span>Tutup</span></button>
+    </div>
+    <p class="muted hint" data-browse-meta role="status" aria-atomic="true"></p>
+    <pre class="codeblock browse-pre" tabindex="0" aria-label="Isi berkas"><code data-browse-text></code></pre>
+  </section>
+  {% endif %}
+</div>
+{% endblock %}

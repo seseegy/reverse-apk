@@ -108,6 +108,10 @@
     <p class="muted">Belum ada data yang tersimpan.</p>
     {% endif %}
 
+    <div class="btn-row">
+      <a class="btn btn-ghost btn-sm" href="/storage/jelajah">{{ icon('folder', 16) }}<span>Jelajahi folder…</span></a>
+      <span class="muted hint">Lihat dan unduh isi penyimpanan. Hanya membaca.</span>
+    </div>
     {% if trashing or (scan and scan.trash.disk) %}
     <p class="muted hint" role="status">{{ icon('loader', 14) }} Sedang dihapus di belakang layar{% if scan and scan.trash.disk %} ({{ scan.trash.disk|bytes }}){% endif %}. Muat ulang beberapa saat lagi; ruang disk bebas akan bertambah.</p>
     {% endif %}

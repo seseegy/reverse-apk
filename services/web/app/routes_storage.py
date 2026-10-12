@@ -1,11 +1,17 @@
-"""Halaman Penyimpanan (PRD 10): melihat (tahap 1) dan membersihkan (tahap 2).
+"""Halaman Penyimpanan (PRD 10): melihat (tahap 1), membersihkan (tahap 2), dan menjelajah (tahap 3).
 
 GET  /storage                angka dari DB (instan) + hasil pemindaian disk terakhir bila ada. Tidak pernah memindai disk sendiri.
 POST /storage/scan           memindai disk atas permintaan (CSRF), lalu kembali ke halaman. Satu pemindaian pada satu waktu.
 GET  /storage/bersihkan      HALAMAN KONFIRMASI: pratinjau apa yang akan dihapus dan akibatnya. TIDAK mengubah apa pun (aman di-refresh).
 POST /storage/bersihkan      menghapus (CSRF). Menerima jenis + nama/id yang divalidasi, TIDAK PERNAH path; semua syarat dicek ulang di sini.
 
-Aturan penghapusan ada di storage_clean.py; modul ini hanya HTTP: sesi, CSRF, validasi masukan, dan tampilan.
+GET  /storage/jelajah        PENJELAJAH FOLDER: daftar isi (?akar=&jalur=&hal=). Hanya membaca.
+GET  /storage/jelajah/lihat  pratinjau teks satu berkas (JSON). Hanya membaca.
+GET  /storage/jelajah/unduh  unduh satu berkas (octet-stream + attachment + CSP sandbox). Hanya membaca.
+
+Aturan penghapusan ada di storage_clean.py, aturan jalur penjelajah di storage_browse.py; modul ini hanya HTTP: sesi, CSRF, validasi masukan, tampilan.
+Jalur penjelajah dikirim lewat QUERY (?jalur=), bukan bagian path: path-parameter dinormalkan klien/HTTP secara tak terduga
+('/x/1/../index' menjadi 'index'; terukur), sedangkan query sampai apa adanya dan ditolak oleh storage_browse bila berbahaya.
 """
 
 from __future__ import annotations
@@ -17,9 +23,9 @@ from typing import Any
 
 from fastapi import APIRouter, Form, Query, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 
-from . import storage, storage_clean
+from . import storage, storage_browse, storage_clean, userfiles
 from .context import client_ip, current_session, db, layout, log, reaper, render
 from .security import tokens_equal
 
@@ -232,4 +238,63 @@ async def clean_execute(request: Request) -> Response:
     if not result.removed and not result.skipped:
         return RedirectResponse("/storage?notice=nothing", status_code=303)
     return RedirectResponse("/storage?notice=cleaned", status_code=303)
+
+
+# ================================================================== penjelajah folder (tahap 3, hanya membaca)
+def _browse_unauth_json() -> JSONResponse:
+    return JSONResponse({"error": "Sesi berakhir. Muat ulang halaman."}, status_code=401, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/storage/jelajah", include_in_schema=False)
+async def browse_page(request: Request, akar: str = Query("", max_length=10), jalur: str = Query("", max_length=storage_browse.MAX_PATH_LEN),
+                      hal: int = Query(1, ge=1, le=10**6)) -> Response:
+    session = current_session(request)
+    if not session:
+        return RedirectResponse("/login", status_code=303)
+    ctx: dict[str, Any] = {"user": session.user, "csrf": session.csrf, "nav": "storage", "roots": storage_browse.root_summary(layout),
+                           "akar": akar, "jalur": jalur, "lst": None, "not_found": False, "page_size": storage_browse.PAGE_SIZE}
+    if akar:
+        lst = await run_in_threadpool(storage_browse.list_dir, layout, akar, jalur, hal)
+        ctx["lst"], ctx["not_found"] = lst, lst is None
+    return render(request, "storage_browse.html", ctx, status_code=404 if ctx["not_found"] else 200)
+
+
+@router.get("/storage/jelajah/lihat", include_in_schema=False)
+async def browse_view(request: Request, akar: str = Query("", max_length=10), jalur: str = Query("", max_length=storage_browse.MAX_PATH_LEN)) -> Response:
+    if not current_session(request):
+        return _browse_unauth_json()
+    data = await run_in_threadpool(storage_browse.read_text, layout, akar, jalur)
+    if data is None:
+        return JSONResponse({"error": "Berkas tidak ditemukan atau tidak boleh dibuka."}, status_code=404, headers={"Cache-Control": "no-store"})
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+
+def _stream(fh, size: int, chunk: int = 256 * 1024):
+    """Alirkan TEPAT `size` byte (nilai yang diumumkan di Content-Length). logs/ boleh dilihat dan berkasnya bisa tumbuh saat analisis berjalan;
+    tanpa batas ini jumlah byte bisa melebihi Content-Length dan klien melihat unduhan rusak. Yang terpotong adalah ekor yang baru ditulis."""
+    remaining = size
+    try:
+        while remaining > 0:
+            data = fh.read(min(chunk, remaining))
+            if not data:
+                return
+            remaining -= len(data)
+            yield data
+    finally:
+        fh.close()
+
+
+@router.get("/storage/jelajah/unduh", include_in_schema=False)
+async def browse_download(request: Request, akar: str = Query("", max_length=10), jalur: str = Query("", max_length=storage_browse.MAX_PATH_LEN)) -> Response:
+    if not current_session(request):
+        return PlainTextResponse("auth", status_code=401)
+    opened = await run_in_threadpool(storage_browse.open_file, layout, akar, jalur)
+    if opened is None:
+        return PlainTextResponse("tidak ditemukan", status_code=404)
+    fh, size, name = opened
+    ascii_name, encoded = userfiles.display_name_for_header(storage_browse._label(name))
+    # Sama dengan unduhan lampiran: tidak pernah disajikan inline, tidak pernah dieksekusi browser di origin ini.
+    return StreamingResponse(_stream(fh, size), media_type="application/octet-stream", headers={
+        "Content-Length": str(size), "Content-Disposition": f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded}",
+        "Cache-Control": "no-store", "Content-Security-Policy": "default-src 'none'; sandbox", "X-Content-Type-Options": "nosniff"})
 
