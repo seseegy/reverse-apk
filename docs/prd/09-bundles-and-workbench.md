@@ -67,7 +67,9 @@ Jenis ditentukan dari **isi arsip**, bukan ekstensi (seperti lampiran di 07). Ek
 
 ### Alat baru di runner
 - **APKEditor** (`REAndroid/APKEditor`, Apache-2.0; rilis 1.4.9 pada 19 Mei 2026, repositori aktif). Dipin dengan SHA-256 di Dockerfile, seperti jadx dan apktool.
-- Tidak ada alat lain untuk Bagian A.
+- Dari README APKEditor (dibaca 12 Okt 2026): perintah `m` (merge) menerima direktori berisi split **maupun** arsip XAPK/APKM/APKS langsung. Rancangan ini **tetap membongkar dulu** di tahap `unpack` (FR-9.4) supaya hanya APK dalam allowlist yang diekstrak dan batas ukuran dipantau; `merge` lalu menerima direktori `parts/`.
+- Saat menggabung, APKEditor **mengubah manifest**: membuang atribut/elemen penanda split (`splitTypes`, `isSplitRequired`, metadata Play seperti `com.android.vending.splits`) dan menerapkan `extractNativeLibs=false`. Jadi manifest `merged.apk` **berbeda dari manifest `base.apk`**. Tab Manifes menampilkan versi gabungan, dan perbedaannya dicatat di UI agar tidak membingungkan. Ini juga alasan paket format asal (FR-9.17b) tidak bisa diturunkan dari perubahan pada `merged.apk` begitu saja.
+- Contoh log README memakai APKEditor 1.4.3, sedangkan rilis terbaru 1.4.9: **perilaku harus diuji ulang pada versi yang dipin** (sudah tercantum di Pertanyaan terbuka).
 
 ### Keluaran "dua bentuk" (FR-9.17)
 `merged.apk` selalu ada. "Paket format asal" hanya bisa dibuat bila perubahan mengenai berkas yang ada di `base.apk`; perubahan di resource hasil gabungan tidak bisa dipetakan balik ke split mana pun. Aturannya ada di Bagian B.
