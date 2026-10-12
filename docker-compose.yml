@@ -84,6 +84,8 @@ services:
       AI_SHELL_MAX_CALLS_PER_TURN: ${AI_SHELL_MAX_CALLS_PER_TURN:-40}
       AI_SHELL_MAX_OUTPUT_CHARS: ${AI_SHELL_MAX_OUTPUT_CHARS:-12000}
       AI_SHELL_SPOOL: /data/benchspool
+      AI_SHELL_NET_ALLOW: ${AI_SHELL_NET_ALLOW:-}
+      AI_SHELL_NET_PORTS: ${AI_SHELL_NET_PORTS:-443}
       AI_DAY_OFFSET_HOURS: ${AI_DAY_OFFSET_HOURS:-7}
       AI_MODELS_FILE: /config/ai_models.json
     secrets:
@@ -223,7 +225,9 @@ services:
       dockerfile: bench/Dockerfile
     restart: unless-stopped
     init: true
-    network_mode: none
+    # Jaringan: `benchnet` bertanda internal (tanpa gateway ke internet) dan hanya berisi bench + egress. Tanpa `edge`/`backend`: bench tidak bisa menjangkau web, Redis, atau Caddy.
+    # Satu-satunya yang bisa dijangkau adalah proxy `egress` (port 3128), dan Landlock ABI >= 4 mengunci connect() TCP hanya ke port itu.
+    networks: [benchnet]
     read_only: true
     user: "10001:10001"
     cap_drop: [ALL]
@@ -234,6 +238,8 @@ services:
     environment:
       DATA_DIR: /data
       BENCH_SPOOL: /data/benchspool
+      # SATU sakelar: `:+` mengisi egress:3128 HANYA bila AI_SHELL_NET_ALLOW terisi (kosong = bench tanpa jaringan, egress menolak semua), jadi dua sisi selalu sejalan.
+      BENCH_NET_PROXY: ${AI_SHELL_NET_ALLOW:+egress:3128}
       BENCH_CMD_MAX_TIMEOUT: ${AI_SHELL_MAX_TIMEOUT:-120}
       BENCH_CMD_MAX_OUTPUT_KB: ${BENCH_CMD_MAX_OUTPUT_KB:-64}
       BENCH_WORKSPACE_MAX_MB: ${BENCH_WORKSPACE_MAX_MB:-2048}
@@ -258,12 +264,48 @@ services:
     cpus: 1
     pids_limit: 512
 
+  # Proxy keluar untuk shell AI (jaringan untuk menguji API). Satu-satunya kontainer yang bisa dijangkau `bench` dan satu-satunya yang punya jalan ke internet. Hanya
+  # CONNECT (HTTPS), daftar putih host (AI_SHELL_NET_ALLOW; kosong = SEMUA ditolak), alamat internal/privat/metadata cloud SELALU ditolak, batas koneksi/byte.
+  # Tanpa volume, tanpa rahasia, tanpa `edge`/`backend`.
+  egress:
+    build:
+      context: ./services
+      dockerfile: egress/Dockerfile
+    restart: unless-stopped
+    init: true
+    networks: [benchnet, egressnet]
+    read_only: true
+    user: "10003:10003"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      EGRESS_ALLOW: ${AI_SHELL_NET_ALLOW:-}
+      EGRESS_PORTS: ${AI_SHELL_NET_PORTS:-443}
+      EGRESS_MAX_CONNECTIONS: ${EGRESS_MAX_CONNECTIONS:-32}
+      EGRESS_MAX_MB_PER_CONN: ${EGRESS_MAX_MB_PER_CONN:-100}
+      EGRESS_MAX_MB_PER_HOUR: ${EGRESS_MAX_MB_PER_HOUR:-1024}
+    healthcheck:
+      test: ["CMD", "egress-proxy", "--health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+
 networks:
   # Caddy <-> web. Berjaringan keluar (web akan memanggil DeepSeek untuk chat di M3).
   edge: {}
   # Web <-> worker <-> redis. `internal`: tidak ada rute ke internet.
   backend:
     internal: true
+  # bench <-> egress SAJA. internal: tanpa rute ke internet; DNS Docker hanya me-resolve nama kontainer.
+  benchnet:
+    internal: true
+  # Kaki keluar milik egress SAJA (bukan edge/backend): proxy sendiri tidak punya rute ke web/Redis/Caddy.
+  egressnet: {}
 
 volumes:
   uploads:   # APK asli (<sha256>.apk); web rw, worker & runner ro

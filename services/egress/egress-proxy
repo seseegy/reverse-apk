@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""Titik masuk proxy keluar `egress` (PRD 09). Konfigurasi hanya dari lingkungan; kosong = semua ditolak."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+import time
+
+from egress import policy, server
+
+
+def _int(name: str, default: int, lo: int, hi: int) -> int:
+    try:
+        return max(lo, min(hi, int(os.environ.get(name, default))))
+    except ValueError:
+        return default
+
+
+def config() -> server.Config:
+    return server.Config(
+        allow=policy.parse_allowlist(os.environ.get("EGRESS_ALLOW", "")),
+        ports=policy.parse_ports(os.environ.get("EGRESS_PORTS", "443")),
+        max_connections=_int("EGRESS_MAX_CONNECTIONS", 32, 1, 1024),
+        max_seconds=float(_int("EGRESS_MAX_SECONDS", 300, 5, 86400)),
+        idle_seconds=float(_int("EGRESS_IDLE_SECONDS", 60, 5, 3600)),
+        max_bytes_per_conn=_int("EGRESS_MAX_MB_PER_CONN", 100, 1, 100_000) * 1024 * 1024,
+        max_bytes_per_hour=_int("EGRESS_MAX_MB_PER_HOUR", 1024, 1, 10_000_000) * 1024 * 1024,
+    )
+
+
+def log(msg: str) -> None:
+    print(time.strftime("%Y-%m-%dT%H:%M:%S"), msg, flush=True)
+
+
+def health() -> int:
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", int(os.environ.get("EGRESS_PORT", "3128"))), timeout=3):
+            return 0
+    except OSError:
+        return 1
+
+
+async def main() -> None:
+    cfg = config()
+    port = _int("EGRESS_PORT", 3128, 1, 65535)
+    srv = await server.serve(cfg, "0.0.0.0", port, log=log)
+    mode = "SEMUA ditolak (EGRESS_ALLOW kosong)" if not cfg.allow else ("semua host PUBLIK" if "*" in cfg.allow else ", ".join(cfg.allow))
+    log(f"egress siap di :{port} | host: {mode} | port: {sorted(cfg.ports)} | maks {cfg.max_connections} koneksi, {cfg.max_bytes_per_hour // 1048576} MB/jam")
+    async with srv:
+        await srv.serve_forever()
+
+
+if __name__ == "__main__":
+    if "--health" in sys.argv:
+        sys.exit(health())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass

@@ -141,14 +141,34 @@ _FILE_RUN_CLAUSE = "File dijalankan pengguna sendiri; Anda dan sistem \
 ini tidak pernah menjalankannya."
 
 
-def system_prompt(shell_enabled: bool) -> str:
-    """Prompt dasar bila shell mati (tidak berubah). Bila menyala: tambah blok shell dan ganti aturan D, tanpa menyentuh aturan A (injeksi)."""
+# Bila jaringan aktif, prompt TIDAK ditambah apa pun (keputusan pemilik: hanya akses internet). Yang dilakukan hanya MENGHAPUS pernyataan "tanpa jaringan" yang kini
+# salah; tanpa itu model menolak memakai jaringan yang tersedia. Klien memakai proxy lewat variabel lingkungan ($https_proxy) yang sudah diset bench, jadi `curl` dll.
+# bekerja tanpa instruksi. Teks dasar yang berubah = RuntimeError, bukan penggantian diam-diam yang meleset.
+_NET_REWRITES = (
+    ("kontainer terpisah: TANPA jaringan, TANPA rahasia,", "kontainer terpisah: TANPA rahasia,"),
+    ("jangan mencari jalan memutar. Tidak ada jaringan, \
+proses latar", "jangan mencari jalan memutar. Proses latar"),
+    ("terisolasi (tanpa jaringan, tanpa rahasia).", "terisolasi (tanpa rahasia)."),
+    ("dan tidak \
+punya adb, Frida, atau jaringan; untuk itu", "dan tidak \
+punya adb atau Frida; untuk itu"),
+)
+
+
+def system_prompt(shell_enabled: bool, net_enabled: bool = False) -> str:
+    """Prompt dasar bila shell mati (tidak berubah). Bila menyala: tambah blok shell dan ganti aturan D, tanpa menyentuh aturan A (injeksi).
+    `net_enabled` hanya MENGHAPUS klaim "tanpa jaringan"; tidak menambah instruksi apa pun."""
     if not shell_enabled:
         return SYSTEM_PROMPT
     a, b = SYSTEM_PROMPT.index(_RULE_D_START), SYSTEM_PROMPT.index(_RULE_D_END)
     out = SYSTEM_PROMPT[:a] + SHELL_RULE_D + "\n" + SYSTEM_PROMPT[b:]
     anchor = "HEMAT PUTARAN"
     out = out.replace(anchor, SHELL_PROMPT_BLOCK + "\n\n" + anchor, 1)
+    if net_enabled:
+        for old_txt, new_txt in _NET_REWRITES:
+            if out.count(old_txt) != 1:
+                raise RuntimeError(f"teks prompt berubah; sesuaikan _NET_REWRITES: {old_txt[:40]!r}")
+            out = out.replace(old_txt, new_txt)
     return out.replace(_FILE_RUN_CLAUSE, "File yang Anda tulis dengan write_file dijalankan pengguna sendiri; Anda tidak bisa menjalankannya.", 1)
 
 
@@ -235,10 +255,10 @@ def run_turn(*, client: Client, cfg: AIConfig, prices: PriceTable, ctx: T.ToolCo
     user_text = user_text.strip()
     ctx.vision = prices.supports_vision(model)
     actx = A.AttachContext(files=ctx.files, cfg=cfg, redactor=ctx.redactor, vision=ctx.vision)
-    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt(cfg.shell_enabled)}, *_build_history(history, actx),
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt(cfg.shell_enabled, bool(cfg.shell_net_allow))}, *_build_history(history, actx),
                                       {"role": "user", "content": A.compose_user_content(user_text, attachments, actx)}]
     ctx.inline_images = actx.inline_images      # view_image tidak mengirim ulang gambar yang sudah tampil di pesan
-    schemas = T.schemas(vision=ctx.vision, shell=cfg.shell_enabled)
+    schemas = T.schemas(vision=ctx.vision, shell=cfg.shell_enabled, net=bool(cfg.shell_net_allow))
     tool_chars = 0
     force_final = False
 

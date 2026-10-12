@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Daemon bench: menjalankan perintah shell yang disusun AI, di kontainer TANPA JARINGAN, tiap perintah dikurung Landlock (PRD 09, Bagian C).
+"""Daemon bench: menjalankan perintah shell yang disusun AI, di kontainer TANPA JARINGAN BAWAAN, tiap perintah dikurung Landlock (PRD 09, Bagian C).
+Jaringan hanya bila BENCH_NET_PROXY terisi (AI_SHELL_NET_ALLOW di .env) DAN Landlock ABI >= 4: lewat proxy `egress`, TCP lain dikunci (lihat _net_config).
 
-Isolasi (ditegakkan oleh docker-compose.yml): network_mode none, non-root, rootfs read-only, cap_drop ALL, no-new-privileges, batas memori/CPU/PID.
+Isolasi (ditegakkan oleh docker-compose.yml): jaringan internal `benchnet` (tanpa rute keluar), non-root, rootfs read-only, cap_drop ALL, no-new-privileges, batas memori/CPU/PID.
 Kontainer ini TIDAK punya rahasia: bukan kunci AI, bukan DB, bukan Redis, bukan keystore.
 
 Kepercayaan: request datang dari `web` lewat volume `benchspool`, dan web menjalankan AI yang bisa dibujuk isi APK. Maka:
@@ -46,6 +47,22 @@ LIMITS = executor.Limits(
     file_bytes=_int_env("BENCH_FILE_MAX_MB", 256, 1, 100_000) * 1024 * 1024,
     nproc=_int_env("BENCH_NPROC", 2048, 8, 1_000_000),
 )
+def _net_config() -> executor.NetConfig | None:
+    """Jaringan shell AI = proxy `egress` (BENCH_NET_PROXY=host:port). AKTIF hanya bila diminta DAN Landlock ABI >= 4 (hanya itu yang bisa mengunci TCP ke port proxy
+    saja). ABI lebih rendah: jaringan DIMATIKAN dengan peringatan, bukan dibuka tanpa pengunci."""
+    raw = os.environ.get("BENCH_NET_PROXY", "").strip()
+    if not raw:
+        return None
+    host, sep, port_s = raw.rpartition(":")
+    if not sep or not host or not port_s.isdigit() or not (1 <= int(port_s) <= 65535) or not all(c.isalnum() or c in "-." for c in host):
+        say(f"PERINGATAN: BENCH_NET_PROXY={raw!r} tidak valid (harus host:port); jaringan DIMATIKAN")
+        return None
+    if landlock.abi_version() < 4:
+        say("PERINGATAN: jaringan diminta tetapi Landlock ABI < 4 tidak bisa mengunci TCP; jaringan DIMATIKAN")
+        return None
+    return executor.NetConfig(host, int(port_s))
+
+
 IDLE_EXIT = _int_env("BENCH_IDLE_EXIT", 900, 0, 10**7)
 HEARTBEAT_EVERY, HEALTH_MAX_AGE, TICK, STALE_FILE_SECONDS = 5.0, 20.0, 0.2, 3600
 STOP = threading.Event()
@@ -53,6 +70,9 @@ STOP = threading.Event()
 
 def say(msg: str) -> None:
     print(time.strftime("%Y-%m-%dT%H:%M:%S"), msg, flush=True)
+
+
+NET = _net_config()                 # setelah `say`: peringatan konfigurasi dicetak saat start
 
 
 def validate_run(job: dict[str, Any]) -> tuple[int, str, int, str | None]:
@@ -82,7 +102,8 @@ def run_job(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
         return {"status": SP.STATUS_REFUSED, "message": f"permintaan ditolak: {exc}"}
     say(f"[{job_id}] mulai analisis={aid} timeout={timeout}s perintah={len(command)} karakter")
     return executor.run_confined(DIRS, LIMITS, analysis_id=aid, command=command, timeout=timeout, sha256=sha, job_id=job_id,
-                                 cancel=lambda: SPOOL.cancel_requested(job_id), heartbeat=lambda: SPOOL.write_heartbeat("busy", job_id))
+                                 cancel=lambda: SPOOL.cancel_requested(job_id), heartbeat=lambda: SPOOL.write_heartbeat("busy", job_id),
+                                 net=NET)
 
 
 def housekeeping() -> None:
@@ -162,6 +183,7 @@ def main() -> int:
     DIRS.bench.mkdir(parents=True, exist_ok=True)
     selfcheck()
     abort_orphans()
+    say("jaringan: " + (f"AKTIF lewat proxy {NET.host}:{NET.port} (TCP lain dikunci Landlock)" if NET else "mati"))
     say(f"bench siap: data={DATA_DIR} timeout<={LIMITS.max_timeout}s keluaran<={LIMITS.output_bytes // 1024}KB ruang kerja<={LIMITS.workspace_bytes // (1024 * 1024)}MB")
     last_hb = last_house = 0.0
     last_work = time.monotonic()

@@ -38,7 +38,11 @@ def main(argv: list[str]) -> int:
         print(f"bench: spesifikasi tidak valid: {type(exc).__name__}", file=sys.stderr)
         return EXIT_BAD_SPEC
     try:
-        conf = Confinement(rules)
+        ports = tuple(int(x) for x in spec.get("net_ports") or ())
+        conf = Confinement(rules, connect_ports=ports)
+        if ports and not conf.net_enforced:                 # jaringan diminta tetapi kernel tidak bisa mengunci TCP: JANGAN jalan dengan TCP terbuka
+            print("bench: Landlock tidak bisa mengunci TCP (ABI < 4); jaringan diminta tetapi tidak aman", file=sys.stderr)
+            return EXIT_LANDLOCK
         conf.apply()
         conf.close()
     except LandlockError as exc:

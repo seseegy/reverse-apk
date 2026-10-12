@@ -49,7 +49,7 @@ Aplikasi ini ditujukan untuk analisis APK yang **milik pengguna atau yang penggu
 | Risiko | Dampak | Mitigasi |
 |--------|--------|----------|
 | APK berbahaya mengeksploitasi decompiler (zip bomb, path traversal) | Kompromi VPS | Worker di container tanpa jaringan, non-root, batas CPU/RAM/waktu/disk, tidak pernah menjalankan APK |
-| Prompt injection dari string/komentar dalam APK ke LLM | Jawaban menyesatkan, penyalahgunaan tool | Kode APK = data tak tepercaya; tool AI baca-saja; tidak ada tool jaringan. Shell AI (`shell_run`) MATI secara bawaan; bila dinyalakan hanya di kontainer `bench` (tanpa jaringan/rahasia, Landlock, `index/` tertutup) dan keluarannya diperlakukan sebagai data tak tepercaya |
+| Prompt injection dari string/komentar dalam APK ke LLM | Jawaban menyesatkan, penyalahgunaan tool | Kode APK = data tak tepercaya; tool AI baca-saja; tidak ada tool jaringan. Shell AI (`shell_run`) MATI secara bawaan; bila dinyalakan hanya di kontainer `bench` (tanpa rahasia; **tanpa jaringan secara bawaan**, dan bila `AI_SHELL_NET_ALLOW` diisi hanya lewat proxy `egress` berdaftar putih, lihat 09 "Status PR D"; Landlock, `index/` tertutup) dan keluarannya diperlakukan sebagai data tak tepercaya |
 | Tagihan API membengkak | Biaya | Batas token per job dan per hari, cache, model murah untuk ringkasan massal |
 | Obfuscation berat (ProGuard/R8, packer) | Hasil buruk | Tampilkan sinyal obfuscation; analisis tetap berbasis struktur + string |
 | Model/harga DeepSeek berubah | Rusak/biaya | Nama model & harga di konfigurasi, adapter provider |

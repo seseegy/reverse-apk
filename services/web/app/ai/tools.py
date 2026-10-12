@@ -1,7 +1,7 @@
-"""Tool untuk agent (PRD 05). Model hanya bisa memanggil fungsi di sini; tidak ada jaringan di proses web.
+"""Tool untuk agent (PRD 05). Model hanya bisa memanggil fungsi di sini; tidak ada jaringan di proses web (jaringan shell AI, bila ada, hanya di kontainer `bench` lewat proxy).
 
 Hampir semua tool BACA-SAJA. Pengecualian: write_file/edit_file (berkas buatan AI) dan `shell_run` (PRD 09 Bagian C), yang MATI secara bawaan
-(AI_SHELL_ENABLED=0) dan, bila menyala, TIDAK menjalankan apa pun di proses web: perintah dikirim lewat spool ke kontainer `bench` (tanpa jaringan,
+(AI_SHELL_ENABLED=0) dan, bila menyala, TIDAK menjalankan apa pun di proses web: perintah dikirim lewat spool ke kontainer `bench` (jaringan hanya bila diaktifkan, lewat proxy;
 tanpa rahasia; tiap perintah dikurung Landlock dan ditolak bila pengurungan gagal). Lihat rvcore/shellspool.py dan services/bench/.
 
 Prinsip keamanan:
@@ -1029,9 +1029,27 @@ VISION_ONLY = frozenset({"view_image"})     # tidak ditawarkan ke model yang tid
 SHELL_ONLY = frozenset({"shell_run"})       # hanya ditawarkan bila AI_SHELL_ENABLED=1
 
 
-def schemas(vision: bool = True, shell: bool = False) -> list[dict]:
+# Deskripsi shell_run yang dilihat model: bila jaringan aktif, klaim "TANPA jaringan" DIHAPUS (tanpa menambah teks; pernyataan yang bertentangan membuat model ragu
+# atau menolak memakai jaringan). Teks dasar yang berubah = galat keras, bukan penggantian diam-diam yang meleset.
+_SHELL_NET_DESC_REWRITES = (
+    ("kontainer terpisah: TANPA jaringan, TANPA rahasia,", "kontainer terpisah: TANPA rahasia,"),
+    ("Yang tidak mungkin: jaringan, menulis", "Yang tidak mungkin: menulis"),
+)
+
+
+def _describe(name: str, spec: dict, net: bool) -> str:
+    text = spec["description"]
+    if net and name == "shell_run":
+        for old, new in _SHELL_NET_DESC_REWRITES:
+            if text.count(old) != 1:
+                raise RuntimeError(f"deskripsi shell_run berubah; sesuaikan _SHELL_NET_DESC_REWRITES: {old[:40]!r}")
+            text = text.replace(old, new)
+    return text
+
+
+def schemas(vision: bool = True, shell: bool = False, net: bool = False) -> list[dict]:
     return [{"type": "function", "function": {
-        "name": name, "description": spec["description"],
+        "name": name, "description": _describe(name, spec, net and shell),
         "parameters": {"type": "object", "properties": spec["properties"], "required": spec.get("required", []),
                        "additionalProperties": False}}} for name, (_fn, spec) in TOOLS.items()
             if (vision or name not in VISION_ONLY) and (shell or name not in SHELL_ONLY)]

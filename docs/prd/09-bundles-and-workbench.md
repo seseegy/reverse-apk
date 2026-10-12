@@ -125,12 +125,12 @@ Pada `docker-compose.yml`, `web` memegang `AI_API_KEY`, DB, volume `files`, dan 
 
 ### Layanan baru: `bench`
 ```
- web (AI) ──► benchspool (volume khusus web↔bench) ──► bench (tanpa jaringan)
+ web (AI) ──► benchspool (volume khusus web↔bench) ──► bench (tanpa jaringan bawaan; lihat "Status PR D")
                                                           └─ ruang kerja per analisis (volume `bench`)
 ```
 | Aspek | Rancangan |
 |---|---|
-| Jaringan | `network_mode: none` |
+| Jaringan | Rancangan awal `network_mode: none`. **Sejak PR D**: bawaan tetap tanpa jalan keluar (jaringan internal `benchnet`); jaringan hanya bila `AI_SHELL_NET_ALLOW` diisi, itu pun hanya lewat proxy `egress` (lihat "Status PR D") |
 | Rahasia | **Tidak ada**: bukan kunci AI, bukan keystore, bukan DB, bukan Redis |
 | Sistem berkas | `read_only: true`, `tmpfs` untuk `/tmp`, volume `bench` untuk ruang kerja |
 | Hak | non-root, `cap_drop: [ALL]`, `no-new-privileges`, `pids_limit`, `mem_limit`, `cpus` |
@@ -299,7 +299,7 @@ Kedua master pada sampel APKS default **identik** (173 entri, CRC sama semua). I
 - **Tulis**: `bench/<id>/` (`$WS`) dan folder sementara job.
 - **Tertutup**: **`work/<id>/index/`** (berisi nilai rahasia mentah; alasan yang sama dengan penjelajah folder), analisis lain, ruang kerja lain, `db`, `files`, `spool`, `benchspool`, dan **daftar isi** `/data`, `work/<id>`, `uploads`, `bench`. Akibat yang disengaja: `ls $WORK` ditolak (Landlock tidak punya "daftar folder tanpa membuka anak-anaknya"), sedangkan `ls $WORK/apktool` bisa. Hal ini dijelaskan di prompt tool agar AI tidak menganggapnya galat.
 
-**Kontainer `bench`**: `network_mode: none`, `read_only`, non-root (uid 10001), `cap_drop: ALL`, `no-new-privileges`, tmpfs `/tmp`, `mem_limit 1g`, `pids_limit 512`. **Tanpa** kunci AI, DB, Redis, `files`, `spool` runner, keystore, dan Docker socket (diperiksa oleh `tests/test_shell_tool.py`). `work` dan `uploads` dipasang **baca saja**.
+**Kontainer `bench`** (saat PR C; diubah PR D): `network_mode: none` (sejak PR D: jaringan internal `benchnet` tanpa rute keluar), `read_only`, non-root (uid 10001), `cap_drop: ALL`, `no-new-privileges`, tmpfs `/tmp`, `mem_limit 1g`, `pids_limit 512`. **Tanpa** kunci AI, DB, Redis, `files`, `spool` runner, keystore, dan Docker socket (diperiksa oleh `tests/test_shell_tool.py`). `work` dan `uploads` dipasang **baca saja**.
 
 **Batas per perintah**: timeout (bawaan 60 dtk, maks. 120), keluaran (kepala+ekor, 64 KB/aliran di bench lalu `AI_SHELL_MAX_OUTPUT_CHARS` di web), ukuran satu berkas (256 MB), kuota ruang kerja (2048 MB, ditolak sebelum jalan), `RLIMIT_NPROC`, `RLIMIT_CPU`, tanpa core dump. Seluruh keturunan (termasuk `setsid`/double-fork, dan proses yang mengabaikan `SIGTERM`) dimatikan sesudah tiap perintah (subreaper + `SIGKILL`). Daemon `non-dumpable` supaya perintah AI tidak bisa menyuntik kode ke daemon yang tidak dikurung.
 
@@ -323,13 +323,71 @@ Kedua master pada sampel APKS default **identik** (173 entri, CRC sama semua). I
 3. **Argumen tool yang disimpan memuat perintah mentah** (lihat `audit.md` 10.11).
 
 **Keterbatasan dan yang BELUM terbukti (penting sebelum menyalakan `AI_SHELL_ENABLED`):**
-- **Belum dijalankan di Docker.** Sandbox tidak punya daemon Docker. Yang nyata: daemon, Landlock, eksekutor, spool, web, agent. Yang belum: `network_mode: none`, `read_only`, `cap_drop`, `pids_limit`, `mem_limit`, `Dockerfile` bench, dan interaksi profil seccomp/AppArmor Docker dengan syscall Landlock. **Jalankan `make bench-selftest` di VPS** (kegagalan Landlock membuatnya gagal keras, bukan lolos diam-diam); itu satu-satunya bukti yang sah untuk lingkungan produksi.
+- **Belum dijalankan di Docker.** Sandbox tidak punya daemon Docker. Yang nyata: daemon, Landlock, eksekutor, spool, web, agent. Yang belum: `network_mode: none` (kini jaringan internal, lihat PR D), `read_only`, `cap_drop`, `pids_limit`, `mem_limit`, `Dockerfile` bench, dan interaksi profil seccomp/AppArmor Docker dengan syscall Landlock. **Jalankan `make bench-selftest` di VPS** (kegagalan Landlock membuatnya gagal keras, bukan lolos diam-diam); itu satu-satunya bukti yang sah untuk lingkungan produksi.
 - Sandbox memakai **Landlock ABI v2**, VPS pemilik v4. Perbedaannya: pada v4 ada pembatasan TCP (lapis kedua selain `network_mode: none`); itu tidak teruji di sini. Pada ABI < 4, satu-satunya penghalang jaringan adalah kontainer. `bench-selftest` menyebut lapis mana yang menahan.
-- Perintah AI **tidak bisa** menjalankan alat Java (`apktool`, `jadx`) atau mengakses jaringan, dan **tidak bisa** membangun/menandatangani APK.
+- Perintah AI **tidak bisa** menjalankan alat Java (`apktool`, `jadx`) dan **tidak bisa** membangun/menandatangani APK. Jaringan: mati bawaan; lihat "Status PR D" bila dinyalakan.
 - Redaksi memakai pola yang sama dengan tool lain: **bukan jaminan** (string rahasia tanpa pola dikenal tetap bisa lolos); keluaran shell, seperti isi APK, dikirim ke provider AI.
 - Perintah yang disusun AI dikurung, tetapi di dalam `$WS` AI bebas membuat berkas/proses selama batas waktu; proses yang melepaskan diri dimatikan setelah perintah selesai.
 - Penyapu ruang kerja yatim (jaring pengaman bila web gagal menghapus) ada di daemon, sangat konservatif (penanda aktivitas, `mtime` terbaru di seluruh pohon, masa tenggang 1 jam, tidak jalan bila `work/` kosong). Ia menghapus data, jadi diuji ketat; versi pertamanya menghapus ruang kerja yang sedang dipakai (lihat `audit.md` 10.11).
 - Nama berkas non-UTF-8 di `$WS` tidak dipengaruhi (tidak ada tampilan daftar berkas ruang kerja untuk pengguna).
+
+## Status PR D (12 Okt 2026): jaringan untuk shell AI (menguji API)
+
+**Tujuan pemilik:** AI dapat menguji endpoint API yang ditemukan di APK. **Mati secara bawaan**, dan hanya berlaku bila `AI_SHELL_ENABLED=1`. Kode: `services/egress/` (proxy), `services/bench/bench/{landlock,confined_exec,policy,executor,netprobe}.py` dan `bench-daemon`/`bench-selftest`, `docker-compose.yml` (jaringan `benchnet`/`egressnet`, layanan `egress`), `ai/{config,agent,tools}.py`, `make bench-selftest` dan `make net-check`.
+
+### Rancangan
+```
+ bench ──(benchnet, internal: tanpa rute keluar)──► egress ──(egressnet)──► internet
+   ▲ Landlock ABI ≥ 4: connect() TCP hanya ke port 3128          ▲ hanya CONNECT, daftar putih, hanya alamat PUBLIK
+```
+| Keputusan | Alasan |
+|---|---|
+| **Satu sakelar**: `AI_SHELL_NET_ALLOW` kosong = tanpa jaringan; terisi menyalakan KEDUA sisi (`BENCH_NET_PROXY: ${AI_SHELL_NET_ALLOW:+egress:3128}` dan `EGRESS_ALLOW`) | Dua sakelar bisa tidak sejalan (satu sisi lupa diisi). Ditolak: variabel kedua |
+| `bench` pindah dari `network_mode: none` ke `benchnet` (`internal: true`, hanya `bench` + `egress`; bukan `edge`/`backend`) | `bench` tidak bisa menjangkau web, Redis, Caddy, atau internet langsung. `egress` punya kaki keluar sendiri (`egressnet`) dan **tidak** ada di `edge`/`backend` |
+| Proxy **buatan sendiri** (Python, `services/egress/`), bukan squid/tinyproxy | Tidak ada Docker di sandbox pengembangan, jadi squid tidak bisa diuji di sini; proxy sendiri bisa diuji penuh (194 tes + soket nyata). Harga: kode keamanan yang harus dirawat |
+| Hanya `CONNECT` (HTTPS), port bawaan 443 (`AI_SHELL_NET_PORTS`) | Isi lalu lintas tidak dibaca/dimodifikasi; `http://` hanya lewat terowongan (`curl -p -x "$https_proxy"`), **plain HTTP forwarding sengaja tidak ada** |
+| DNS di-resolve **sekali** di proxy lalu connect ke ALAMAT itu; **semua** alamat hasil resolusi harus publik | Anti-DNS-rebinding. Nama tanpa titik (`redis`, `web`, `egress`), `localhost`, `.internal`, dan alamat IPv4 gaya lama (`127.1`, `0x7f.1`, `2130706433`) ditolak sebelum DNS |
+| Alamat internal SELALU ditolak walau `*` | privat, loopback, link-local (metadata cloud `169.254.169.254`), CGNAT, `192.0.0.0/24`, `198.18.0.0/15`, NAT64, 6to4, Teredo, multicast |
+| Mode `*` = semua host **publik** | Host API baru ketahuan dari APK; daftar statis tidak praktis. Risiko di bawah |
+| Landlock ABI ≥ 4: `LANDLOCK_RULE_NET_PORT` hanya hak CONNECT ke port proxy | Klien yang mengabaikan variabel proxy tidak punya rute lain. ABI < 4 + jaringan diminta → daemon **mematikan jaringan dengan peringatan** (tidak membukanya tanpa pengunci); `confined_exec` menolak menjalankan bila `net_ports` ada tetapi pengunci tidak aktif |
+| **Tanpa tambahan prompt sistem** (keputusan pemilik: yang diinginkan hanya akses internet, AI dibiarkan maksimal). Bila jaringan aktif, prompt dan deskripsi `shell_run` hanya **dikurangi** klaim "tanpa jaringan" yang kini salah (4 kalimat di prompt, 2 di deskripsi); aturan A (anti-injeksi) dan F tetap utuh | Tanpa pengurangan itu model membaca "tanpa jaringan" dan menolak memakai jaringan yang ada. Klien memakai proxy lewat `$https_proxy` yang sudah diset bench, jadi `curl` dll. bekerja tanpa instruksi. Dijaga tes yang membandingkan hasil dengan **kesamaan persis** (prompt/deskripsi dasar dikurangi literal klaim itu) dan menolak kata baru seperti `proxy`/`curl`/`konfirmasi`. Teks dasar berubah = `RuntimeError`. Konsekuensi yang diterima: AI tidak diberi tahu host mana yang diizinkan atau arti kode penolakan (`X-Egress-Reason` tetap terlihat di keluaran `curl -v`), dan tidak ada permintaan konfirmasi sebelum POST/PUT/DELETE |
+| Image `bench` kini memasang `curl` dan `ca-certificates` | Ditemukan saat meninjau Dockerfile: awalnya prompt menyuruh AI memakai `curl` padahal image sengaja tanpa `curl`. Setelah prompt tidak lagi menyebut alat apa pun, `curl` tetap perlu ada agar HTTPS lewat proxy bisa dipakai. Tanpa jaringan keduanya tak berguna, jadi tidak menambah kemampuan saat jaringan mati. Dijaga tes isi Dockerfile |
+
+**Batas proxy:** koneksi bersamaan (32), durasi, idle, byte per koneksi (100 MB), byte per jam seluruhnya (1024 MB). Log hanya `IZIN/TOLAK host port alasan ip byte detik`, **tanpa isi lalu lintas**. Alasan penolakan dikirim ke klien lewat header `X-Egress-Reason` supaya AI tahu itu batas sistem.
+
+### Peringatan untuk mode `*`
+1. **Eksfiltrasi:** AI (atau teks berbahaya di dalam APK yang membujuknya, lihat aturan A) dapat mengirim isi APK dan hasil analisis ke server mana pun.
+2. **Asal permintaan:** semua permintaan keluar membawa IP server Anda. Menguji API pihak ketiga tanpa izin bisa melanggar ketentuan layanan atau hukum.
+3. **Tidak ada batas laju permintaan per detik**; yang dibatasi hanya koneksi bersamaan dan kuota byte. Satu perintah bisa menjalankan banyak `curl`. Batas panggilan per giliran (40) dan batas waktu per perintah hanya membatasi sebagian.
+4. **Tanpa pagar di prompt** (keputusan pemilik): tidak ada instruksi yang membatasi pemindaian, brute force, atau permintaan massal; satu-satunya pagar adalah yang ditegakkan sistem (daftar host, alamat internal ditolak, kuota). Batas proxy bisa dinaikkan lewat `EGRESS_MAX_*` (sampai 1024 koneksi, 100 GB per koneksi, ~10 TB per jam).
+Pagar yang **tetap**, karena melindungi server Anda sendiri, bukan membatasi internet: alamat internal/privat/metadata cloud (Redis, web, dan layanan lain di VPS) selalu ditolak, apa pun isi `AI_SHELL_NET_ALLOW`.
+Rekomendasi: daftar host spesifik; `*` hanya untuk API milik sendiri atau yang Anda berwenang menguji. Mengisi sakelar = menerima risiko ini.
+
+### Terbukti (sandbox: kernel 6.1, Landlock **ABI v2**, tanpa Docker, tanpa Redis)
+| Bukti | Hasil |
+|---|---|
+| Tes | `test_egress_policy` 154, `test_egress_server` 40 (soket nyata), `test_shell_net` 64, `test_netprobe` 16 (proxy nyata di loopback). Suite penuh **966 lulus**; juga sebagai non-root (`nobody`, python3.12) |
+| Mutasi | **132 mutasi unik: 128 tertangkap, 4 setara** (policy 22, server 17, bench/web/compose/tool/probe/prompt 93). Awalnya lolos: policy E1/E3/E4/E11/E22; server V13/V14/V17; sesi ini 14 (N1, N11, N33, N34, N36, N37, N38, N39, N46, P4, P8, T3, T5, R3) → 12 ditutup dengan tes baru, 2 setara. Setara: V9 (`wait_for` dengan timeout ≤ 0 langsung `TimeoutError`), V16 (`line.decode("ascii")` menolak lebih awal), N34 (nama kosong tetap ditolak cek label), T3 (`shell_run` sudah disaring `shell` sebelum deskripsi dipakai) |
+| Proses `egress-proxy` NYATA (entrypoint produksi, non-root, env seperti compose) + `curl` sungguhan | `https://example.com/` → **200** dan `https://www.iana.org/` → **200** (TLS sungguhan melewati terowongan); `iana.org` (padahal `*.iana.org` hanya subdomain), `github.com`, `169.254.169.254`, `localhost`, `:8443` → **403** dengan alasan di log; `GET` polos → 405; `--health` berhasil |
+| Daemon NYATA di ABI v2 dengan `BENCH_NET_PROXY=egress:3128` | Log `PERINGATAN ... ABI < 4 ... jaringan DIMATIKAN` lalu `jaringan: mati`; nilai tak valid → peringatan + mati |
+| Ujian menyeluruh shell (web asli + bench-daemon asli + "model" palsu) | **23 dari 23** tetap lulus (jaringan mati: tidak ada regresi) |
+| Bagian jaringan `bench-selftest` (harness: ABI dipalsukan = 4, pengurungan diganti eksekusi biasa, melawan egress nyata) | Jalur kabel/logika terbukti: 10 target `DENY_TARGETS` (metadata cloud, loopback, privat, `redis`, `web`, proxy sendiri, `.internal`, IPv4 gaya lama) → 403; `SELFTEST_NET_URL=https://example.com/` → **HTTP 200** bila diizinkan, `curl: (7) CONNECT tunnel failed, response 403` bila tidak. **Bukan** bukti Landlock (lihat di bawah) |
+
+### Temuan di luar fitur (rincian di `audit.md` 10.12)
+`*.` (salah ketik) menjadi `*` di dua parser (membuka semua host), NAT64 `is_global=True`, IP gaya lama, header 20 KB memutus koneksi tanpa jawaban, prompt awalnya menyuruh memakai `curl` yang tidak ada di image, tes konstanta kernel yang melingkar.
+
+### BELUM terbukti (jujur)
+- **Docker:** tidak ada daemon di sandbox. Belum teruji: `benchnet` benar-benar tanpa rute keluar, `egress` benar-benar punya rute keluar lewat `egressnet`, DNS Docker me-resolve `egress` pada jaringan internal, build image (`apt-get install curl ca-certificates`), healthcheck compose.
+- **Landlock TCP (ABI ≥ 4) di kernel nyata:** sandbox ABI v2. Yang teruji hanya **argumen syscall** lewat simulasi (`FakeSys`) dan konstanta kernel yang dikunci angka literal. Perilaku kernel (EACCES untuk `connect()` selain port proxy) baru terbukti oleh `make bench-selftest` di VPS (ABI v4).
+- **Kebocoran lewat DNS:** apakah DNS tertanam Docker pada jaringan `internal` meneruskan kueri ke luar tidak diketahui. Jika ya, DNS menjadi jalan keluar data yang melewati daftar putih. `bench-selftest` mengukurnya (`example.com` tidak boleh ter-resolve dari perintah AI) dan **GAGAL** bila bocor. Mitigasi (belum dipasang karena tidak bisa diverifikasi di sini): opsi `dns:` ke alamat tak terjangkau pada layanan `bench`.
+- **`http://` lewat `curl -p`** hanya terbukti ditolak (403) saat port 80 tidak diizinkan; terowongan ke port 80 yang diizinkan belum dicoba. Tidak diuji juga: IPv6 keluar di VPS.
+- **Jalur penuh web → bench → egress dengan model AI asli** belum dijalankan (butuh Docker + kunci AI + kernel ABI ≥ 4).
+
+### Langkah untuk pemilik (VPS)
+1. `git pull`, lalu `make bench-selftest` (membangun ulang `bench` dan `egress`; tanpa `AI_SHELL_NET_ALLOW` bagian proxy dilewati, **tetapi cek DNS tetap jalan**).
+2. Isi `AI_SHELL_NET_ALLOW` di `.env` (mulai dengan satu host), `make restart`, lalu `make bench-selftest` lagi: bagian proxy harus semua `[OK ]`.
+3. `make net-check URL=https://host-anda/jalur` membuktikan jalur penuh (HTTP 200 dari kontainer yang terkurung).
+4. Baru nyalakan `AI_SHELL_ENABLED=1`. Kirim keluaran bila ada `[GAGAL]`.
 
 ## Pertanyaan terbuka
 - [DIPUTUSKAN] Isolasi antar analisis di `bench`: **Landlock (opsi 2)**, berdasarkan `scripts/bench-probe.sh` di VPS (lihat Status PR A). [OPEN] diuji ulang dengan pengaturan kontainer `bench` yang sebenarnya.

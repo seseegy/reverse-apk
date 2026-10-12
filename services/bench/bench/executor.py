@@ -42,6 +42,17 @@ class Limits:
     term_grace: float = 2.0
 
 
+@dataclass(frozen=True)
+class NetConfig:
+    """Jaringan untuk perintah AI lewat proxy. `port` adalah satu-satunya port TCP yang boleh di-connect (Landlock ABI >= 4)."""
+    host: str
+    port: int
+
+    @property
+    def url(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+
 class Capture:
     """Simpan KEPALA dan EKOR keluaran (error biasanya di ujung), hitung yang dihilangkan. Memori selalu <= head+tail."""
 
@@ -181,7 +192,7 @@ def tree_bytes(root: Path, stop_over: int | None = None) -> int:
 
 def run_confined(dirs: policy.Dirs, limits: Limits, *, analysis_id: int, command: str, timeout: int, sha256: str | None, job_id: str,
                  cancel: Callable[[], bool] = lambda: False, heartbeat: Callable[[], None] = lambda: None,
-                 python: str = sys.executable) -> dict:
+                 python: str = sys.executable, net: NetConfig | None = None) -> dict:
     """Jalankan perintah. TIDAK PERNAH melempar untuk kegagalan perintah; hasilnya dict siap ditulis ke spool."""
     started = time.monotonic()
     timeout = max(1, min(int(timeout), limits.max_timeout))
@@ -207,7 +218,8 @@ def run_confined(dirs: policy.Dirs, limits: Limits, *, analysis_id: int, command
     try:
         rules = policy.rules_for(dirs, analysis_id, sha256, scratch)
         spec = {"rules": [{"path": r.path, "rights": r.rights, "optional": r.optional} for r in rules], "command": command, "cwd": str(ws),
-                "env": policy.env_for(dirs, analysis_id, sha256, scratch, job_id), "canary": policy.canary_path(dirs, analysis_id),
+                "env": policy.env_for(dirs, analysis_id, sha256, scratch, job_id, proxy=net.url if net else None),
+                "net_ports": [net.port] if net else [], "canary": policy.canary_path(dirs, analysis_id),
                 "nofile": limits.nofile, "nproc": limits.nproc, "fsize": limits.file_bytes, "cpu_seconds": timeout + 5, "marker_fd": wfd}
         try:
             proc = subprocess.Popen([python, "-m", "bench.confined_exec", json.dumps(spec)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,

@@ -119,8 +119,12 @@ def test_every_shell_env_read_by_config_is_forwarded_by_compose():
 def test_compose_bench_service_is_isolated_and_secretless():
     """Pemeriksaan teks (tanpa parser YAML: tidak ada di requirements CI). Blok `bench:` harus memuat isolasi dan tidak memuat rahasia/volume sensitif."""
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    block = compose.split("\n  bench:\n", 1)[1].split("\nnetworks:\n", 1)[0]
-    for must in ("network_mode: none", "read_only: true", 'user: "10001:10001"', "cap_drop: [ALL]", "no-new-privileges:true", "pids_limit", "mem_limit"):
+    block = compose.split("\n  bench:\n", 1)[1].split("\n\n  # ", 1)[0]
+    block = "\n".join(ln for ln in block.splitlines() if not ln.lstrip().startswith("#"))
+    # Sejak PR jaringan: bukan `network_mode: none` lagi, melainkan SATU jaringan internal (benchnet) tanpa edge/backend.
+    assert "network_mode" not in block and "    networks: [benchnet]" in block
+    assert "edge" not in block and "backend" not in block and "ports:" not in block
+    for must in ("read_only: true", 'user: "10001:10001"', "cap_drop: [ALL]", "no-new-privileges:true", "pids_limit", "mem_limit"):
         assert must in block, must
     for forbidden in ("AI_API_KEY", "SECRET_KEY", "REDIS", "PASSWORD", "/data/db", "/data/files", "/data/spool", "secrets:", "docker.sock", "privileged"):
         assert forbidden not in block, forbidden

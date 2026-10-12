@@ -7,7 +7,7 @@ GAGAL TERTUTUP. Bila Landlock tidak tersedia atau pengurungan tidak bisa dipasan
 menjalankan perintah. Tidak ada jalur "lanjut tanpa pengurungan".
 
 Hak yang ditangani (di-deny kecuali diberi aturan): semua hak berkas ABI 1, REFER (ABI 2: tautan keras/rename lintas folder), TRUNCATE (ABI 3),
-dan, bila ABI >= 4, TCP bind/connect tanpa aturan apa pun (kontainer sudah `network_mode: none`; ini lapis kedua). Yang tidak bisa dibatasi Landlock
+dan, bila ABI >= 4, TCP bind/connect tanpa aturan apa pun (kontainer ada di jaringan internal tanpa rute keluar; ini lapis kedua, dan memungkinkan satu port saja: proxy). Yang tidak bisa dibatasi Landlock
 pada ABI < 6: sinyal/ptrace antar proses sepemilik (ditutup dengan PR_SET_DUMPABLE=0 pada daemon) dan socket UNIX abstrak.
 """
 
@@ -23,6 +23,7 @@ from dataclasses import dataclass
 SYS_CREATE, SYS_ADD, SYS_RESTRICT = 444, 445, 446      # sama di x86_64 dan arm64
 CREATE_VERSION = 1 << 0
 RULE_PATH_BENEATH = 1
+RULE_NET_PORT = 2
 PR_SET_NO_NEW_PRIVS = 38
 PR_SET_DUMPABLE = 4
 
@@ -72,7 +73,9 @@ class Rule:
 class Confinement:
     """Dibangun di PROSES INDUK (membuka fd), dipasang di ANAK lewat `apply()` (dipanggil dari preexec_fn), lalu `close()` di induk."""
 
-    def __init__(self, rules: list[Rule]) -> None:
+    def __init__(self, rules: list[Rule], connect_ports: tuple[int, ...] = ()) -> None:
+        """`connect_ports`: port TCP tujuan `connect()` yang DIIZINKAN (mis. port proxy). Semua TCP lain ditolak. Hanya berlaku pada ABI >= 4; pada ABI lebih
+        rendah kernel tidak bisa membatasi TCP, dan `net_enforced` bernilai False agar pemanggil tahu pembatasan ini TIDAK ada (jangan berpura-pura)."""
         self.abi = abi_version()
         if self.abi < 1:
             raise LandlockError("Landlock tidak tersedia di kernel/kontainer ini")
@@ -84,12 +87,23 @@ class Confinement:
         if fd < 0:
             raise LandlockError(f"membuat ruleset gagal: {errno.errorcode.get(ctypes.get_errno(), ctypes.get_errno())}")
         self.fd = fd
+        self.net_enforced = self.abi >= 4
         try:
             for r in rules:
                 self._add(r)
+            if self.net_enforced:
+                for port in connect_ports:
+                    self._add_port(port)
         except BaseException:
             self.close()
             raise
+
+    def _add_port(self, port: int) -> None:
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise LandlockError(f"port tidak valid: {port!r}")
+        buf = ctypes.create_string_buffer(struct.pack("<QQ", NET_CONNECT_TCP, port), 16)
+        if _sys(SYS_ADD, self.fd, RULE_NET_PORT, ctypes.addressof(buf), 0) != 0:
+            raise LandlockError(f"menambah aturan port {port} gagal: {errno.errorcode.get(ctypes.get_errno(), ctypes.get_errno())}")
 
     def _add(self, rule: Rule) -> None:
         try:

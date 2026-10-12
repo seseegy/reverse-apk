@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -77,6 +78,10 @@ class AIConfig:
     shell_max_calls_per_turn: int = 40        # jumlah perintah per giliran (0 = tanpa batas)
     shell_max_output_chars: int = 12000       # keluaran per perintah yang dikirim kembali ke model (setelah redaksi)
     shell_spool_dir: str = "/data/benchspool"
+    # Jaringan untuk shell AI (menguji API). Kosong = TANPA jaringan. Isi: host (api.contoh.com), subdomain (*.contoh.com), atau * (semua host PUBLIK;
+    # alamat internal selalu ditolak oleh proxy egress).
+    shell_net_allow: tuple[str, ...] = ()
+    shell_net_ports: tuple[int, ...] = (443,)
 
     @property
     def enabled(self) -> bool:
@@ -100,6 +105,29 @@ class AIConfig:
         if self.api_key and self.api_key in text:
             text = text.replace(self.api_key, "[kunci-disembunyikan]")
         return text
+
+
+def _net_allow(raw: str) -> tuple[str, ...]:
+    """Daftar putih host. Entri tidak valid DIBUANG (salah ketik tidak boleh melonggarkan). Aturan yang sama dengan egress/policy.py."""
+    label = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
+
+    def ok(h: str) -> bool:
+        return 0 < len(h) <= 253 and all(label.match(x) for x in h.split("."))
+    out = []
+    for item in (raw or "").split(","):
+        item = item.strip().lower()
+        if item.endswith("."):                  # 'api.com.' ditoleransi, tetapi '*.' (salah ketik) BUKAN '*': salah ketik tidak boleh membuka semua host
+            if item.rstrip(".") == "*":
+                continue
+            item = item.rstrip(".")
+        if item == "*" or (item.startswith("*.") and ok(item[2:])) or ok(item):
+            out.append(item)
+    return tuple(dict.fromkeys(out))
+
+
+def _net_ports(raw: str) -> tuple[int, ...]:
+    ports = sorted({int(x) for x in (raw or "").replace(" ", "").split(",") if x.isascii() and x.isdigit() and 1 <= int(x) <= 65535})
+    return tuple(ports) or (443,)
 
 
 def load_ai_config() -> AIConfig:
@@ -140,4 +168,6 @@ def load_ai_config() -> AIConfig:
         shell_max_calls_per_turn=_int("AI_SHELL_MAX_CALLS_PER_TURN", 40, 0, 100_000),
         shell_max_output_chars=_int("AI_SHELL_MAX_OUTPUT_CHARS", 12000, 500, 1_000_000),
         shell_spool_dir=os.environ.get("AI_SHELL_SPOOL", "/data/benchspool").strip() or "/data/benchspool",
+        shell_net_allow=_net_allow(os.environ.get("AI_SHELL_NET_ALLOW", "")),
+        shell_net_ports=_net_ports(os.environ.get("AI_SHELL_NET_PORTS", "443")),
     )
