@@ -261,8 +261,8 @@
       var errors = [];
       if (!chosen) {
         errors.push({ field: "file", message: "Pilih berkas APK terlebih dahulu." });
-      } else if (!/\.apk$/i.test(chosen.name)) {
-        errors.push({ field: "file", message: "Hanya berkas .apk yang didukung (XAPK/APKS belum)." });
+      } else if (!/\.(apk|xapk|apks)$/i.test(chosen.name)) {
+        errors.push({ field: "file", message: "Hanya berkas .apk, .xapk, dan .apks yang didukung." });
       } else if (chosen.size === 0) {
         errors.push({ field: "file", message: "Berkas kosong." });
       } else if (chosen.size > maxMb * 1024 * 1024) {

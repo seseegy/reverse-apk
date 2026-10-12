@@ -1,8 +1,9 @@
 """Tata letak direktori data. Satu-satunya tempat yang tahu di mana berkas disimpan.
 
-    /data/uploads/<sha256>.apk        APK asli (read-only setelah tervalidasi)
+    /data/uploads/<sha256>.apk        berkas unggahan asli (read-only setelah tervalidasi). Nama internal TETAP .apk walau isinya paket
+                                      XAPK/APKS: halaman Penyimpanan, pembersihan, dan penjelajah semua memakai pola ini (lihat bundle.py)
     /data/uploads/.tmp/               unggahan yang sedang berjalan
-    /data/work/<analysis_id>/         hasil: apktool/ jadx/ logs/ manifest.json
+    /data/work/<analysis_id>/         hasil: apktool/ jadx/ logs/ manifest.json (+ base.apk sementara, hanya selama tool berjalan, untuk paket)
     /data/files/<analysis_id>/up/     lampiran pengguna di chat (nama disimpan acak; nama asli hanya di DB)
     /data/files/<analysis_id>/ai/     berkas buatan AI (py, js, md, ...); hanya web yang menulis di sini
     /data/db/app.sqlite               basis data (SQLite, mode WAL)

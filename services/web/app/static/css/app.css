@@ -880,11 +880,12 @@ select:hover { border-color: var(--color-muted-foreground); }
 .composer-warn { margin: 0; padding: var(--space-2) var(--space-3); font-size: 0.85rem; color: var(--text-warn); border-left: 3px solid var(--text-warn);
   background: rgba(245, 158, 11, 0.08); border-radius: 0 var(--radius) var(--radius) 0; }
 
-/* --- zona lepas */
-.dropzone { position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; pointer-events: none; border-radius: 12px;
+/* --- zona lepas (chat). Kelas BUKAN `.dropzone`: itu dipakai halaman Unggah, dan aturan ini dulu menimpanya (position:absolute; inset:0) sehingga
+   tombol 'Pilih berkas' tertutup dan tidak bisa diklik (terukur di main). */
+.chat-dropzone { position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; pointer-events: none; border-radius: 12px;
   background: rgba(15, 23, 42, 0.86); border: 2px dashed var(--color-accent); backdrop-filter: blur(2px); }
-.dropzone-box { display: grid; justify-items: center; gap: var(--space-1); text-align: center; padding: var(--space-4); color: var(--color-accent); }
-.dropzone-box strong { color: var(--color-foreground); font-size: 1.05rem; }
+.chat-dropzone-box { display: grid; justify-items: center; gap: var(--space-1); text-align: center; padding: var(--space-4); color: var(--color-accent); }
+.chat-dropzone-box strong { color: var(--color-foreground); font-size: 1.05rem; }
 
 /* --- lampiran di gelembung pesan pengguna */
 .msg-atts { display: flex; flex-wrap: wrap; gap: var(--space-2); justify-content: flex-end; }

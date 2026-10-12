@@ -32,7 +32,7 @@ Urutan kerja disusun supaya tiap milestone bisa dicoba langsung di VPS dan membe
 - **Selesai bila:** checklist keamanan 07 lolos dan restore dari backup terbukti.
 
 ## M6 — Paket multi-APK & bengkel modifikasi *(rencana)*
-- Rancangan lengkap di [09](09-bundles-and-workbench.md): PR A (XAPK/APKS/APKM/AAB), PR B (build + tanda tangan dengan persetujuan), PR C (bengkel dengan shell untuk AI).
+- Rancangan lengkap di [09](09-bundles-and-workbench.md): PR A (XAPK/APKS **sudah, versi sempit**; APKM/AAB belum), PR B (build + tanda tangan dengan persetujuan), PR C (bengkel dengan shell untuk AI).
 - **Selesai bila:** kriteria tiap PR di 09 "Urutan kerja" terpenuhi, termasuk tes injeksi pada PR C.
 
 ## Pasca-MVP (P1/P2)

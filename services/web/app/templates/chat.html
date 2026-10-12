@@ -129,8 +129,8 @@
           <button type="submit" class="btn btn-primary" data-send>{{ icon('send', 16) }}<span>Kirim</span></button>
         </div>
       </form>
-      <div class="dropzone" data-dropzone hidden aria-hidden="true">
-        <div class="dropzone-box">{{ icon('upload', 28) }}<strong>Lepas untuk melampirkan</strong>
+      <div class="chat-dropzone" data-dropzone hidden aria-hidden="true">
+        <div class="chat-dropzone-box">{{ icon('upload', 28) }}<strong>Lepas untuk melampirkan</strong>
           <span class="muted">Gambar, log, kode, apa saja. Maks {{ (file_limits.max_file_bytes / 1048576)|round|int }} MB per berkas.</span></div>
       </div>
     </section>

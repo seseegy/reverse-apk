@@ -3,6 +3,9 @@
 Hanya membaca *central directory* ZIP (tidak ada dekompresi), jadi cepat dan tidak bisa dipicu
 menghabiskan disk/memori oleh zip bomb. Pemeriksaan ukuran memakai nilai yang dideklarasikan;
 penjaga keras terhadap header yang berbohong ada di runner (batas keluaran, waktu, memori).
+
+Paket multi-APK (XAPK/APKS, PRD 09): dikenali dari ISI (tidak ada AndroidManifest.xml di akar tetapi ada entri .apk), bukan dari ekstensi.
+Satu-satunya yang didekompresi di sini adalah 4 byte pertama APK base (untuk memastikan itu ZIP); ekstraksi sebenarnya hanya di runner.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rvcore import fmt
+from rvcore.bundle import ZIP_MAGIC, BundleError, BundlePlan, plan_bundle
 
 _DEX_RE = re.compile(r"^classes\d*\.dex$")
 _BOMB_ENTRY_MIN = 8 * 1024 * 1024  # rasio per-entri hanya dinilai untuk entri >= 8 MiB
@@ -40,9 +44,25 @@ class ApkInfo:
     entries: int
     total_uncompressed: int
     dex_files: int
+    bundle: BundlePlan | None = None       # terisi bila berkas adalah paket multi-APK (XAPK/APKS); dex_files = 0 pada paket
 
 
 _fmt = fmt.size
+
+
+def _check_bundle(zf: zipfile.ZipFile) -> BundlePlan:
+    """Pilih base dan pastikan itu memang ZIP. Galat dari `plan_bundle` memakai kode yang sama dengan penolakan lain (UI/audit)."""
+    try:
+        plan = plan_bundle(zf)
+        with zf.open(plan.base) as fh:
+            head = fh.read(4)
+    except BundleError as exc:
+        raise ApkRejected(exc.code, exc.message) from exc
+    except (RuntimeError, zipfile.BadZipFile, NotImplementedError, EOFError, OSError) as exc:
+        raise ApkRejected("bad_bundle", f"APK base di dalam paket tidak dapat dibaca ({type(exc).__name__}).") from exc
+    if head != ZIP_MAGIC:
+        raise ApkRejected("bad_bundle", "APK base di dalam paket bukan arsip APK yang valid.")
+    return plan
 
 
 def validate_apk(path: Path, limits: Limits) -> ApkInfo:
@@ -77,7 +97,6 @@ def validate_apk(path: Path, limits: Limits) -> ApkInfo:
         total = 0
         dex_files = 0
         has_manifest = False
-        has_inner_apk = False
 
         for info in infos:
             name = info.filename
@@ -113,8 +132,6 @@ def validate_apk(path: Path, limits: Limits) -> ApkInfo:
                 has_manifest = True
             elif _DEX_RE.match(normalized):
                 dex_files += 1
-            elif "/" not in normalized and normalized.lower().endswith(".apk"):
-                has_inner_apk = True
 
         if archive_size and total / archive_size > limits.max_ratio:
             raise ApkRejected(
@@ -124,13 +141,7 @@ def validate_apk(path: Path, limits: Limits) -> ApkInfo:
             )
 
         if not has_manifest:
-            if has_inner_apk:
-                raise ApkRejected(
-                    "unsupported_bundle",
-                    "Ini tampak seperti paket XAPK/APKS (berisi beberapa APK). "
-                    "Format tersebut belum didukung; unggah base APK saja.",
-                )
-            raise ApkRejected("no_manifest", "Bukan APK: AndroidManifest.xml tidak ditemukan di akar arsip.")
+            return ApkInfo(entries=len(infos), total_uncompressed=total, dex_files=0, bundle=_check_bundle(zf))
         if dex_files == 0:
             raise ApkRejected("no_dex", "Bukan APK yang dapat dianalisis: tidak ada berkas classes*.dex.")
 
