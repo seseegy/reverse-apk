@@ -470,3 +470,17 @@ Alat di §9 (`/projects/.scratch`) **sudah hilang**; risiko QA-01 sudah terjadi.
 **Analisis lama.** Indeks buatan analyzer < v3 tidak memuat layout. `search_code` kini menambahkan peringatan ke AI ("tidak ada hasil" ≠ "tidak ada di layout") sampai pengguna menekan **Jalankan analisis statis** lagi.
 
 **Belum diukur.** APK sangat besar (ratusan MB) dengan puluhan ribu layout; batas 64 MB melindungi, tetapi waktu `index.finish` pada kasus itu tidak diukur. Pengujian dijalankan di sandbox pengembangan, bukan di runner/VPS.
+
+### 10.8 Halaman Penyimpanan (12 Okt 2026, PR #36 dan tahap 2)
+
+Lihat `docs/prd/10-storage.md`. Ringkasan temuan yang berguna di luar halaman itu:
+
+- **Header meluber di ponsel sebelum perubahan apa pun**: Beranda 447 px vs layar 375 px (+72 px). Terukur; menambah satu menu memperburuknya. Diperbaiki (menu bisa digulir, "Keluar" ikon saja); 8 halaman × 320/375/1280 px kini pas.
+- **Ukuran berkas menyesatkan, ukuran di disk benar**: byte isi lebih kecil 26% (apktool AntennaPod) / 19% (NewPipe) / 12% (jadx NexLoad) dari ruang terpakai. Membandingkan ukuran *berkas* SQLite juga menyesatkan (freelist), seperti di §10.7.
+- **Data aplikasi hanya 1,03 GB di VPS pemilik; cache build Docker 2,69 GB** (1,99 GB bisa dibuang) dan tidak terlihat dari web. Disk 99 GB: terpakai 9,0 GB, tersedia 86 GB, selisih ±4 GB (dihitung, penyebab belum diperiksa).
+- **Rename direktori `r-x` gagal sebagai non-root** (terukur; Python 3.12, uid 65534). Tes yang berjalan sebagai root tidak mungkin melihatnya. Ada tes yang menjatuhkan hak ke `nobody` (dilewati dengan alasan bila lingkungan tak mengizinkan).
+
+**Kerapuhan tes yang SUDAH ADA sebelum pekerjaan ini** (diukur pada `main` bersih e02a4f4, bukan disebabkan tes baru):
+- `tests/test_files_page.py`: pada urutan acak, 10 tes `ERROR` (`UNIQUE constraint failed: apk.sha256`) karena fixture memakai hash tetap. Urutan normal dan terbalik lulus.
+- `tests/test_chat_input.py::test_normal_message_is_stored_trimmed`: kadang gagal pada urutan terbalik (1 dari 8 di `main` bersih, 3 dari 8 di cabang ini; sampel terlalu kecil untuk menyimpulkan perbedaan). Menunggu baris DB dari thread giliran chat di latar, jadi perlombaan waktu.
+

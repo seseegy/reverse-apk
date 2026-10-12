@@ -1115,6 +1115,14 @@ select:hover { border-color: var(--color-muted-foreground); }
   .header-user .btn { padding-inline: var(--space-3); }
   .brand { flex: none; }
 }
+/* Tombol aksi per baris ada dua salinan; TEPAT SATU yang tampil (display:none juga mengeluarkan yang lain dari urutan Tab dan pembaca layar).
+   Layar lebar: kolom Aksi. Layar sempit: di bawah nama, karena kolom Aksi berada di luar area gulir tabel. */
+.storage-table .row-action { display: none; }
+.storage-table .cell-action { white-space: nowrap; text-align: right; }
+@media (max-width: 640px) {
+  .storage-table .row-action { display: block; margin-top: var(--space-2); }
+  .storage-table .cell-action, .storage-table thead th:last-child { display: none; }
+}
 @media (pointer: coarse), (max-width: 640px) {
   .sort-link { min-height: 44px; }
   /* Tautan nama setinggi 44px (target sentuh) membuat teksnya turun; angka rata-atas jadi tampak lebih tinggi. Ratakan di tengah. */

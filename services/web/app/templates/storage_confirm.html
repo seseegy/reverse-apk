@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}{{ plan.title }} · reverse-apk{% endblock %}
+
+{% block header %}{% include "_header.html" %}{% endblock %}
+
+{#- Halaman konfirmasi pembersihan (PRD 10, tahap 2). GET halaman ini TIDAK mengubah apa pun: aman di-refresh. Yang dihapus adalah
+    TEPAT daftar di bawah (dikirim sebagai kunci tersembunyi), dan semua syarat dicek ulang saat tombol ditekan. -#}
+{% block content %}
+<div class="container page page-narrow">
+  <a class="back-link" href="/storage">{{ icon('arrow-left', 16) }}<span>Kembali ke Penyimpanan</span></a>
+
+  <section class="card" aria-labelledby="confirm-title">
+    <div class="card-head"><h1 id="confirm-title">{{ plan.title }}</h1></div>
+
+    {% if plan.items %}
+    <p class="summary summary-{{ 'error' if plan.irreversible else 'ok' }}" role="status" aria-atomic="true">
+      {{ icon('alert-triangle' if plan.irreversible else 'info') }}
+      <span>
+        {{ plan.items|length|num }} item akan dihapus{% if plan.disk %} · membebaskan sekitar {{ plan.disk|bytes }}{% endif %}{% if plan.files %} · {{ plan.files|num }} berkas{% endif %}
+      </span>
+    </p>
+
+    <div class="alert alert-{{ 'warn' if plan.irreversible else 'info' }}" role="note">
+      {{ icon('alert-triangle' if plan.irreversible else 'info') }}
+      <div>
+        <strong>{{ 'Tidak bisa dibatalkan.' if plan.irreversible else 'Bisa dibuat ulang.' }}</strong>
+        {{ plan.consequence }}
+      </div>
+    </div>
+
+    <h2 class="sub-title">Yang akan dihapus</h2>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Daftar yang akan dihapus (gulir bila perlu)">
+      <table class="table table-compact storage-table">
+        <thead><tr><th scope="col">Nama</th><th scope="col" class="num">Ukuran di disk</th><th scope="col" class="num">Berkas</th></tr></thead>
+        <tbody>
+          {% for it in plan.items[:limit] %}
+          <tr>
+            <th scope="row" class="mono break">{{ it.label }}</th>
+            <td class="num mono">{{ it.disk|bytes if it.path else '–' }}</td>
+            <td class="num mono">{{ it.files|num if it.path else '–' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if plan.items|length > limit %}
+    <p class="muted hint">Menampilkan {{ limit|num }} dari {{ plan.items|length|num }}. <strong>Semuanya</strong> ikut dihapus bila Anda melanjutkan.</p>
+    {% endif %}
+    {% else %}
+    <div class="empty">
+      <div class="empty-icon">{{ icon('check-circle', 28) }}</div>
+      <h2>Tidak ada yang perlu dihapus</h2>
+      <p class="muted">Tidak ada item yang memenuhi syarat saat ini.</p>
+    </div>
+    {% endif %}
+
+    {% if plan.skipped %}
+    <h2 class="sub-title">Dilewati ({{ plan.skipped|length|num }})</h2>
+    <ul class="plain-list">
+      {% for label, why in plan.skipped[:limit] %}<li><span class="mono break">{{ label }}</span> <span class="muted">· {{ why }}</span></li>{% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if plan.items %}
+    <form method="post" action="/storage/bersihkan" class="stack" data-submit-lock>
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="aksi" value="{{ aksi }}">
+      {% if aksi == 'hasil' %}<input type="hidden" name="analisis" value="{{ analisis }}">{% endif %}
+      {% if aksi in ('sisa', 'catatan') %}{% for it in plan.items %}<input type="hidden" name="kunci" value="{{ it.key }}">{% endfor %}{% endif %}
+
+      {% if plan.irreversible %}
+      <label class="check" for="paham">
+        <input type="checkbox" id="paham" name="paham" value="1" required>
+        <span>Saya mengerti ini <strong>permanen</strong> dan sudah membaca daftar di atas.</span>
+      </label>
+      {% endif %}
+
+      <div class="btn-row">
+        <a class="btn btn-ghost" href="/storage">Batal</a>
+        <button type="submit" class="btn btn-danger">{{ icon('trash', 16) }}<span>Hapus {{ plan.items|length|num }} item</span></button>
+      </div>
+    </form>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}
