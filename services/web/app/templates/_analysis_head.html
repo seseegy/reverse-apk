@@ -14,7 +14,11 @@
     <div id="status-badge" data-badge>{{ status_badge(snap.status) }}</div>
     <div class="btn-row">
       {% if snap.status in ('queued', 'running') %}
-      <form method="post" action="/analyses/{{ an.id }}/cancel" data-submit-lock>
+      {#- Konfirmasi hanya saat BERJALAN: hasil sementara apktool/jadx langsung dihapus dan harus diulang dari awal. Saat antre belum ada
+          yang dikerjakan, jadi tanpa tanya. data-confirm kosong = tanpa konfirmasi (pola sama dengan tombol Analisis ulang di bawah). -#}
+      <form method="post" action="/analyses/{{ an.id }}/cancel"
+            data-confirm="{{ 'Batalkan analisis yang sedang berjalan? Hasil dekompilasi sementara akan dihapus dan harus diulang dari awal.' if snap.status == 'running' else '' }}"
+            data-submit-lock>
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <button type="submit" class="btn btn-ghost btn-sm" {% if snap.cancel_requested %}disabled{% endif %}>
           {{ icon('x', 16) }}<span>Batalkan</span>

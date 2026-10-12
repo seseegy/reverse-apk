@@ -335,6 +335,7 @@ Ditulis sesi berikutnya, setelah tiap temuan diverifikasi ulang dari kode dan di
 | QA-01, OP-04 | #28 | `tests/` + CI (pyflakes + pytest). Menggantikan aturan lama "jangan commit tes". |
 | UI-04, UI-05, UI-07 | #29 | Satu sumber format angka `rvcore/fmt.py` (dipakai web, worker, runner) + `fmtNum` di `app.js`. `readJson()` agar respons non-JSON tidak lagi jadi "Koneksi gagal". |
 | Sesi kosong saat anggaran habis (tidak ada di audit awal) | #29 | `budget.check()` dipindah sebelum `create_chat_session()`. |
+| UI-08 | #32 | Konfirmasi "Batalkan" **hanya saat berjalan**. Catatan koreksi atas §4: membatalkan job berjalan **tidak** sepenuhnya tanpa kerugian — `_finish_cancelled` langsung menghapus hasil sementara `apktool/` dan `jadx/`, jadi harus diulang dari awal. Saat masih antre tidak ada yang hilang, jadi tanpa konfirmasi. |
 | UI-06 | #33 | Bahasa seragam Indonesia pada **teks yang tampil**: Dashboard → **Beranda**, Upload → **Unggah**, Chat → **Percakapan**, Manifest → **Manifes** (menu, tab, judul tab browser, tombol, pesan galat server dan JS, `README`/`docs/deploy.md`). **Sengaja tidak diubah** karena itu kode, bukan tampilan: alamat (`/chat`, `/upload`, `/manifest`), kelas CSS, `id`, `data-*`, nama tool AI dan prompt, nilai aksi audit `upload`, log operator, dan PRD (istilah konseptual). `tests/test_ui_language.py` memeriksa teks yang terlihat di 9 halaman; Chromium memastikan tidak ada kata lama di layar setelah JavaScript berjalan. |
 
 ### 10.2 Hasil pengukuran
@@ -413,7 +414,8 @@ Dikelompokkan menurut **layanan yang membacanya**; ini yang menentukan ke mana v
 | UI-01 (overflow 320 px) | **Dibiarkan**: di bawah breakpoint uji design system (375 px ke atas) |
 | UI-03 (glyph ▯) | **Tidak dikerjakan** |
 | UI-06 (bahasa campuran) | **Diseragamkan penuh** → #33 (4 kata; hanya teks tampil). Ditolak: dibiarkan, dan jalan tengah 2 kata |
-| UI-08, OP-05 | Belum diputuskan |
+| UI-08 | **Dikerjakan** → #32 (konfirmasi hanya saat berjalan) |
+| OP-05 | Belum diputuskan |
 
 ### 10.5 Hasil setelah perbaikan BE-09 (halaman Berkas) & UI-02
 
