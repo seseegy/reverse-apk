@@ -52,6 +52,7 @@ Tailscale/Cloudflare ──► Caddy :443 ──► web (FastAPI) ──► redi
 | AI menulis path/berkas berbahaya | `clean_ai_path` (allowlist ekstensi teks, tanpa `..`/absolut), tulis atomik, tanpa symlink, tidak pernah dijalankan; folder terpisah dari `work/` dan tidak terpasang di runner/worker |
 | Gambar lampiran membocorkan rahasia ke provider | Tidak bisa diredaksi: peringatan di UI; teks lampiran diredaksi seperti pesan |
 | Disk penuh lewat lampiran | `ATTACH_MAX_MB`, kuota ukuran & jumlah per APK, `MIN_FREE_GB`, pembersihan unggahan pending |
+| *(Rencana, [09](09-bundles-and-workbench.md))* Shell AI, build & tanda tangan APK | Shell hanya di `bench` (tanpa jaringan/rahasia); persetujuan manual atas build; keystore hanya di `signer`; lihat tabel ancaman di 09 |
 | Penyalahgunaan sebagai alat serang pihak ketiga | Tidak ada tool jaringan/eksekusi; kebijakan penggunaan (00 §7); audit log |
 | Disk penuh / DoS diri sendiri | Batas ukuran upload, disk guard, kuota job, retensi |
 | Supply chain (image, dependency, skill eksternal) | Pin versi + hash, build image terkontrol, skill di-vendor pada commit tertentu & ditinjau (04) |

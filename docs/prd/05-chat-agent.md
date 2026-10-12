@@ -5,7 +5,7 @@ Memberi pengguna antarmuka tanya-jawab ke kode APK. Model menelusuri kode sendir
 
 ## Prinsip
 1. **Read-only**: tool hanya membaca artefak analisis yang sudah ada.
-2. **Tanpa efek samping**: tidak ada shell, jaringan, tulis berkas, atau eksekusi APK.
+2. **Tanpa efek samping**: tidak ada shell, jaringan, tulis berkas, atau eksekusi APK. *(Rencana: shell di kontainer `bench` terpisah, bukan di `web`, lewat [09](09-bundles-and-workbench.md) Bagian C; belum berlaku.)*
 3. **Terikat sesi**: semua tool dibatasi pada satu `analysis_id`.
 4. **Bisa diaudit**: setiap tool call dicatat dan terlihat di UI.
 
