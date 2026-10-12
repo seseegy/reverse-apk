@@ -416,3 +416,238 @@ def test_page_escapes_names_from_disk_and_db(client, seeded, fresh_cache):
 def test_beranda_links_to_storage_from_disk_card(client, seeded):
     html = client.get("/", headers=BROWSER).text
     assert 'href="/storage"' in html and "Lihat rincian penyimpanan" in html
+
+
+# ================================================================================ tahap 2: rute pembersihan (HTTP)
+# Tes logika penghapusan ada di test_storage_clean.py. Di sini yang diuji lapisan web: sesi, CSRF, validasi masukan, halaman konfirmasi,
+# dan bahwa alur dari klik sampai disk benar-benar bekerja di aplikasi yang sesungguhnya (DB + folder data uji bersama).
+def make_world_for_http(tag: str):
+    """Analisis selesai dengan hasil dekompilasi nyata di DB uji bersama. Mengembalikan (analysis_id, folder work)."""
+    aid = new_analysis(f"{tag}-{os.urandom(3).hex()}")
+    query("UPDATE analysis SET status = 'done' WHERE id = ?", aid)
+    w = context.layout.work_dir(aid)
+    for name in ("apktool", "jadx"):
+        put(w / name / "x" / "f.txt", 4000, OLD)
+    put(w / "index" / "index.sqlite", 1000, OLD)
+    with closing_db() as conn:                       # replace_artifacts membuka transaksinya sendiri; jangan dibungkus tx lagi
+        store.replace_artifacts(conn, aid, [("apktool", "apktool", 4000, 1), ("jadx", "jadx", 4000, 1), ("index", "index", 1000, 1)])
+    return aid, w
+
+
+def closing_db():
+    from contextlib import closing
+    return closing(context.db())
+
+
+def audit_rows(action="storage_clean"):
+    return query("SELECT detail FROM audit_log WHERE action = ? ORDER BY id", action)
+
+
+@pytest.fixture
+def reaper_sync(monkeypatch):
+    """Penghapus latar diganti versi sinkron supaya hasil akhir bisa diperiksa tanpa menunggu thread."""
+    class Sync:
+        def start(self):
+            context.reaper.sweep()
+            return True
+
+        def __getattr__(self, name):
+            return getattr(context.reaper, name)
+    monkeypatch.setattr(routes_storage, "reaper", Sync())
+    return Sync()
+
+
+def test_clean_pages_require_login(anon):
+    assert anon.get("/storage/bersihkan?aksi=sisa").status_code == 303
+    assert anon.post("/storage/bersihkan", data={"aksi": "sisa", "csrf": "x"}).status_code == 303
+
+
+def test_confirm_page_changes_nothing(client, seeded, fresh_cache):
+    """GET konfirmasi boleh dibuka, di-refresh, atau di-prefetch tanpa efek apa pun."""
+    aid, w = make_world_for_http("konfirmasi")
+    before = sorted(p.relative_to(w).as_posix() for p in w.rglob("*") if p.is_file())
+    n_audit = len(audit_rows())
+    for _ in range(3):
+        r = client.get(f"/storage/bersihkan?aksi=hasil&analisis={aid}", headers=BROWSER)
+        assert r.status_code == 200
+    t = text_of(r.text)
+    assert "Bersihkan hasil dekompilasi" in t and "2 item akan dihapus" in t and "Bisa dibuat ulang" in t and "Batal" in t
+    assert sorted(p.relative_to(w).as_posix() for p in w.rglob("*") if p.is_file()) == before and len(audit_rows()) == n_audit
+    assert not (context.layout.work / ".trash").exists() or not any((context.layout.work / ".trash").iterdir())
+
+
+def test_irreversible_action_shows_checkbox_and_reversible_does_not(client, seeded, fresh_cache):
+    aid, _ = make_world_for_http("kotak")
+    assert 'name="paham"' not in client.get(f"/storage/bersihkan?aksi=hasil&analisis={aid}", headers=BROWSER).text
+    put(context.layout.work / "9501" / "s.bin", 100, OLD); age_dir(context.layout.work / "9501", OLD)
+    page = client.get("/storage/bersihkan?aksi=sisa", headers=BROWSER).text
+    assert 'name="paham"' in page and "required" in page and "Tidak bisa dibatalkan" in text_of(page) and 'value="work/9501"' in page
+    (context.layout.work / "9501" / "s.bin").unlink(); (context.layout.work / "9501").rmdir()
+
+
+@pytest.mark.parametrize("qs", ["", "?aksi=", "?aksi=hapus-semua", "?aksi=hasil", "?aksi=hasil&analisis=0", "?aksi=db", "?aksi=../x"])
+def test_confirm_page_rejects_bad_requests(client, seeded, fresh_cache, qs):
+    r = client.get("/storage/bersihkan" + qs, headers=BROWSER)
+    assert r.status_code == 303 and r.headers["location"] == "/storage?notice=bad"
+
+
+def test_confirm_page_for_unknown_or_active_analysis_offers_nothing(client, seeded, fresh_cache):
+    page = client.get("/storage/bersihkan?aksi=hasil&analisis=999999", headers=BROWSER)
+    # 'csrf' juga ada di form Keluar pada header, jadi yang diperiksa adalah FORM PENGHAPUSAN-nya.
+    assert page.status_code == 200 and "Tidak ada yang perlu dihapus" in text_of(page.text) and 'action="/storage/bersihkan"' not in page.text
+    aid, w = make_world_for_http("aktif-http")
+    query("UPDATE analysis SET status = 'running' WHERE id = ?", aid)
+    page = client.get(f"/storage/bersihkan?aksi=hasil&analisis={aid}", headers=BROWSER)
+    assert "antre/berjalan" in text_of(page.text) and 'action="/storage/bersihkan"' not in page.text      # tidak ada tombol hapus sama sekali
+
+
+def test_execute_requires_csrf_and_deletes_nothing_without_it(client, seeded, fresh_cache):
+    aid, w = make_world_for_http("csrf")
+    before = sorted(p.relative_to(w).as_posix() for p in w.rglob("*") if p.is_file())
+    for bad in ("", "salah", "x" * 500):
+        r = client.post("/storage/bersihkan", data={"aksi": "hasil", "analisis": str(aid), "csrf": bad})
+        assert r.status_code == 403, bad
+    assert sorted(p.relative_to(w).as_posix() for p in w.rglob("*") if p.is_file()) == before
+
+
+@pytest.mark.parametrize("data", [
+    {"aksi": "hapus"}, {"aksi": ""}, {"aksi": "hasil"}, {"aksi": "hasil", "analisis": "abc"}, {"aksi": "hasil", "analisis": "-1"},
+    {"aksi": "hasil", "analisis": "1" * 40}, {"aksi": "sisa"}, {"aksi": "sisa", "paham": "1"},
+    {"aksi": "sisa", "paham": "1", "kunci": "../db"}, {"aksi": "sisa", "paham": "1", "kunci": "work/a b"}, {"aksi": "sisa", "paham": "1", "kunci": "x" * 300},
+    {"aksi": "sisa", "paham": "1", "kunci": "work/../db"}, {"aksi": "sisa", "paham": "1", "kunci": "/etc/passwd"}, {"aksi": "sisa", "paham": "1", "kunci": "work//9001"},
+    {"aksi": "sisa", "paham": "1", "kunci": "work/"}, {"aksi": "sisa", "paham": "1", "kunci": ".."},
+    {"aksi": "catatan", "paham": "1", "kunci": "abc"}, {"aksi": "catatan", "paham": "1", "kunci": "1; DROP TABLE apk"}, {"aksi": "catatan", "paham": "1"},
+])
+def test_execute_rejects_malformed_input_without_touching_anything(client, seeded, fresh_cache, data):
+    aid, w = make_world_for_http("jahat")
+    put(context.layout.work / "9502" / "s.bin", 100, OLD); age_dir(context.layout.work / "9502", OLD)
+    before = (sorted(p.relative_to(context.layout.root).as_posix() for p in context.layout.root.rglob("*") if p.is_file() and "/db/" not in "/" + p.relative_to(context.layout.root).as_posix()))
+    r = client.post("/storage/bersihkan", data={"csrf": seeded.csrf, **data})
+    assert r.status_code == 303 and r.headers["location"] == "/storage?notice=bad"
+    after = (sorted(p.relative_to(context.layout.root).as_posix() for p in context.layout.root.rglob("*") if p.is_file() and "/db/" not in "/" + p.relative_to(context.layout.root).as_posix()))
+    assert after == before
+    (context.layout.work / "9502" / "s.bin").unlink(); (context.layout.work / "9502").rmdir()
+
+
+def test_irreversible_post_without_confirmation_checkbox_is_rejected(client, seeded, fresh_cache):
+    put(context.layout.work / "9503" / "s.bin", 100, OLD); age_dir(context.layout.work / "9503", OLD)
+    r = client.post("/storage/bersihkan", data={"csrf": seeded.csrf, "aksi": "sisa", "kunci": "work/9503"})        # tanpa 'paham'
+    assert r.status_code == 303 and r.headers["location"] == "/storage?notice=bad" and (context.layout.work / "9503" / "s.bin").is_file()
+    (context.layout.work / "9503" / "s.bin").unlink(); (context.layout.work / "9503").rmdir()
+
+
+def test_too_many_keys_are_rejected(client, seeded, fresh_cache):
+    data = {"csrf": seeded.csrf, "aksi": "sisa", "paham": "1", "kunci": [f"work/{9000 + i}" for i in range(routes_storage.MAX_KEYS + 1)]}
+    r = client.post("/storage/bersihkan", data=data)
+    assert r.status_code in (303, 400) and (r.status_code == 400 or r.headers["location"] == "/storage?notice=bad")
+
+
+def test_full_flow_decompile_clean_end_to_end(client, seeded, fresh_cache, reaper_sync):
+    """Alur nyata: pratinjau -> konfirmasi -> hasil. Cek disk, DB, audit, halaman sesudahnya, dan bahwa ukuran yang dilaporkan terukur."""
+    aid, w = make_world_for_http("alur")
+    n_audit = len(audit_rows())
+    r = client.post("/storage/bersihkan", data={"csrf": seeded.csrf, "aksi": "hasil", "analisis": str(aid)})
+    assert r.status_code == 303 and r.headers["location"] == "/storage?notice=cleaned"
+    assert not (w / "apktool").exists() and not (w / "jadx").exists() and (w / "index" / "index.sqlite").is_file()   # index dipertahankan
+    assert sorted(a[0] for a in query("SELECT kind FROM artifact WHERE analysis_id = ?", aid)) == ["index"]
+    assert len(audit_rows()) == n_audit + 1 and str(aid) in audit_rows()[-1][0]
+    page = client.get("/storage?notice=cleaned", headers=BROWSER)
+    t = text_of(page.text)
+    assert page.status_code == 200 and "2 item dibersihkan" in t and "belakang layar" in t
+    # sesudah dibersihkan, tidak ada lagi hasil dekompilasi tercatat -> tombol untuk analisis ini hilang
+    assert f"analisis={aid}\"" not in client.get("/storage", headers=BROWSER).text
+    # hasil hanya tampil SEKALI (angka tidak lewat URL, tidak bisa dipalsukan)
+    again = client.get("/storage?notice=cleaned", headers=BROWSER)
+    assert "item dibersihkan" not in text_of(again.text)
+
+
+def test_flow_orphans_removes_only_what_was_previewed(client, seeded, fresh_cache, reaper_sync):
+    put(context.layout.work / "9601" / "a.bin", 500, OLD); age_dir(context.layout.work / "9601", OLD)
+    put(context.layout.work / "9602" / "b.bin", 500, OLD); age_dir(context.layout.work / "9602", OLD)
+    page = client.get("/storage/bersihkan?aksi=sisa", headers=BROWSER).text
+    assert 'value="work/9601"' in page and 'value="work/9602"' in page
+    put(context.layout.work / "9603" / "c.bin", 500, OLD); age_dir(context.layout.work / "9603", OLD)         # muncul SESUDAH pratinjau
+    r = client.post("/storage/bersihkan", data={"csrf": seeded.csrf, "aksi": "sisa", "paham": "1", "kunci": ["work/9601", "work/9602"]})
+    assert r.status_code == 303 and r.headers["location"] == "/storage?notice=cleaned"
+    assert not (context.layout.work / "9601").exists() and not (context.layout.work / "9602").exists()
+    assert (context.layout.work / "9603" / "c.bin").is_file()                    # tidak dipratinjau -> tidak dihapus
+    (context.layout.work / "9603" / "c.bin").unlink(); (context.layout.work / "9603").rmdir()
+
+
+def test_nothing_left_message_when_everything_already_gone(client, seeded, fresh_cache):
+    r = client.post("/storage/bersihkan", data={"csrf": seeded.csrf, "aksi": "sementara", "paham": "1"})      # 'sementara' tak bisa dibatalkan -> wajib paham
+    assert r.status_code == 303 and r.headers["location"] == "/storage?notice=nothing"
+    assert "Tidak ada yang dihapus" in text_of(client.get("/storage?notice=nothing", headers=BROWSER).text)
+
+
+def test_storage_page_offers_clean_buttons_only_where_meaningful(client, seeded, fresh_cache):
+    aid, _ = make_world_for_http("tombol")
+    html = client.get("/storage", headers=BROWSER).text
+    assert f'href="/storage/bersihkan?aksi=hasil&amp;analisis={aid}"' in html           # punya hasil dekompilasi tercatat & tidak aktif
+    empty = new_analysis(f"kosong-{os.urandom(3).hex()}")
+    assert f"analisis={empty}\"" not in client.get("/storage", headers=BROWSER).text    # tidak ada yang bisa dibersihkan -> tidak ada tombol
+    query("UPDATE analysis SET status = 'running' WHERE id = ?", aid)
+    h2 = client.get("/storage", headers=BROWSER).text
+    assert f"analisis={aid}\"" not in h2 and "sedang berjalan" in h2                     # aktif -> tombol diganti keterangan
+    query("UPDATE analysis SET status = 'done' WHERE id = ?", aid)
+
+
+def test_clean_pages_are_csp_safe(client, seeded, fresh_cache):
+    aid, _ = make_world_for_http("csp")
+    for url in (f"/storage/bersihkan?aksi=hasil&analisis={aid}", "/storage/bersihkan?aksi=sisa", "/storage/bersihkan?aksi=sementara", "/storage/bersihkan?aksi=catatan"):
+        r = client.get(url, headers=BROWSER)
+        assert r.status_code == 200 and " style=" not in r.text and "<script" not in r.text.replace('<script src="/static/js/app.js" defer></script>', ""), url
+
+
+def test_clean_button_ignores_index_only_analyses(client, seeded, fresh_cache):
+    """Regresi: 'hasil dekompilasi' di tabel menjumlah index/ juga, tetapi pembersihan hanya membuang apktool+jadx. Analisis yang hanya punya index/
+    dulu tetap ditawari tombol yang tidak akan menemukan apa pun."""
+    aid = new_analysis(f"hanya-index-{os.urandom(3).hex()}")
+    query("UPDATE analysis SET status = 'done' WHERE id = ?", aid)
+    put(context.layout.work_dir(aid) / "index" / "index.sqlite", 1000, OLD)
+    with closing_db() as conn:
+        store.replace_artifacts(conn, aid, [("index", "index", 1000, 1)])
+    html = client.get("/storage", headers=BROWSER).text
+    assert f"analisis={aid}\"" not in html
+    row = next(i for i in storage_items() if i["analysis_id"] == aid)
+    assert row["decompile"] == 1000 and row["cleanable"] == 0
+
+
+def storage_items():
+    with closing_db() as conn:
+        return storage.from_db(conn)["items"]
+
+
+def test_page_no_longer_claims_there_are_no_clean_buttons(client, seeded, fresh_cache):
+    """Sisa teks tahap 1 ('tombol pembersihan belum ada') salah begitu tahap 2 ada."""
+    client.post("/storage/scan", data={"csrf": seeded.csrf})
+    t = text_of(client.get("/storage", headers=BROWSER).text)
+    assert "tombol pembersihan belum ada" not in t and "hanya untuk melihat" not in t        # frasa lama tahap 1, tepat
+    assert "pratinjau" in t.lower()
+
+
+def test_tmp_button_only_when_old_leftovers_exist(client, seeded, fresh_cache):
+    client.post("/storage/scan", data={"csrf": seeded.csrf})
+    assert "aksi=sementara" not in client.get("/storage", headers=BROWSER).text
+    put(context.layout.uploads_tmp / "putus-lama", 3000, OLD)
+    put(context.layout.uploads_tmp / "sedang-jalan", 3000)                            # baru: tidak boleh dihitung
+    client.post("/storage/scan", data={"csrf": seeded.csrf})
+    page = client.get("/storage", headers=BROWSER).text
+    assert "aksi=sementara" in page and "Hapus 1 sisa unggahan sementara" in text_of(page)
+    (context.layout.uploads_tmp / "putus-lama").unlink(); (context.layout.uploads_tmp / "sedang-jalan").unlink()
+
+
+def test_trash_in_progress_is_explained_not_reported_as_orphan(client, seeded, fresh_cache):
+    put(context.layout.work / ".trash" / "abc-sisa" / "f", 5000, OLD)
+    client.post("/storage/scan", data={"csrf": seeded.csrf})
+    t = text_of(client.get("/storage", headers=BROWSER).text)
+    assert "Sedang dihapus di belakang layar" in t and ".trash" not in t.split("Pemeriksaan konsistensi")[1].split("Panduan server")[0]
+    context.reaper.sweep()
+    assert not context.reaper.pending()
+
+
+def test_row_action_exists_in_both_slots_for_cleanable_row(client, seeded, fresh_cache):
+    """Dua salinan tombol (sel Nama untuk layar sempit, kolom Aksi untuk layar lebar); CSS menampilkan tepat satu. Verifikasi visual di tes browser."""
+    aid, _ = make_world_for_http("dua-slot")
+    html = client.get("/storage", headers=BROWSER).text
+    assert html.count(f"aksi=hasil&amp;analisis={aid}\"") == 2 and 'class="row-action"' in html and 'class="cell-action"' in html

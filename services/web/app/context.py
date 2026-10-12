@@ -21,7 +21,7 @@ from rvcore import fmt as rvfmt
 from rvcore import store
 from rvcore.paths import Layout
 
-from . import userfiles
+from . import storage_clean, userfiles
 from .config import load_settings
 from .security import LoginLimiter, Session, SessionManager
 
@@ -37,6 +37,8 @@ redis_conn = redis.Redis.from_url(
     settings.redis_url, socket_connect_timeout=2, socket_timeout=2, health_check_interval=30
 )
 layout = Layout(settings.data_dir)
+# Penghapus .trash di belakang layar (halaman Penyimpanan memindahkan dulu, menghapus belakangan). Satu instance bersama.
+reaper = storage_clean.Reaper(layout)
 
 STALE_TMP_SECONDS = 3600
 
@@ -55,6 +57,9 @@ def init_storage() -> None:
                     p.unlink()
             except OSError:
                 pass
+    # Sisa .trash dari penghapusan yang terputus (proses mati sebelum selesai): lanjutkan di belakang layar, jangan menahan startup.
+    if reaper.pending():
+        reaper.start()
 
 
 def db():

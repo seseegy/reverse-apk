@@ -1,6 +1,6 @@
 # 10 — Penyimpanan (melihat, lalu membersihkan)
 
-> **Status: Tahap 1 (melihat) SUDAH ADA** di halaman `/storage` (menu **Penyimpanan**). Tahap 2 (membersihkan) dan 3 (penjelajah folder) adalah **rencana**; belum ada kode, dan halaman saat ini tidak punya tombol hapus apa pun.
+> **Status: Tahap 1 (melihat) dan Tahap 2 (membersihkan) SUDAH ADA** di halaman `/storage` (menu **Penyimpanan**). Tahap 3 (penjelajah folder) adalah **rencana**. Semua penghapusan lewat halaman konfirmasi dengan pratinjau; tidak ada penghapus berkas mentah.
 
 ## Tujuan
 Pemilik bisa melihat **apa yang memakai disk**, seberapa besar, dan mana yang sudah tidak punya pemilik, lalu membersihkannya dari web. Sebelum halaman ini, satu-satunya cara menghapus adalah **Hapus APK** (menghapus APK asli, hasil dekompilasi, lampiran, dan riwayat sekaligus), dan tidak ada cara melihat ukurannya.
@@ -37,21 +37,30 @@ Pemilik bisa melihat **apa yang memakai disk**, seberapa besar, dan mana yang su
 ### Perubahan terkait di luar halaman ini
 - **Header**: menu atas kini tiga tautan. Isi header butuh ±400 px (dihitung dari lebar elemen yang terukur: merek 79, menu 58+52+95, tombol keluar, celah) sedangkan ponsel 320–414 px, sehingga **menu dapat digulir** di layar sempit, "Keluar" menjadi **ikon saja** (nama aksesibel tetap), dan menu otomatis menggulir ke halaman aktif. Terukur sebelum perbaikan: Beranda *sudah* meluber 72 px di 375 px; kini delapan halaman diuji pada 320/375/1280 px semuanya pas.
 
-## Tahap 2 — Membersihkan (RENCANA)
+## Tahap 2 — Membersihkan (SELESAI)
 Aksi bermakna, masing-masing dengan **pratinjau** ("akan menghapus N berkas, membebaskan X"), **konfirmasi**, **audit log**, CSRF, dan penolakan bila analisis sedang berjalan (`store.ACTIVE`):
 | ID | Aksi | Akibat yang ditulis di UI |
 |----|------|----|
-| FR-10.8 | Bersihkan **hasil dekompilasi** satu analisis (apktool / jadx / indeks) | Bisa dibuat ulang lewat Analisis ulang. Tab Kode kosong dan AI tak bisa membaca kode sampai itu. (Diuji: ketujuh tab analisis tetap terbuka bila `work/<id>` hilang.) |
+| FR-10.8 | Bersihkan **hasil dekompilasi** satu analisis (**apktool dan jadx saja**; `index/`, `logs/`, `manifest.json` sengaja dipertahankan karena tab Temuan/Jaringan/pencarian memakainya, ±38 MB pada AntennaPod) | Bisa dibuat ulang lewat Analisis ulang. Tab Kode kosong dan AI tak bisa membaca kode sampai itu. (Diuji: ketujuh tab analisis tetap terbuka bila `work/<id>` hilang.) |
 | FR-10.9 | Hapus **sisa tanpa pemilik** (folder `work/` / `files/` yatim, APK yatim, berkas liar) | Tidak ada catatan yang terkait; tidak bisa dibuat ulang. |
 | FR-10.10 | Hapus **sisa unggahan sementara** (`.tmp`) | Unggahan yang terputus. |
 | FR-10.11 | Bereskan **catatan tanpa berkas** (lampiran/hasil AI yang hilang) | Baris database dihapus; halaman Berkas berhenti menampilkannya. |
 | FR-10.12 | **Hapus semuanya** per APK (sudah ada sebagai *Hapus APK*) | Permanen. |
 
 Syarat teknis (dari temuan tahap 1):
-- **Hapus bertahap**: folder dengan ratusan ribu berkas (hasil jadx sebuah APK 15 MB sudah 22 ribu berkas / 357 MB) dipindahkan dulu ke area `.trash` dengan `rename` (cepat, tidak bisa setengah terhapus), lalu dihapus di belakang layar dengan progres. Halaman tidak boleh menunggu `rmtree`.
+- **Hapus bertahap**: folder dengan ratusan ribu berkas (hasil jadx sebuah APK 15 MB sudah 22 ribu berkas / 357 MB) dipindahkan dulu ke `.trash` (di akar yang sama, supaya `rename` atomik), lalu dihapus di belakang layar oleh `Reaper` (thread latar; sisa `.trash` setelah crash dilanjutkan saat startup). **Catatan izin (terukur)**: memindahkan sebuah *direktori* butuh izin tulis pada direktori itu sendiri, dan hasil jadx/apktool bisa berupa direktori `r-x`; sebagai non-root `rename` gagal dengan `PermissionError`. Karena itu izin direktori teratas dipulihkan dulu bila rename pertama gagal. Tes biasa tidak bisa menangkap ini (root mengabaikan izin), sehingga ada tes yang menjatuhkan hak ke `nobody`.
 - Pemeriksaan "tanpa pemilik" **dijalankan ulang tepat sebelum menghapus** (bukan memakai hasil cache), karena keadaan bisa berubah sejak pemindaian terakhir.
 - Hanya folder di bawah akar yang dikenal (`uploads`, `work`, `files`) dan nama yang cocok pola yang boleh dihapus; `db/` tidak pernah. Jalur memakai `resolve_under`/`safe_rmtree` yang sudah ada (tolak symlink, `..`).
-- Setelah menghapus, angka yang ditampilkan adalah ukuran yang **benar-benar berkurang** (diukur ulang), bukan perkiraan.
+- Setelah menghapus, angka yang ditampilkan adalah ukuran yang **diukur sebelum dipindah**; bukti pada data nyata: `du` melaporkan `work/` berkurang 407 MB, sama dengan yang dijanjikan (407 MB).
+
+### Rancangan yang diterapkan (dan alasannya)
+- **Verifikasi ulang tepat sebelum menghapus**, bukan memakai hasil pratinjau. Folder analisis dipindah **di dalam transaksi DB (`BEGIN IMMEDIATE`)** bersama pemeriksaan status, sehingga *Analisis ulang* dan klaim worker (yang juga transaksi tulis) tidak bisa menyelip di antaranya. Bila transaksi gagal setelah rename, folder **dikembalikan** (DB menganggap hasil masih ada, disk tidak boleh kosong).
+- **Daftar yang dipratinjau = daftar yang boleh dihapus.** Form konfirmasi membawa nama eksplisit; yang tidak lagi memenuhi syarat (kini punya pemilik, baru dibuat, sudah hilang) **dilewati dan dilaporkan**, bukan dihapus. Folder yang muncul *sesudah* pratinjau tidak ikut.
+- **Pertahanan berlapis**, tiap lapisan diuji sendiri (mutasi membuktikan): bentuk kunci di HTTP, pola nama (`[A-Za-z0-9._-]{1,200}`), keanggotaan dalam daftar kandidat, penolakan symlink dan jalur di luar akar di `_move_item`.
+- **Aksi tak bisa dibatalkan** (sisa tanpa pemilik, sisa sementara, catatan) wajib kotak centang "Saya mengerti"; hasil dekompilasi (bisa dibuat ulang) tidak. Halaman konfirmasi adalah GET tanpa efek (aman di-refresh); penghapusan hanya lewat POST + CSRF.
+- Audit gagal-tertutup: `storage_clean` dicatat dalam transaksi yang sama dengan penghapusan catatan/pemindahan.
+- Setelah dibersihkan, tombol hanya tampil bila ada yang benar-benar bisa dibersihkan (`cleanable` = apktool+jadx, tanpa `index`), dan analisis aktif ditandai "sedang berjalan".
+- Hasil terakhir ditampilkan **sekali** lewat variabel di memori (angka tidak lewat URL, tidak bisa dipalsukan).
 
 ## Tahap 3 — Penjelajah folder (RENCANA, prioritas lebih rendah)
 Pohon `uploads`, `work`, `files` dengan ukuran, untuk **melihat dan mengunduh** (memakai penampil yang sudah ada). Penghapusan tetap lewat aksi bermakna di atas; tidak ada hapus berkas mentah.

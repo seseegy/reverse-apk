@@ -125,6 +125,8 @@ def from_db(conn: sqlite3.Connection) -> dict[str, Any]:
         "       an.id AS analysis_id, an.status AS status, "
         "       COALESCE((SELECT SUM(ar.size) FROM artifact ar JOIN analysis x ON x.id = ar.analysis_id "
         "                  WHERE x.apk_id = a.id AND ar.kind IN ('jadx','apktool','index')), 0) AS decompile, "
+        "       COALESCE((SELECT SUM(ar.size) FROM artifact ar JOIN analysis x ON x.id = ar.analysis_id "
+        "                  WHERE x.apk_id = a.id AND ar.kind IN ('jadx','apktool')), 0) AS cleanable, "
         "       COALESCE((SELECT SUM(f.size) FROM analysis_file f JOIN analysis x ON x.id = f.analysis_id WHERE x.apk_id = a.id), 0) AS files_size, "
         "       COALESCE((SELECT COUNT(*) FROM analysis_file f JOIN analysis x ON x.id = f.analysis_id WHERE x.apk_id = a.id), 0) AS files_count "
         "FROM apk a LEFT JOIN analysis an ON an.id = (SELECT MAX(id) FROM analysis WHERE apk_id = a.id) "
@@ -142,7 +144,7 @@ def from_db(conn: sqlite3.Connection) -> dict[str, Any]:
         items.append({
             "apk_id": r["apk_id"], "analysis_id": r["analysis_id"], "status": r["status"],
             "name": r["label"] or r["name"], "file": r["name"], "package": r["package"], "version": r["version"],
-            "apk": apk_size, "decompile": decompile, "files": files_size, "files_count": int(r["files_count"] or 0),
+            "apk": apk_size, "decompile": decompile, "cleanable": int(r["cleanable"] or 0), "files": files_size, "files_count": int(r["files_count"] or 0),
             "total": apk_size + decompile + files_size, "created_at": r["created_at"],
             "active": r["status"] in store.ACTIVE if r["status"] else False,
         })
@@ -170,6 +172,7 @@ class DiskScan:
     missing_files: list[dict[str, Any]] = field(default_factory=list)
     unknown_work: list[dict[str, Any]] = field(default_factory=list)   # isi work/ yang bukan folder analisis (mis. berkas liar)
     recent: list[dict[str, Any]] = field(default_factory=list)         # tanpa catatan DB tetapi baru dibuat (< GRACE_SECONDS): bukan yatim
+    trash: TreeSize = field(default_factory=TreeSize)                  # .trash: sudah dipindahkan, menunggu dihapus di belakang layar
     partial: bool = False
     error: str | None = None
 
@@ -203,6 +206,9 @@ def scan_disk(layout: Layout, conn: sqlite3.Connection, budget: Budget | None = 
     for e in _children(layout.uploads):
         if e.name == ".tmp":
             continue
+        if e.name == ".trash":
+            res.trash.add(tree_size(e.path, budget))
+            continue
         if e.is_symlink() or not e.is_file(follow_symlinks=False):
             continue
         try:
@@ -229,6 +235,9 @@ def scan_disk(layout: Layout, conn: sqlite3.Connection, budget: Budget | None = 
             break
         if e.is_symlink():
             continue
+        if e.name == ".trash":
+            res.trash.add(tree_size(e.path, budget))
+            continue
         if not e.is_dir(follow_symlinks=False):
             res.unknown_work.append({"name": e.name})
             continue
@@ -244,6 +253,9 @@ def scan_disk(layout: Layout, conn: sqlite3.Connection, budget: Budget | None = 
     files = TreeSize()
     for e in _children(layout.files):
         if e.name == ".tmp":
+            continue
+        if e.name == ".trash":
+            res.trash.add(tree_size(e.path, budget))
             continue
         if budget.exhausted():
             res.partial = True
@@ -320,6 +332,11 @@ class ScanCache:
     def peek(self) -> DiskScan | None:
         with self._lock:
             return self._scan
+
+    def invalidate(self) -> None:
+        """Buang hasil lama (dipakai sesudah penghapusan: daftar yatim/ukuran lama tidak lagi benar)."""
+        with self._lock:
+            self._scan = None
 
     def fresh(self, now: float | None = None) -> bool:
         with self._lock:

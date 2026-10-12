@@ -108,6 +108,16 @@
     <p class="muted">Belum ada data yang tersimpan.</p>
     {% endif %}
 
+    {% if trashing or (scan and scan.trash.disk) %}
+    <p class="muted hint" role="status">{{ icon('loader', 14) }} Sedang dihapus di belakang layar{% if scan and scan.trash.disk %} ({{ scan.trash.disk|bytes }}){% endif %}. Muat ulang beberapa saat lagi; ruang disk bebas akan bertambah.</p>
+    {% endif %}
+    {% if tmp_old %}
+    <div class="btn-row">
+      <a class="btn btn-ghost btn-sm" href="/storage/bersihkan?aksi=sementara">{{ icon('trash', 16) }}<span>Hapus {{ tmp_old[0]|num }} sisa unggahan sementara…</span></a>
+      <span class="muted hint">{{ tmp_old[1]|bytes }}, lebih dari 1 jam; unggahan yang sedang berjalan tidak ikut.</span>
+    </div>
+    {% endif %}
+
     {% if not scan %}
     <p class="muted hint">Database dan sisa sementara baru muncul setelah <em>Periksa disk</em>. Angka dari catatan database tidak mencakup log, indeks, atau berkas yang tidak tercatat.</p>
     {% endif %}
@@ -131,6 +141,7 @@
             {{ sort_th('dekompilasi', 'Hasil dekompilasi', sort, 'num') }}
             <th scope="col" class="num">Lampiran &amp; AI</th>
             {% if scan %}<th scope="col" class="num" title="Ukuran sebenarnya di disk untuk hasil dekompilasi + lampiran">Di disk</th>{% endif %}
+            <th scope="col"><span class="sr-only">Aksi</span></th>
           </tr>
         </thead>
         <tbody>
@@ -140,12 +151,22 @@
               {% if it.analysis_id %}<a href="/analyses/{{ it.analysis_id }}">{{ it.name }}</a>{% else %}{{ it.name }}{% endif %}
               {% if it.name != it.file %}<span class="muted file-sub">{{ it.file }}</span>{% endif %}
               {% if it.active %}<span class="file-sub">{{ status_badge(it.status) }} <span class="muted">ukuran belum final</span></span>{% endif %}
+              {#- Layar sempit: kolom Aksi berada di luar area gulir, jadi tombolnya ikut di sini. Layar lebar memakai kolom Aksi. -#}
+              {% if it.cleanable and it.analysis_id and not it.active %}
+              <span class="row-action"><a class="btn btn-ghost btn-sm" href="/storage/bersihkan?aksi=hasil&amp;analisis={{ it.analysis_id }}" aria-label="Bersihkan hasil dekompilasi {{ it.name }}">{{ icon('trash', 16) }}<span>Bersihkan hasil</span></a></span>
+              {% endif %}
             </th>
             <td class="num mono"><strong>{{ it.total|bytes }}</strong></td>
             <td class="num mono">{{ it.apk|bytes }}</td>
             <td class="num mono">{{ it.decompile|bytes }}</td>
             <td class="num mono">{{ it.files|bytes }}{% if it.files_count %}<span class="muted file-sub">{{ it.files_count|num }} berkas</span>{% endif %}</td>
             {% if scan %}<td class="num mono">{{ it.on_disk|bytes }}</td>{% endif %}
+            <td class="cell-action">
+              {#- Hanya bila ada yang bisa dibersihkan (hasil dekompilasi tercatat) dan analisis tidak aktif. Tautan GET ke halaman konfirmasi. -#}
+              {% if it.cleanable and it.analysis_id and not it.active %}
+              <a class="btn btn-ghost btn-sm" href="/storage/bersihkan?aksi=hasil&amp;analisis={{ it.analysis_id }}" aria-label="Bersihkan hasil dekompilasi {{ it.name }}">{{ icon('trash', 16) }}<span>Bersihkan hasil</span></a>
+              {% elif it.active %}<span class="muted hint">sedang berjalan</span>{% endif %}
+            </td>
           </tr>
           {% endfor %}
         </tbody>
@@ -233,6 +254,12 @@
       <ul class="plain-list">{% for r in scan.unknown_work[:limit] %}<li class="mono break">{{ r.name }}</li>{% endfor %}</ul>
     </details>
     {% endif %}
+    {% if n_orphan %}
+    <div class="btn-row">
+      <a class="btn btn-ghost" href="/storage/bersihkan?aksi=sisa">{{ icon('trash', 16) }}<span>Hapus sisa tanpa pemilik…</span></a>
+      <span class="muted hint">Menampilkan pratinjau dulu; belum ada yang dihapus.</span>
+    </div>
+    {% endif %}
     {% if scan.missing_uploads %}
     <details class="f-details" open>
       <summary>{{ scan.missing_uploads|length|num }} APK tercatat tetapi berkas aslinya hilang</summary>
@@ -245,13 +272,15 @@
       <summary>{{ scan.missing_files|length|num }} lampiran/hasil AI tercatat tetapi berkasnya hilang</summary>
       <p class="muted">Halaman Berkas masih menampilkannya, tetapi tidak bisa dibuka atau diunduh.</p>
       <ul class="plain-list">{% for r in scan.missing_files[:limit] %}<li><span class="break">{{ r.name }}</span> <span class="muted">· analisis #{{ r.analysis_id }} · {{ 'lampiran' if r.kind == 'upload' else 'hasil AI' }}</span></li>{% endfor %}</ul>
+      <div class="btn-row"><a class="btn btn-ghost btn-sm" href="/storage/bersihkan?aksi=catatan">{{ icon('trash', 16) }}<span>Bereskan catatan…</span></a></div>
     </details>
     {% endif %}
     {% endif %}
 
     <div class="card-foot">
       <p class="muted hint">
-        Halaman ini hanya untuk <strong>melihat</strong>; tombol pembersihan belum ada. Untuk menghapus APK beserta seluruh hasilnya, pakai tombol <em>Hapus</em> di halaman analisisnya.
+        Setiap tombol membuka <strong>pratinjau</strong> dulu; tidak ada yang dihapus sebelum Anda mengonfirmasi. Untuk menghapus APK beserta seluruh hasilnya,
+        pakai tombol <em>Hapus</em> di halaman analisisnya.
       </p>
     </div>
   </section>
