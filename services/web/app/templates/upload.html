@@ -30,12 +30,12 @@
       <span class="label" id="file-label">Berkas APK</span>
       <div class="dropzone" id="dropzone" data-dropzone>
         <span class="dropzone-icon">{{ icon('upload', 28) }}</span>
-        <p><strong>Seret APK ke sini</strong> atau pilih dari perangkat Anda.</p>
-        <input id="file" name="file" type="file" accept=".apk,application/vnd.android.package-archive"
+        <p><strong>Seret APK, XAPK, atau APKS ke sini</strong> atau pilih dari perangkat Anda.</p>
+        <input id="file" name="file" type="file" accept=".apk,.xapk,.apks,application/vnd.android.package-archive"
                class="file-input" aria-labelledby="file-label" aria-describedby="file-help file-error">
         <label for="file" class="btn btn-ghost">{{ icon('file', 16) }}<span>Pilih berkas</span></label>
-        <p class="muted hint" id="file-help">Hanya <span class="mono">.apk</span>, maksimal {{ max_mb }} MB.
-          XAPK/APKS belum didukung.</p>
+        <p class="muted hint" id="file-help"><span class="mono">.apk</span>, <span class="mono">.xapk</span>, atau <span class="mono">.apks</span>, maksimal {{ max_mb }} MB.
+          Untuk paket XAPK/APKS, <strong>hanya APK base</strong> yang dianalisis; split bahasa, kerapatan layar, dan library native ABI tidak ikut.</p>
         <p id="file-info" class="file-info mono" role="status" aria-atomic="true"></p>
       </div>
       <p class="field-error" id="file-error" hidden></p>

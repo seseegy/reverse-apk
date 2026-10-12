@@ -1,6 +1,6 @@
 # 09 — Paket multi-APK & bengkel modifikasi
 
-> **Status: RENCANA. Belum ada kode.** Dokumen ini adalah rancangan untuk disetujui. Selama belum dikerjakan, pernyataan di 00 §4, 05 "Prinsip", dan 07 "Model ancaman" **tetap berlaku apa adanya** (tidak ada shell, tidak ada penulisan APK, tidak ada tanda tangan). Tiap PR implementasi di bagian "Urutan kerja" mengubah pernyataan itu bersamaan dengan kodenya.
+> **Status: Bagian A (paket multi-APK) SEBAGIAN SUDAH ADA; Bagian B dan C masih RENCANA, belum ada kode.** Yang sudah ada (PR A, lihat "Status PR A" di bawah): unggah `.xapk` dan `.apks`, base APK diekstrak di runner dan dianalisis. Yang belum: `.apkm`, `.aab`, penggabungan split, analisis split, dan seluruh Bagian B/C. Selama Bagian B/C belum dikerjakan, pernyataan di 00 §4, 05 "Prinsip", dan 07 "Model ancaman" **tetap berlaku apa adanya** (tidak ada shell, tidak ada penulisan APK, tidak ada tanda tangan). Tiap PR implementasi di bagian "Urutan kerja" mengubah pernyataan itu bersamaan dengan kodenya.
 
 ## Tujuan
 Dua kemampuan baru, dikerjakan terpisah supaya risikonya terkendali:
@@ -241,9 +241,43 @@ VPS: kernel `6.8.0-146-generic` x86_64, Docker `29.9.0`, profil `apparmor` + `se
 - **`apksigner` / `zipalign`** dari Android SDK Build-Tools (terbaru 37.0.0, zip Linux ±66 MB). Google menerbitkan **hanya SHA-1** untuk paket ini; maka SHA-256 dihitung sendiri saat pertama diunduh, dipin di Dockerfile, dan SHA-1 Google dipakai sebagai pembanding.
 - Dokumentasi Google menegaskan `zipalign` dijalankan **sebelum** `apksigner` (menandatangani lalu mengubah berkas membatalkan tanda tangan) → sudah di FR-9.22.
 
+## Status PR A (12 Okt 2026): XAPK dan APKS
+
+**Sudah ada:** `.apk`, `.xapk`, `.apks` diterima (jenis ditentukan dari ISI, bukan ekstensi). Hanya **base APK** yang dianalisis. Kode: `services/rvcore/bundle.py` (dipakai web dan runner), `apkcheck.py`, `runner-daemon`, `tests/test_bundle.py`.
+
+**Sengaja lebih sempit dari rancangan di atas** (agar bisa dibuktikan, bukan dijanjikan):
+| Rancangan | Yang dikerjakan | Alasan |
+|----|----|----|
+| FR-9.1 `.apkm`, `.aab` | **Tidak.** `.apkm` ditolak dengan pesan jelas; `.aab` ditolak di ekstensi | Belum ada sampel asli; klaim "didukung" baru ditulis setelah terbukti (aturan di bawah) |
+| FR-9.4 tahap pipeline `unpack`, `TIMEOUT_UNPACK` | **Tidak ada tahap baru.** Runner mengekstrak base di dalam tiap job (`prepared_apk`), dengan detak jantung selama menyalin | Tidak perlu migrasi DB, tahap spool, maupun perubahan UI status; ekstraksi base terukur 0,07-0,23 dtk untuk 15 MB. Konsekuensi: base diekstrak 3 kali per analisis (apktool, jadx, analyzer), lalu dihapus |
+| Merge split (APKEditor) | **Tidak.** | Terukur: hasil merge membawa tanda tangan v1 yang TIDAK cocok lagi (`SHA1 digest error`) dan blok v2/v3 milik base; analyzer hanya membaca sertifikat, jadi merge tampak "ditandatangani penerbit" padahal tidak sah. Memakai base ASLI menghindarinya |
+| FR-9.3 allowlist entri, maks. 200 `*.apk` | Hanya batas zip yang sudah ada (entri, rasio, ukuran per entri/total) | Yang diekstrak hanya satu entri, dengan batas byte nyata (`MAX_BASE_APK_MB`, bawaan 1024) |
+| FR-9.10 daftar bagian dan perannya | Baris "Paket" di halaman analisis: format, base, jumlah APK, dan peringatan jujur | Daftar lengkap split belum diperlukan karena split tidak dianalisis |
+
+**Aturan pemilihan base** (`bundle.plan_bundle`, sama untuk web dan runner):
+- XAPK: entri `split_apks[]` dengan `id == "base"` di `manifest.json`; cadangan `<package_name>.apk` di akar, lalu satu-satunya APK di akar; selain itu **ditolak**, tidak ditebak. Nama dari manifest hanya diterima bila sama persis dengan entri yang ada.
+- APKS: `universal.apk`; lalu `base-master.apk` (juga `splits/`), lalu `base-master_N.apk` (nomor terkecil, numerik); lalu satu-satunya `standalones/*.apk`; selain itu ditolak. Jumlah kandidat lain dicatat sebagai `alternates` dan ditampilkan di UI.
+
+**Terbukti pada berkas NYATA** (sandbox; runner-daemon, apktool 3.0.3, jadx 1.5.6, analyzer, dan pipeline worker asli; tanpa Docker dan Redis):
+| Berkas | Hasil |
+|----|----|
+| XAPK YouSee Musik 5.22.0 (23,3 MB; base + 3 split) | status `done`; package/versi/SDK terisi dari base; apktool 24.131 berkas, jadx 16.075 berkas Java (138 method gagal, sama dengan uji manual); sertifikat penerbit asli (`CN=247 Entertainment`, skema v2/v3, SHA-256 `9B:60:58:F6…`) |
+| APKS NexLoad mode default (65 MB; 87 APK, 2 master) | status `done`; dipilih `splits/base-master.apk`, `alternates=1`; jadx 21.697 berkas Java (272 method gagal) |
+| APK F-Droid NewPipe (regresi) | status `done` seperti sebelumnya; tanpa opsi bundel; 4 library native terbaca |
+Kedua master pada sampel APKS default **identik** (173 entri, CRC sama semua). Itu belum tentu berlaku untuk bundel lain, sehingga yang dipilih deterministik dan jumlah alternatif ditampilkan.
+
+**Keterbatasan yang diketahui (juga tertulis di UI):**
+- **Split tidak dianalisis.** Terukur pada XAPK nyata: `native: {libs: {}}` kosong padahal aplikasi memuat `librealm-jni.so` (ada di split `config.arm64_v8a`). Resource bahasa dan kerapatan layar juga tidak ikut.
+- `.apks` buatan bundletool tanpa keystore dilaporkan `signing.unsigned` (benar untuk sampel itu); `.apks` dari toko bisa bertanda tangan.
+- Bundel dengan OBB atau total > `ZIP_MAX_UNCOMPRESSED_MB` (3072) ditolak oleh batas zip yang ada. Batas unggah bawaan masih 200 MB (keputusan 1 GB belum diterapkan di PR ini).
+- Belum diuji: `.apkm`, `.aab`, XAPK versi lain/dengan OBB, dan isolasi Docker sungguhan.
+- Satu XAPK dan dua APKS: sampel sangat sedikit.
+
+**Keputusan isolasi `bench` (hasil `scripts/bench-probe.sh` di VPS pemilik, 12 Okt 2026):** kernel `6.8.0-146-generic`, Docker 29.9.0, kontainer `python:3.12-slim-trixie` uid 10001. **Landlock ABI v4 berfungsi** (berkas di dalam folder terbaca; baca, tulis, dan daftar folder di luar ditolak). User namespace diblokir (`EPERM`), jadi bwrap (opsi 3) tidak bisa dipakai. **Keputusan: opsi 2 (Landlock).** Opsi 1 (salin per sesi + uid terpisah) tidak diperlukan. Catatan: probe memakai `docker run` polos; pengaturan layanan `bench` yang sebenarnya (`cap_drop`, `read_only`, `seccomp`) harus diuji ulang saat PR C dikerjakan.
+
 ## Pertanyaan terbuka
-- [OPEN] Isolasi antar analisis di `bench`: data VPS sudah ada (Landlock aktif); menunggu hasil `scripts/bench-probe.sh` di VPS.
+- [DIPUTUSKAN] Isolasi antar analisis di `bench`: **Landlock (opsi 2)**, berdasarkan `scripts/bench-probe.sh` di VPS (lihat Status PR A). [OPEN] diuji ulang dengan pengaturan kontainer `bench` yang sebenarnya.
 - [DIPUTUSKAN] Batas unggah hingga **1 GB**. [OPEN] nilai akhir batas lain yang ikut terdampak (tabel "Batas ukuran"), ditentukan dengan pengukuran APK besar sungguhan.
-- [OPEN] Memastikan jadx 1.5.6 membuka `.aab/.xapk/.apkm/.apks` dengan benar dan apakah `merged.apk` dari APKEditor lulus `apktool d`. README jadx menyatakan didukung, tetapi sampel yang tersedia placeholder; butuh sampel nyata dari pemilik. Klaim "didukung" di UI baru ditulis setelah terbukti.
+- [SEBAGIAN TERBUKTI] jadx 1.5.6 membuka `.xapk` langsung (XAPK nyata, 32 dtk) dan APKEditor menggabungkannya, tetapi **dipakai** hanya base asli (lihat Status PR A). `.apkm` dan `.aab` belum terbukti; butuh sampel nyata.
 - [OPEN] Versi pasti Build-Tools yang dipin (kandidat: 37.0.0) dan uji bahwa `zipalign`/`apksigner` berjalan di image `python:3.12-slim-trixie` (pustaka sistem yang dibutuhkan biner bawaan Google).
 - [OPEN] Apakah "paket format asal" (FR-9.17b) cukup bernilai untuk dikerjakan, atau cukup `merged.apk`. Dinilai setelah PR B.

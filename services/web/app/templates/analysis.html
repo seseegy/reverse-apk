@@ -177,6 +177,16 @@
         <div><dt>Diunggah</dt><dd>{{ time_el(an.apk_created_at) }}</dd></div>
         <div><dt>SDK</dt><dd class="mono">min {{ an.min_sdk or '–' }} · target {{ an.target_sdk or '–' }}</dd></div>
         <div><dt>Opsi</dt><dd>jadx <span class="mono">--deobf</span>: {{ 'aktif' if options.get('deobf') else 'mati' }}</dd></div>
+        {% set bundle = options.get('bundle') %}
+        {% if bundle %}
+        <div><dt>Paket</dt><dd>
+          <span class="mono">{{ (bundle.get('format') or '?')|upper }}</span> · base: <span class="mono break">{{ bundle.get('base') or '?' }}</span>
+          <span class="muted hint">{{ (bundle.get('apk_count') or 0)|num }} berkas APK di dalam paket. <strong>Hanya base yang dianalisis</strong>:
+            split bahasa, kerapatan layar, dan library native ABI tidak ikut, sehingga daftar library native bisa kosong padahal aplikasinya memakainya.
+            Tanda tangan dibaca dari base asli.{% if bundle.get('alternates') %} Ada {{ bundle.get('alternates')|num }} kandidat base lain
+            (mis. <span class="mono">base-master_2.apk</span>) yang tidak dipilih; isinya belum tentu sama.{% endif %}</span>
+        </dd></div>
+        {% endif %}
       </dl>
     </section>
 

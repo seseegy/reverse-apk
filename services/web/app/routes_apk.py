@@ -49,6 +49,8 @@ from .uploads import UploadError, clean_display_name, receive_to_tmp
 
 router = APIRouter()
 
+UPLOAD_EXTENSIONS = (".apk", ".xapk", ".apks")      # .apkm/.aab belum: belum diuji pada berkas asli (lihat rvcore/bundle.py)
+
 AnalysisId = Annotated[int, Path(ge=1, le=2**31 - 1)]
 ApkId = Annotated[int, Path(ge=1, le=2**31 - 1)]
 
@@ -202,9 +204,9 @@ async def upload(request: Request) -> Response:
                      code="not_authorized")
     if not name:
         return _json(422, error="Nama berkas tidak ada.", code="no_name")
-    if not name.lower().endswith(".apk"):
-        return _json(422, error="Hanya berkas .apk yang didukung saat ini (XAPK/APKS menyusul).",
-                     code="bad_extension")
+    # Ekstensi hanya penjaga murah sebelum membaca badan; yang menentukan adalah ISI (validate_apk): APK biasa atau paket XAPK/APKS.
+    if not name.lower().endswith(UPLOAD_EXTENSIONS):
+        return _json(422, error="Hanya berkas .apk, .xapk, dan .apks yang didukung.", code="bad_extension")
     length = request.headers.get("content-length")
     if length and length.isdigit() and int(length) > settings.max_upload_bytes:
         return _json(413, error=f"Berkas melebihi batas {settings.max_upload_bytes // (1024 * 1024)} MB.",
@@ -240,6 +242,9 @@ async def upload(request: Request) -> Response:
         received.path.unlink(missing_ok=True)
         raise
 
+    if info.bundle is not None:
+        options["bundle"] = info.bundle.to_options()       # hanya catatan; runner memutuskan ulang dari isi berkas, tidak mempercayai ini
+
     try:
         result = await run_in_threadpool(_store_upload, received, name, options, ip)
     except BaseException:
@@ -258,8 +263,8 @@ async def upload(request: Request) -> Response:
         return _json(503, error="APK tersimpan, tetapi antrean tidak tersedia. Buka halamannya lalu pilih “Coba lagi”.",
                      code="queue_down", analysis_id=analysis_id, redirect=f"/analyses/{analysis_id}")
 
-    log.info("upload diterima apk=%s analysis=%s size=%s entries=%s", result["apk_id"], analysis_id,
-             received.size, info.entries)
+    log.info("upload diterima apk=%s analysis=%s size=%s entries=%s%s", result["apk_id"], analysis_id,
+             received.size, info.entries, f" bundle={info.bundle.format}" if info.bundle else "")
     return _json(201, **result, redirect=f"/analyses/{analysis_id}")
 
 

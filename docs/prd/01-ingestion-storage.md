@@ -7,7 +7,7 @@ Menerima berkas dengan aman, mengenali duplikat, dan menyimpan semua artefak per
 | ID | Kebutuhan | Prioritas |
 |----|-----------|-----------|
 | FR-1.1 | Upload `.apk` lewat UI (drag & drop) dengan progress | P0 |
-| FR-1.2 | Dukungan `.xapk` / `.apks` / `.apkm` (ekstrak base + split APK) | P1 |
+| FR-1.2 | Dukungan `.xapk` / `.apks` (**sudah**: hanya base APK yang dianalisis, split tidak) dan `.apkm` (**belum**, butuh sampel asli); lihat 09 "Status PR A" | P1 |
 | FR-1.3 | Hitung SHA-256, MD5, ukuran saat upload | P0 |
 | FR-1.4 | Dedup: jika SHA-256 sudah ada, tawarkan "buka hasil lama" atau "analisis ulang" | P0 |
 | FR-1.5 | Validasi: magic bytes ZIP, ada `AndroidManifest.xml` dan `classes*.dex`, batas ukuran | P0 |

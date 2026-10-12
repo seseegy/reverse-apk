@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from rvcore import fmt
+from rvcore.bundle import BundleError, prepared_apk
 from rvcore.fsutil import remove_unsafe_entries, safe_rmtree, tree_stats
 from rvcore.paths import SHA256_RE, Layout
 from rvcore.spool import (
@@ -50,6 +51,7 @@ RECYCLE = os.environ.get("RUNNER_RECYCLE", "1").strip().lower() in {"1", "true",
 MAX_OUTPUT_BYTES = int(os.environ.get("MAX_OUTPUT_MB", "3072")) * MIB
 MAX_OUTPUT_FILES = int(os.environ.get("MAX_OUTPUT_FILES", "600000"))
 MAX_LOG_BYTES = 5 * MIB
+MAX_BASE_APK_BYTES = int(os.environ.get("MAX_BASE_APK_MB", "1024")) * MIB   # batas byte NYATA yang ditulis saat mengekstrak base dari paket XAPK/APKS
 TIMEOUT_MIN, TIMEOUT_MAX = 10, 3600
 
 HEARTBEAT_EVERY = 5.0
@@ -284,6 +286,27 @@ def run_job(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
     except OSError as exc:
         return {"status": RESULT_FAILED, "error_code": "tool_error", "message": f"I/O: {exc}"}
 
+    # Paket XAPK/APKS: ekstrak base ke work/<id>/base.apk dan beri tool APK itu (bukan paketnya). Path APK hanya dihitung di sini, jadi
+    # apktool, jadx, dan analyzer (tanda tangan, library native) memakai berkas yang sama. APK biasa: `apk` apa adanya.
+    last_beat = [0.0]
+
+    def beat() -> None:
+        if time.monotonic() - last_beat[0] >= HEARTBEAT_EVERY:       # ekstraksi berkas besar tidak boleh membuat runner tampak mati
+            SPOOL.write_heartbeat("busy", job_id)
+            last_beat[0] = time.monotonic()
+
+    try:
+        with prepared_apk(apk, work, MAX_BASE_APK_BYTES, beat) as real_apk:
+            return _run_tool(job_id, stage, deobf, timeout, real_apk, work, started)
+    except BundleError as exc:
+        say(f"[{job_id}] paket ditolak: {exc.code} — {exc.message}")
+        return {"status": RESULT_FAILED, "error_code": "tool_error", "message": f"Paket tidak dapat dipakai: {exc.message}"}
+    except OSError as exc:
+        return {"status": RESULT_FAILED, "error_code": "tool_error", "message": f"I/O: {exc}"}
+
+
+def _run_tool(job_id: str, stage: str, deobf: bool, timeout: int, apk: Path, work: Path, started: float) -> dict[str, Any]:
+    """Jalankan satu tool terhadap `apk` (APK biasa, atau base hasil ekstraksi dari paket)."""
     out = work / STAGE_OUT_DIR[stage]
     logs_dir = work / "logs"
     logs_dir.mkdir(exist_ok=True)
