@@ -5,6 +5,10 @@ Dipakai untuk memverifikasi analisis statis (M2): setiap kelemahan di bawah haru
 Membutuhkan: Docker, dan image runner (`docker compose build runner`). Tidak memerlukan Android SDK:
 apktool membangun APK dari smali + manifest yang ditulis di sini.
 
+Opsi tmpfs `/tmp` di bawah (seperti runner sungguhan) di-mount `noexec` oleh Docker. Tanpa `--aapt`, apktool 3.0.3 mengekstrak aapt2 ke /tmp lalu
+menjalankannya, sehingga gagal ("Permission denied"). Karena itu skrip memakai aapt2 yang dipasang di image (/opt/apktool/aapt2, rootfs read-only).
+Jangan "memperbaikinya" dengan menambah `exec` pada tmpfs.
+
     python3 scripts/sample-apk/build.py [-o testdata/vulnsample.apk] [--image reverse-apk-runner]
 
 Kelemahan yang ditanam            -> temuan yang diharapkan
@@ -242,7 +246,7 @@ def main() -> int:
         run(["docker", "run", "--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp:rw,size=256m",
              "--cap-drop", "ALL", "--user", "10001:10001", "-e", "HOME=/tmp/h", "-v", f"{td}:/w", a.image,
              "sh", "-c", "mkdir -p /tmp/h && java -Xmx1g -Duser.home=/tmp/h -jar /opt/apktool/apktool.jar "
-                         "b /w/proj -o /w/unsigned.apk"])
+                         "b --aapt /opt/apktool/aapt2 /w/proj -o /w/unsigned.apk"])
         unsigned = Path(td) / "unsigned.apk"
         if not unsigned.is_file():
             sys.exit("apktool tidak menghasilkan APK")
