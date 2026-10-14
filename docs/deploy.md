@@ -45,7 +45,7 @@ cd reverse-apk
 
 ## 4. Konfigurasi
 ```bash
-make init        # membuat .env (SECRET_KEY & REDIS_PASSWORD acak) dan folder secrets/
+make init        # membuat .env (SECRET_KEY & REDIS_PASSWORD acak), folder secrets/, dan keystore penanda tangan (membangun image signer bila perlu; lihat "Keystore penanda tangan")
 make password    # atur password admin (min 12 karakter; disimpan sebagai hash argon2id)
 ```
 Periksa `.env` (opsional): `APP_DOMAIN` sudah `apk.revers3.my.id`, `ADMIN_USERNAME` default `admin`.
@@ -102,7 +102,7 @@ dijalankan aplikasi. Butuh analisis statis selesai (agar pencarian tersedia). Ek
 Kunci hanya dibaca service `web`; tidak pernah dikirim ke browser, worker, atau runner, dan tidak dicatat di log.
 
 ## Alat build & tanda tangan APK (B-1b)
-Paket ini HANYA menyediakan alat di server; **belum ada** daemon penanda tangan, keystore, tahap `build`, maupun UI. Layanan `signer` memakai profil Compose `build`,
+Paket ini menyediakan alat di server dan keystore (lihat "Keystore penanda tangan" di bawah); **belum ada** daemon penanda tangan, tahap `build`, maupun UI, dan keystore belum dipasang ke layanan mana pun. Layanan `signer` memakai profil Compose `build`,
 jadi `make up` / `docker compose up` **tidak** menjalankannya dan RAM tidak bertambah sampai fitur build dipakai.
 
 **Memasang / memperbarui di VPS** (butuh Docker Compose v2 untuk `--profile`):
@@ -174,6 +174,34 @@ Pemeriksaan stabil terakhir (14 Okt 2026): apktool v3.0.3 dan jadx v1.5.6 sudah 
 **Pemecahan masalah:** `libc++.so: cannot open shared object file` → `libc++.so` harus berdampingan di `/opt/build-tools/lib64/` (RUNPATH `$ORIGIN/lib64`). Jangan percaya `ldd /usr/local/bin/zipalign`
 (symlink) yang selalu melaporkan `not found`; periksa `ldd /opt/build-tools/zipalign` atau jalankan `zipalign` langsung. `unknown flag: --profile` → Compose terlalu lama (butuh v2).
 
+### Keystore penanda tangan (Tahap 1)
+`make init` membuat kunci penanda tangan APK sekali saja: `secrets/signing_keystore.p12` (PKCS12, RSA 3072, `SHA256withRSA`, alias `reverse-apk`, berlaku 30 tahun) dan `secrets/signing_keystore_pass` (kata sandi acak 64 heks). `keytool` dijalankan di dalam image `signer` (server **tidak** perlu JDK), tanpa jaringan, rootfs read-only, tanpa capability, sebagai user host. Kata sandi tidak pernah menjadi argumen proses/variabel lingkungan. Skrip **tidak pernah menimpa**: jika kedua berkas sudah ada ia hanya berkata "sudah ada"; jika hanya satu yang ada ia berhenti (kode 2) tanpa mengubah apa pun. Keystore ini belum dipakai layanan mana pun (tidak ada di `docker-compose.yml`).
+
+**Langkah di VPS** (pembaruan dari kode yang sudah berjalan):
+```bash
+git pull --ff-only
+make init                 # idempoten; membangun image signer bila belum ada (butuh jaringan sekali), lalu membuat keystore bila belum ada
+make keystore-info        # alias, algoritma, masa berlaku, SHA-256 (tanpa kata sandi)
+ls -la secrets/           # harus ada signing_keystore.p12 dan signing_keystore_pass, keduanya -rw------- milik user deploy
+```
+Hasil yang diharapkan: `✓ keystore dibuat` (pertama kali) dengan `3072-bit RSA key`, `SHA256withRSA`, `Berlaku ... until ... 2056`; `make init` kedua kali: `✓ keystore sudah ada ... tidak diubah` dan sidik jari SHA-256 yang SAMA di `make keystore-info`. `make doctor` menampilkan `✓ keystore penanda tangan ada (mode 600/600)`.
+
+**CADANGKAN SEKARANG** (di luar server, mis. pengelola kata sandi atau penyimpanan terenkripsi): `secrets/signing_keystore.p12` **dan** `secrets/signing_keystore_pass`. Keduanya dibutuhkan bersama; simpan juga sidik jari SHA-256 dari `make keystore-info` untuk memeriksa pemulihan.
+**Apa artinya kehilangan kunci:** tidak ada cara memulihkan. Anda harus membuat kunci BARU (pindahkan berkas yang tersisa ke tempat lain secara manual, lalu `make keystore`). APK yang sudah terpasang di perangkat dengan kunci lama TIDAK bisa diperbarui oleh APK bertanda tangan kunci baru (Android menolak pembaruan dengan tanda tangan berbeda): aplikasi harus dicopot dulu dan data aplikasinya hilang; tanda tangan semua build lama juga tidak lagi cocok dengan yang baru. Sebaliknya, siapa pun yang memegang kedua berkas ini bisa menandatangani APK atas nama kunci ini: jaga mode `600` dan jangan masukkan ke repo/chat/tiket. Kunci ini untuk riset pribadi, bukan kunci rilis.
+
+**Kemungkinan kegagalan** (pesan dari `scripts/keystore.sh`; tidak ada berkas yang dibuat bila gagal):
+| Gejala | Penyebab / tindakan |
+|---|---|
+| `Tidak bisa membuat direktori kerja di .../secrets` | `secrets/` dimiliki root (mis. dibuat Docker sebelumnya). `sudo chown -R "$(id -u):$(id -g)" secrets` lalu ulangi |
+| `keytool gagal membuat keystore` dan `Cannot find file: /out/pass` | kontainer (user host) tidak bisa membaca/menulis direktori kerja di `secrets/` (izin, SELinux, atau Docker rootless/userns-remap yang memetakan uid lain). Perbaiki kepemilikan/konteks lalu ulangi; sisa `secrets/.keystore-work.*` dihapus sendiri oleh skrip |
+| `Image reverse-apk-signer belum ada dan .env belum ada` | jalankan `make init` (bukan `make keystore`) pada instalasi baru |
+| `Gagal membangun image signer` | butuh jaringan sekali (apt + unduh Build-Tools, hash diverifikasi); coba `docker compose --profile build build signer` untuk melihat galat lengkap |
+| `Image ... tidak ditemukan setelah build` | nama project Compose di-override (`COMPOSE_PROJECT_NAME`); jalankan `SIGNER_IMAGE=<nama> make keystore` (cek `docker images \| grep signer`) |
+| `HANYA signing_keystore... yang ada (pasangannya hilang)` (kode 2) | salah satu berkas hilang. Pulihkan dari cadangan; JANGAN buat baru kecuali memang rela kehilangan kunci lama |
+| `ada sisa direktori kerja keystore` (dari `make doctor`) | proses terputus keras; aman dihapus `secrets/.keystore-work.*` bila tidak ada `make keystore` yang sedang berjalan |
+
+**Jumlah build yang disimpan:** `BUILD_KEEP` di `.env` (bawaan 10 per analisis; opsional, lihat `.env.example`). Belum berefek sampai tahap build ada.
+
 ## Upload besar dan Cloudflare
 Batas ukuran APK diatur `MAX_UPLOAD_MB` di `.env` (bawaan 200). Nilai yang sama dipakai aplikasi dan Caddy.
 Jika proxy Cloudflare (awan oranye) dinyalakan, paket gratis membatasi body request ~100 MB sehingga APK yang
@@ -235,6 +263,7 @@ job tidak diambil dalam 2 menit, analisis gagal dengan kode `runner_unavailable`
 
 ## Catatan keamanan
 - `.env` dan `secrets/` tidak boleh di-commit (sudah ada di `.gitignore`). Izin: `.env` 600, `secrets/` 700.
+- `secrets/signing_keystore.p12` dan `secrets/signing_keystore_pass` (mode 600) adalah kunci penanda tangan APK: **cadangkan di luar server** dan jangan dibagikan. Kehilangan = kunci baru (lihat "Keystore penanda tangan").
 - Aplikasi terbuka ke internet pada satu alamat; yang tampil ke publik hanya halaman login. Setelah HTTPS jalan,
   pertimbangkan Cloudflare Access di depannya (lihat PRD 07).
 - Batasan memori/proses di `docker-compose.yml` (`mem_limit`, `pids_limit`) berlaku di VPS Linux biasa.

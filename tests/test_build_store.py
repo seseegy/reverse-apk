@@ -687,6 +687,23 @@ def test_prune_never_returns_any_active_status(conn, status):
     assert active not in store.prune_builds(conn, aid, 1)
 
 
+@pytest.mark.parametrize("status", ACTIVE)
+def test_prune_never_returns_an_active_build_even_when_older_than_final_ones(conn, status):
+    """Lewat API, build aktif selalu yang terbaru, sehingga tes di atas tidak bisa membedakan 'dikecualikan' dari 'kebetulan terbaru'.
+    Di sini baris aktif SENGAJA lebih tua (id kecil, lewat SQL mentah) daripada deretan build final: ia tetap tidak boleh disebut."""
+    aid = make_done_analysis(conn)
+    evidence = dict(approved_at=1.0, approval_statement_sha256=SHA_A, approval_statement_version=1) if status != AWAITING else {}
+    raw_insert(conn, aid, id=5, status=status, **evidence)
+    final = dict(approved_at=1.0, approval_statement_sha256=SHA_A, approval_statement_version=1, verify_ok=1, output_name="a.apk",
+                 output_sha256=SHA_A, output_size=1, output_format="apk", cert_sha256=CERT)
+    for i in range(6, 9):
+        raw_insert(conn, aid, id=i, status="done", **final)
+        raw_insert(conn, aid, id=i + 10, status="failed")
+    pruned = store.prune_builds(conn, aid, 1)
+    assert 5 not in pruned
+    assert pruned == [6, 7, 16, 17]
+
+
 def test_prune_default_follows_build_keep_env(conn, monkeypatch):
     aid = make_done_analysis(conn)
     done = _done_builds(conn, aid, 14)
