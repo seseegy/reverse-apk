@@ -5,7 +5,9 @@ Dijalankan lewat `make runner-selftest`, yang memakai opsi isolasi yang sama den
 (--network none, --read-only, cap-drop ALL, dst).
 """
 
+import hashlib
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -24,6 +26,22 @@ def version(cmd: list[str]) -> str:
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     text = (out.stdout or out.stderr).strip().splitlines()
     return text[0] if text else f"(kode {out.returncode})"
+
+
+def diagnose(text: str) -> str:
+    """Ringkasan galat yang menyimpan AKAR MASALAH. Ekor stack trace ('at ...ProcessImpl.start', '... 5 more') menyesatkan: yang berguna
+    adalah baris 'Caused by:' (pertama dan terdalam), baris 'error=', dan awal keluaran yang bermakna (bukan baris 'at ...')."""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return "(tanpa keluaran)"
+    causes = [ln for ln in lines if "Caused by:" in ln]
+    picked = []
+    for ln in (causes[:1] + causes[-1:] + [ln for ln in lines if "error=" in ln][:1]):
+        if ln[:250] not in picked:
+            picked.append(ln[:250])
+    meaningful = [ln for ln in lines if not ln.startswith("at ") and not re.fullmatch(r"\.\.\. \d+ more", ln)]
+    head = " | ".join(meaningful)[:300]
+    return ("penyebab: " + " >> ".join(picked) + "; " if picked else "") + "keluaran: " + head
 
 
 os.makedirs(os.environ.get("HOME", "/tmp/home"), exist_ok=True)
@@ -64,6 +82,33 @@ try:
     report(True, "/tmp dapat ditulis", "tmpfs tersedia untuk kerja alat")
 except OSError as exc:
     report(False, "/tmp dapat ditulis", str(exc))
+
+# 3c. /tmp runner HARUS noexec: invarian yang SENGAJA dijaga (runner memproses APK tak tepercaya; pertahanan berlapis). Docker memasang tmpfs sebagai
+#     noexec secara bawaan. Bug `apktool b` (apktool mengekstrak aapt2 ke /tmp lalu menjalankannya) diperbaiki dengan aapt2 terpasang di rootfs,
+#     BUKAN dengan `exec` pada tmpfs. Dibaca dari opsi mount DAN dibuktikan dengan percobaan exec sungguhan.
+tmp_opts = None
+with open("/proc/self/mountinfo") as fh:
+    for line in fh:
+        parts = line.split()
+        if len(parts) > 5 and parts[4] == "/tmp":
+            tmp_opts = parts[5].split(",")
+probe_bin = f"/tmp/exec-probe-{os.getpid()}"
+denied = False
+try:
+    shutil.copy("/bin/true", probe_bin)
+    os.chmod(probe_bin, 0o755)
+    subprocess.run([probe_bin], timeout=10)
+except PermissionError:
+    denied = True
+except OSError as exc:  # noqa: BLE001
+    print(f"    (percobaan exec di /tmp tidak meyakinkan: {type(exc).__name__}: {exc})")
+finally:
+    try:
+        os.remove(probe_bin)
+    except OSError:
+        pass
+report(tmp_opts is not None and "noexec" in tmp_opts and denied, "tmp runner noexec",
+       "mount /tmp: " + (",".join(tmp_opts) if tmp_opts else "bukan mount sendiri") + "; exec dari /tmp " + ("ditolak (benar, disengaja)" if denied else "DIIZINKAN"))
 
 # 4. Jaringan terisolasi: koneksi keluar HARUS gagal
 reachable = False
@@ -106,10 +151,45 @@ for label, cmd in (
     except Exception as exc:  # noqa: BLE001
         report(False, label, f"{type(exc).__name__}: {exc}")
 
+# 6a. aapt2 terpasang di rootfs (/opt/apktool/aapt2): ELF x86-64, milik root, bisa dieksekusi, TIDAK bisa ditulis oleh runner, SHA-256 cocok pin
+#     (ENV image AAPT2_SHA256; tidak disalin ke skrip), dan wrapper `apktool` menyisipkan `--aapt` ke sana untuk `b`. Karena /tmp noexec (3c),
+#     inilah satu-satunya jalan apktool menjalankan aapt2.
+aapt2 = os.environ.get("AAPT2_PATH", "/opt/apktool/aapt2")
+pin = os.environ.get("AAPT2_SHA256", "")
+try:
+    with open(aapt2, "rb") as fh:
+        data = fh.read()
+    sha = hashlib.sha256(data).hexdigest()
+    st = os.stat(aapt2)
+    elf = data[:4] == b"\x7fELF" and data[4] == 2 and data[18:20] == b"\x3e\x00"  # ELF64, e_machine = x86-64
+    problems = [msg for bad, msg in (
+        (not elf, "bukan ELF 64-bit x86-64"),
+        (not os.access(aapt2, os.X_OK), "tidak bisa dieksekusi"),
+        (st.st_uid != 0 or os.access(aapt2, os.W_OK), "bukan milik root atau bisa ditulis runner"),
+        (aapt2.startswith("/tmp/"), "berada di /tmp"),
+        (not re.fullmatch(r"[0-9a-f]{64}", pin), "AAPT2_SHA256 tidak ada di ENV image"),
+        (sha != pin, f"sha256 {sha[:12]}… != pin {pin[:12]}…"),
+    ) if bad]
+    out = subprocess.run([aapt2, "version"], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+    if out.returncode != 0:
+        problems.append(f"`aapt2 version` kode {out.returncode}: " + diagnose(out.stdout + out.stderr))
+    report(not problems, "aapt2 terpasang di rootfs (ELF, executable, sha256 cocok pin)",
+           f"{aapt2} {st.st_size} byte sha256 {sha[:12]}… {(out.stdout or out.stderr).strip()[:60]}" if not problems else "; ".join(problems))
+except Exception as exc:  # noqa: BLE001
+    report(False, "aapt2 terpasang di rootfs (ELF, executable, sha256 cocok pin)", f"{type(exc).__name__}: {exc}")
+try:
+    with open(shutil.which("apktool") or "/usr/local/bin/apktool") as fh:
+        wrapper = fh.read()
+    report(f"--aapt {aapt2}" in wrapper, "wrapper apktool menyisipkan --aapt untuk b",
+           "wrapper memakai aapt2 terpasang" if f"--aapt {aapt2}" in wrapper else "wrapper TIDAK menyisipkan --aapt: apktool b akan mengekstrak aapt2 ke /tmp (noexec)")
+except OSError as exc:
+    report(False, "wrapper apktool menyisipkan --aapt untuk b", f"{type(exc).__name__}: {exc}")
+
 # 6. Kelayakan build: `apktool b` membangun proyek smali minimal OFFLINE (kebutuhan B-1: AI memodifikasi lalu membangun ulang).
-#    aapt2 sudah dibundel di dalam jar apktool, jadi tidak ada alat lain yang dipasang. Bukti jaringan mati ada di pemeriksaan 4 di atas;
-#    di sini yang dibuktikan hanya bahwa build selesai di kontainer yang sama (tanpa jaringan, rootfs read-only, non-root).
-#    Proyek diturunkan dari scripts/sample-apk/build.py (APKTOOL_YML, smali_class) dan sengaja tanpa referensi @string/res.
+#    Dijalankan lewat wrapper `apktool` yang SAMA dengan jalur produksi (wrapper menambahkan `--aapt /opt/apktool/aapt2`), di /tmp noexec.
+#    Bukti jaringan mati ada di pemeriksaan 4 di atas; di sini yang dibuktikan hanya bahwa build selesai di kontainer yang sama
+#    (tanpa jaringan, rootfs read-only, non-root). Proyek diturunkan dari scripts/sample-apk/build.py (APKTOOL_YML, smali_class)
+#    dan sengaja tanpa referensi @string/res.
 proj = os.path.join(work, "proj")
 os.makedirs(os.path.join(proj, "smali", "com", "example", "selftest"))
 with open(os.path.join(proj, "apktool.yml"), "w") as fh:
@@ -129,7 +209,7 @@ try:
     text = out.stdout + out.stderr
     bad = [e for e in ENV_ERRORS if e in text]
     report(out.returncode == 0 and not bad, "apktool b dapat membangun proyek smali minimal OFFLINE",
-           "build selesai tanpa galat lingkungan" if out.returncode == 0 and not bad else f"kode {out.returncode}: " + " | ".join(text.strip().splitlines()[-3:]))
+           "build selesai tanpa galat lingkungan" if out.returncode == 0 and not bad else f"kode {out.returncode}: " + diagnose(text))
     ok_zip, names, magic = False, [], b""
     if os.path.exists(built):
         with zipfile.ZipFile(built) as zf:

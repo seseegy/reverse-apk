@@ -7,16 +7,29 @@ ARG JADX_VERSION=1.5.6
 ARG JADX_SHA256=545ea2be9c242511bc145755cf4bda2485ade42966e096f8b4d3da2a230e8974
 ARG APKTOOL_VERSION=3.0.3
 ARG APKTOOL_SHA256=dbf930b076c6b9be08d57c449cacefc3bdd6b71ebd59b3066fc0e1f5b14f9423
+# aapt2 = berkas `prebuilt/linux/aapt2` di dalam apktool_${APKTOOL_VERSION}.jar (ELF x86-64 statis, 6449680 byte). Dipin terpisah supaya
+# mengganti versi apktool otomatis memaksa meninjau ulang hash ini. Harus dihitung ulang dari jar baru saat APKTOOL_VERSION dinaikkan.
+ARG AAPT2_SHA256=df312db814c018019b2b79a993b041b738d7b76f4a8f28da25bc874a026368cc
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     HOME=/tmp/home \
     JADX_VERSION=${JADX_VERSION} \
     APKTOOL_VERSION=${APKTOOL_VERSION} \
+    AAPT2_SHA256=${AAPT2_SHA256} \
+    AAPT2_PATH=/opt/apktool/aapt2 \
     ANALYZER_VERSION=4 \
     JADX_OPTS="-Xmx2g"
 
+# aapt2 dipasang di rootfs (read-only, milik root, 0755) dan TIDAK diekstrak apktool ke /tmp: /tmp runner sengaja `noexec` (APK tak tepercaya),
+# sedangkan tanpa `--aapt` apktool 3.0.3 mengekstrak aapt2 ke direktori sementara lalu menjalankannya (galat: Permission denied).
+# Wrapper `apktool` menyisipkan `--aapt` untuk subperintah b/build, sehingga setiap pemanggil otomatis aman. Jangan "memperbaikinya" dengan `exec` pada tmpfs.
+# Ekstraksi HARUS sebelum `apt-get purge ... unzip`. aapt2 prebuilt Linux hanya x86-64, jadi build di arsitektur lain digagalkan dengan pesan jelas.
 RUN set -eux; \
+    if [ "$(uname -m)" != "x86_64" ]; then \
+      echo "GALAT: aapt2 bawaan apktool ${APKTOOL_VERSION} hanya untuk x86-64 (arsitektur ini: $(uname -m)); bangun image untuk linux/amd64." >&2; \
+      exit 1; \
+    fi; \
     apt-get update; \
     apt-get install -y --no-install-recommends openjdk-21-jre-headless ca-certificates curl unzip; \
     curl -fsSL -o /tmp/jadx.zip "https://github.com/skylot/jadx/releases/download/v${JADX_VERSION}/jadx-${JADX_VERSION}.zip"; \
@@ -26,7 +39,15 @@ RUN set -eux; \
     mkdir -p /opt/apktool; \
     curl -fsSL -o /opt/apktool/apktool.jar "https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VERSION}/apktool_${APKTOOL_VERSION}.jar"; \
     echo "${APKTOOL_SHA256}  /opt/apktool/apktool.jar" | sha256sum -c -; \
-    printf '#!/bin/sh\nexec java -Xmx2g -Duser.home="$HOME" -Djava.io.tmpdir=/tmp -jar /opt/apktool/apktool.jar "$@"\n' > /usr/local/bin/apktool; \
+    unzip -p /opt/apktool/apktool.jar prebuilt/linux/aapt2 > /opt/apktool/aapt2; \
+    echo "${AAPT2_SHA256}  /opt/apktool/aapt2" | sha256sum -c -; \
+    chmod 0755 /opt/apktool/aapt2; \
+    hdr="$(od -An -tx1 -N20 /opt/apktool/aapt2 | tr -d ' \n')"; \
+    case "$hdr" in 7f454c4602*3e00) ;; *) echo "GALAT: aapt2 bukan ELF 64-bit x86-64 (header: $hdr)" >&2; exit 1 ;; esac; \
+    /opt/apktool/aapt2 version; \
+    printf '%s\n' '#!/bin/sh' \
+      'case "$1" in b|build) sub=$1; shift; set -- "$sub" --aapt /opt/apktool/aapt2 "$@" ;; esac' \
+      'exec java -Xmx2g -Duser.home="$HOME" -Djava.io.tmpdir=/tmp -jar /opt/apktool/apktool.jar "$@"' > /usr/local/bin/apktool; \
     chmod 0755 /usr/local/bin/apktool; \
     apt-get purge -y --auto-remove curl unzip; \
     rm -rf /var/lib/apt/lists/* /tmp/*
