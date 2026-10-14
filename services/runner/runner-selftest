@@ -46,6 +46,10 @@ def diagnose(text: str) -> str:
 
 os.makedirs(os.environ.get("HOME", "/tmp/home"), exist_ok=True)
 
+RUNNER_UID = 10001
+MAX_EXEC_BYTES = 16 * 1024 * 1024  # tmpfs exec khusus sengaja kecil (compose: size=16m)
+exec_dir = os.environ.get("AAPT2_EXEC_DIR", "/opt/aapt-exec")
+
 # 1. Alat terpasang dan bisa dijalankan
 for label, cmd in (
     ("java", ["java", "-version"]),
@@ -84,8 +88,8 @@ except OSError as exc:
     report(False, "/tmp dapat ditulis", str(exc))
 
 # 3c. /tmp runner HARUS noexec: invarian yang SENGAJA dijaga (runner memproses APK tak tepercaya; pertahanan berlapis). Docker memasang tmpfs sebagai
-#     noexec secara bawaan. Bug `apktool b` (apktool mengekstrak aapt2 ke /tmp lalu menjalankannya) diperbaiki dengan aapt2 terpasang di rootfs,
-#     BUKAN dengan `exec` pada tmpfs. Dibaca dari opsi mount DAN dibuktikan dengan percobaan exec sungguhan.
+#     noexec secara bawaan. Bug `apktool b` (apktool mengekstrak aapt2 ke /tmp lalu menjalankannya) diperbaiki dengan salinan aapt2 di tmpfs khusus
+#     /opt/aapt-exec (cek 6b), BUKAN dengan `exec` pada /tmp. Dibaca dari opsi mount DAN dibuktikan dengan percobaan exec sungguhan.
 tmp_opts = None
 with open("/proc/self/mountinfo") as fh:
     for line in fh:
@@ -151,9 +155,9 @@ for label, cmd in (
     except Exception as exc:  # noqa: BLE001
         report(False, label, f"{type(exc).__name__}: {exc}")
 
-# 6a. aapt2 terpasang di rootfs (/opt/apktool/aapt2): ELF x86-64, milik root, bisa dieksekusi, TIDAK bisa ditulis oleh runner, SHA-256 cocok pin
-#     (ENV image AAPT2_SHA256; tidak disalin ke skrip), dan wrapper `apktool` menyisipkan `--aapt` ke sana untuk `b`. Karena /tmp noexec (3c),
-#     inilah satu-satunya jalan apktool menjalankan aapt2.
+# 6a. aapt2 SUMBER terpasang di rootfs (/opt/apktool/aapt2): ELF x86-64, milik root, bisa dieksekusi, TIDAK bisa ditulis runner, SHA-256 cocok pin
+#     (ENV image AAPT2_SHA256; tidak disalin ke skrip). Sumber ini TIDAK diberikan langsung ke apktool: `File.setExecutable(true)` (AaptManager) memanggil chmod(2) dan
+#     ditolak di rootfs read-only milik root. Wrapper `apktool` menyalinnya ke /opt/aapt-exec (cek 6b/6c) dan menyisipkan `--aapt` ke salinan itu untuk `b`.
 aapt2 = os.environ.get("AAPT2_PATH", "/opt/apktool/aapt2")
 pin = os.environ.get("AAPT2_SHA256", "")
 try:
@@ -177,16 +181,69 @@ try:
            f"{aapt2} {st.st_size} byte sha256 {sha[:12]}… {(out.stdout or out.stderr).strip()[:60]}" if not problems else "; ".join(problems))
 except Exception as exc:  # noqa: BLE001
     report(False, "aapt2 terpasang di rootfs (ELF, executable, sha256 cocok pin)", f"{type(exc).__name__}: {exc}")
+# Sumber TIDAK bisa diubah runner: persis panggilan yang dilakukan File.setExecutable(true) (chmod) dan tulis harus gagal; hash tidak berubah sesudahnya.
+try:
+    chmod_denied = write_denied = False
+    try:
+        os.chmod(aapt2, 0o755)
+    except OSError:
+        chmod_denied = True
+    try:
+        open(aapt2, "ab").close()
+    except OSError:
+        write_denied = True
+    with open(aapt2, "rb") as fh:
+        unchanged = hashlib.sha256(fh.read()).hexdigest() == pin
+    report(chmod_denied and write_denied and unchanged, "sumber aapt2 tidak bisa diubah runner",
+           "chmod dan tulis ke sumber ditolak (benar; karena itu apktool memakai salinan di tmpfs khusus), hash tidak berubah" if chmod_denied and write_denied and unchanged
+           else f"chmod_ditolak={chmod_denied} tulis_ditolak={write_denied} hash_tetap={unchanged}")
+except Exception as exc:  # noqa: BLE001
+    report(False, "sumber aapt2 tidak bisa diubah runner", f"{type(exc).__name__}: {exc}")
+pin_file = "/opt/apktool/aapt2.sha256"
 try:
     with open(shutil.which("apktool") or "/usr/local/bin/apktool") as fh:
         wrapper = fh.read()
-    report(f"--aapt {aapt2}" in wrapper, "wrapper apktool menyisipkan --aapt untuk b",
-           "wrapper memakai aapt2 terpasang" if f"--aapt {aapt2}" in wrapper else "wrapper TIDAK menyisipkan --aapt: apktool b akan mengekstrak aapt2 ke /tmp (noexec)")
+    with open(pin_file) as fh:
+        pin_in_file = fh.read().strip()
+    problems = [msg for bad, msg in (
+        ("--aapt" not in wrapper or "aapt-exec" not in wrapper, "wrapper TIDAK menyisipkan --aapt ke salinan di /opt/aapt-exec"),
+        ("aapt2.sha256" not in wrapper, "wrapper tidak memverifikasi hash salinan terhadap berkas pin"),
+        (pin_in_file != pin, f"berkas pin {pin_file} ({pin_in_file[:12]}…) != ENV AAPT2_SHA256 ({pin[:12]}…)"),
+    ) if bad]
+    report(not problems, "wrapper apktool menyalin aapt2 terverifikasi dan menyisipkan --aapt untuk b",
+           "wrapper memakai salinan di /opt/aapt-exec, hash dipin lewat berkas pin yang sama dengan ENV image" if not problems else "; ".join(problems))
 except OSError as exc:
-    report(False, "wrapper apktool menyisipkan --aapt untuk b", f"{type(exc).__name__}: {exc}")
+    report(False, "wrapper apktool menyalin aapt2 terverifikasi dan menyisipkan --aapt untuk b", f"{type(exc).__name__}: {exc}")
+
+# 6b. tmpfs exec khusus (/opt/aapt-exec): mount TERPISAH bertipe tmpfs, `exec` + `nosuid,nodev`, ukuran <= 16 MiB, milik uid 10001 (supaya chmod Java lolos).
+#     Inilah SATU-SATUNYA tmpfs exec; /tmp harus TETAP noexec (3c, diulang di sini agar kompromi ini terlihat dalam satu cek).
+exec_opts, exec_fstype = None, None
+with open("/proc/self/mountinfo") as fh:
+    for line in fh:
+        parts = line.split()
+        if len(parts) > 5 and parts[4] == exec_dir and "-" in parts:
+            exec_opts = parts[5].split(",")
+            exec_fstype = parts[parts.index("-") + 1]
+try:
+    vfs = os.statvfs(exec_dir)
+    exec_size, exec_uid = vfs.f_blocks * vfs.f_frsize, os.stat(exec_dir).st_uid
+except OSError as exc:
+    exec_size, exec_uid = 0, -1
+    print(f"    (tidak bisa membaca {exec_dir}: {type(exc).__name__}: {exc})")
+problems = [msg for bad, msg in (
+    (exec_opts is None, f"{exec_dir} bukan mount sendiri (tmpfs khusus tidak terpasang: periksa docker-compose.yml / --tmpfs)"),
+    (exec_opts is not None and exec_fstype != "tmpfs", f"fstype {exec_fstype}, harus tmpfs"),
+    (exec_opts is not None and "noexec" in exec_opts, "mount noexec (aapt2 tidak bisa dijalankan)"),
+    (exec_opts is not None and not {"rw", "nosuid", "nodev"} <= set(exec_opts), "opsi harus rw,nosuid,nodev"),
+    (not 0 < exec_size <= MAX_EXEC_BYTES, f"ukuran {exec_size} byte di luar (0, {MAX_EXEC_BYTES}]"),
+    (exec_uid != RUNNER_UID, f"dimiliki uid {exec_uid}, harus {RUNNER_UID}"),
+    (tmp_opts is None or "noexec" not in tmp_opts, "/tmp TIDAK lagi noexec"),
+) if bad]
+report(not problems, f"tmpfs exec khusus {exec_dir} (terpisah, nosuid,nodev, <=16 MiB, uid {RUNNER_UID}); /tmp tetap noexec",
+       f"mount {exec_dir}: {','.join(exec_opts or [])} ({exec_fstype}); ukuran {exec_size // 1024} KiB; uid {exec_uid}; /tmp: {','.join(tmp_opts or [])}" if not problems else "; ".join(problems))
 
 # 6. Kelayakan build: `apktool b` membangun proyek smali minimal OFFLINE (kebutuhan B-1: AI memodifikasi lalu membangun ulang).
-#    Dijalankan lewat wrapper `apktool` yang SAMA dengan jalur produksi (wrapper menambahkan `--aapt /opt/apktool/aapt2`), di /tmp noexec.
+#    Dijalankan lewat wrapper `apktool` yang SAMA dengan jalur produksi (wrapper menyalin aapt2 ke /opt/aapt-exec dan menambahkan `--aapt`), di /tmp noexec.
 #    Bukti jaringan mati ada di pemeriksaan 4 di atas; di sini yang dibuktikan hanya bahwa build selesai di kontainer yang sama
 #    (tanpa jaringan, rootfs read-only, non-root). Proyek diturunkan dari scripts/sample-apk/build.py (APKTOOL_YML, smali_class)
 #    dan sengaja tanpa referensi @string/res.
@@ -219,6 +276,20 @@ try:
            "ZIP valid, AndroidManifest.xml dan classes.dex (magic dex) ada" if ok_zip and magic == b"dex\n" else f"zip_ok={ok_zip} entri={names[:5]} magic={magic!r}")
 except Exception as exc:  # noqa: BLE001
     report(False, "apktool b dapat membangun proyek smali minimal OFFLINE", f"{type(exc).__name__}: {exc}")
+
+# 6c. SESUDAH `apktool b`: /opt/aapt-exec hanya berisi `aapt2` (os.listdir juga menampilkan berkas titik, jadi sisa `.aapt2.*` sementara ikut terdeteksi),
+#     sha256 salinan cocok pin, milik uid 10001. Berkas lain di tmpfs exec = ada yang menaruh sesuatu di sana.
+try:
+    names = sorted(os.listdir(exec_dir))
+    copy = os.path.join(exec_dir, "aapt2")
+    with open(copy, "rb") as fh:
+        copy_sha = hashlib.sha256(fh.read()).hexdigest()
+    copy_uid = os.stat(copy).st_uid
+    ok = names == ["aapt2"] and copy_sha == pin and copy_uid == RUNNER_UID
+    report(ok, f"isi {exec_dir} hanya aapt2 (sha256 cocok pin)",
+           f"isi: {names}; sha256 {copy_sha[:12]}… == pin; uid {copy_uid}" if ok else f"isi: {names}; sha256 {copy_sha[:12]}… (pin {pin[:12]}…); uid {copy_uid}")
+except OSError as exc:
+    report(False, f"isi {exec_dir} hanya aapt2 (sha256 cocok pin)", f"{type(exc).__name__}: {exc}")
 
 shutil.rmtree(work, ignore_errors=True)
 sys.exit(1 if failed else 0)

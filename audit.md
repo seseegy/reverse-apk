@@ -571,7 +571,7 @@ Lihat `docs/prd/09-bundles-and-workbench.md` "Status paket B-1b". Hanya penyedia
 
 ### 10.14 `apktool b` gagal di kontainer runner: tmpfs `noexec` (14 Okt 2026, perbaikan aapt2)
 
-Lihat `docs/prd/09-bundles-and-workbench.md` "Status perbaikan aapt2/noexec". `make runner-selftest` di VPS menangkap bug yang lolos dari semua pengujian di sandbox. Pelajaran:
+**Catatan: kesimpulan "aapt2 di rootfs read-only cukup" di bagian ini DIKOREKSI di 10.15** (apktool memanggil `chmod` pada aapt2). Lihat `docs/prd/09-bundles-and-workbench.md` "Status perbaikan aapt2/noexec". `make runner-selftest` di VPS menangkap bug yang lolos dari semua pengujian di sandbox. Pelajaran:
 
 - **Sandbox ≠ kontainer.** Klaim "`apktool b` terbukti jalan offline" benar hanya di sandbox yang `/tmp`-nya boleh `exec`. Di kontainer runner, `tmpfs: /tmp:rw,size=256m,nosuid` dipasang Docker sebagai `noexec`, sedangkan apktool 3.0.3 mengekstrak aapt2 (`prebuilt/linux/aapt2`) ke `/tmp` lalu menjalankannya → `Permission denied` (errno 13). Klaim "terbukti jalan offline di sandbox" di PRD dibuat tanpa pernah dijalankan di kondisi itu; klaimnya dikoreksi di dokumen. **Aturan: "terbukti" harus menyebut di mana (sandbox atau Docker nyata) dan opsi yang membedakan keduanya (`noexec`, `read_only`, `cap_drop`, uid).**
 - **Tmpfs Docker bawaannya `noexec,nosuid,nodev`.** Opsi yang kita tulis (`rw,size=...,nosuid`) tidak menghapus `noexec`. Alat yang mengekstrak lalu menjalankan biner dari direktori sementara (apktool, dan mungkin alat lain) akan gagal; cari opsi `--aapt`/jalur biner, jangan menambah `exec`.
@@ -583,3 +583,22 @@ Lihat `docs/prd/09-bundles-and-workbench.md` "Status perbaikan aapt2/noexec". `m
 - **Penjaga yang lulus di kode lama itu wajar.** Tes "tidak ada `exec` pada tmpfs" memang hijau sebelum dan sesudah perbaikan (ia melindungi dari perbaikan yang salah); 10 tes lain gagal di kode lama dan lulus di kode baru.
 
 **Belum terbukti:** **tidak ada Docker di sandbox** (`conmon` hilang): `docker compose build runner` (apt, `uname -m`, `unzip -p`), `make runner-selftest` penuh, dan `python3 scripts/sample-apk/build.py` di kontainer sungguhan menunggu VPS. Reproduksi memakai JDK 25 dan mount namespace pengguna, bukan JRE 21 trixie di Docker. `apktool d --aapt` tidak dipakai/tidak diuji.
+
+### 10.15 `apktool b` masih gagal: chmod aapt2 di rootfs read-only (14 Okt 2026, perbaikan kedua)
+
+Setelah 10.14 di-merge, VPS menunjukkan `[GAGAL] apktool b ... — Could not set aapt binary as executable: /opt/apktool/aapt2` (juga di `scripts/sample-apk/build.py`); cek `tmp runner noexec` dan `aapt2 terpasang` tetap `[OK ]`. Rincian: `docs/prd/09-bundles-and-workbench.md` "Perbaikan lanjutan".
+
+**Akar masalah.** Apktool v3.0.3, `AaptManager.setBinaryExecutable`: berkas yang tak terbaca ditolak, lalu `if (!binFile.setExecutable(true)) throw new AndrolibException("Could not set aapt binary as executable: ...")`. `File.setExecutable(true)` di JDK memanggil `chmod(2)` SELALU (tidak dilewati walau bit x sudah ada). Di runner `chmod` gagal: rootfs `read_only: true` → EROFS, dan berkas milik root sedangkan proses uid 10001 → EPERM. Berkas di rootfs read-only milik root tidak pernah bisa diberikan ke `--aapt`.
+
+**Perbaikan.** Satu tmpfs khusus `/opt/aapt-exec` (`rw,exec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0755`) berisi salinan aapt2 pin yang disalin dan diverifikasi wrapper `apktool`; `/tmp` tetap `noexec`; pin jar/aapt2 tidak berubah. Cek baru di `runner-selftest` (mount terpisah + `/tmp` tetap noexec, sumber tak bisa diubah, isi hanya `aapt2`).
+
+**Pelajaran:**
+- **Uji sandbox untuk kontainer harus meniru NON-PEMILIK dan FILESYSTEM READ-ONLY, bukan hanya `noexec`.** Perbaikan 10.14 meleset karena berkas aapt2 di sandbox milik pengguna yang sama pada disk yang bisa ditulis, sehingga `chmod` (oleh pemilik) berhasil tanpa diperlukan. Direproduksi kemudian dengan uid 10001 nyata: (A) berkas milik root → EPERM; (B) bind-mount `ro` milik uid sama → EROFS; kontrol (pemilik sama, disk rw) lulus. Sandbox ≠ kontainer, dua kali.
+- **`File.setExecutable(true)` selalu `chmod`.** Jangan berasumsi alat "melewati" langkah bila mode sudah benar; baca kodenya atau ukur.
+- **Lingkungan alat dibersihkan** (`runner-daemon`, `runner-selftest` hanya meneruskan `PATH`, `HOME`, dst.), jadi wrapper tidak boleh bergantung pada `$AAPT2_SHA256`; pin dibaca dari berkas `/opt/apktool/aapt2.sha256` (ditulis dari `ARG`), ENV tetap ada untuk selftest.
+- **Opsi global apktool 3.0.3 harus sesudah subperintah** (`-v b` ditolak `Unrecognized command: -v`); wrapper hanya memeriksa argumen pertama (batasan terdokumentasi + dikunci tes).
+- **Build paralel pertama:** tmpfs 16m hanya muat ~2 salinan 6,15 MiB; empat penyalin serentak tanpa kunci SEMUA kena ENOSPC (terukur di sandbox, build gagal semua). Penyalinan kini dikunci `flock` dan atomik.
+- **Kompromi keamanan (jujur).** Ada satu direktori kecil yang bisa DITULIS dan DIEKSEKUSI uid 10001 di runner yang memproses APK tak tepercaya, padahal tmpfs runner sebelumnya tidak ada yang exec. Mitigasi: tanpa jaringan, `cap_drop: ALL`, `no-new-privileges`, rootfs read-only, `/tmp` tetap noexec, `nosuid,nodev`, 16 MiB, hilang tiap kontainer, hanya aapt2 pin diharapkan. Ini kemunduran pertahanan berlapis yang diterima dengan sadar; alternatif (`exec` di `/tmp`, menambal jar) ditolak. Volume data `work`/`spool` tidak disetel `noexec` di compose; tidak diperiksa di sini.
+- **Penjaga "tidak ada tmpfs exec" diganti sadar menjadi "tepat satu"** (service `runner`, jalur `/opt/aapt-exec`, `nosuid,nodev`, ≤ 16m); tmpfs lain tetap dilarang exec. Penjaga dibuktikan tidak hampa dengan 19 mutasi (exec ke `/tmp` runner, tmpfs exec kedua, 64m, dsb.).
+
+**Belum terbukti:** **tidak ada Docker di sandbox** (`conmon` hilang): `docker compose build runner`, Docker/Compose VPS menerima opsi `uid/gid/mode/exec` pada tmpfs bentuk pendek (cadangan: `mode=1777` tanpa `uid/gid`), `make runner-selftest` penuh, `python3 scripts/sample-apk/build.py`, JRE 21 trixie, overlayfs `read_only` nyata.
