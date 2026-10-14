@@ -247,7 +247,9 @@ def main() -> int:
         run(["docker", "run", "--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp:rw,size=256m",
              "--tmpfs", "/opt/aapt-exec:rw,exec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0755",
              "--cap-drop", "ALL", "--user", "10001:10001", "-e", "HOME=/tmp/h", "-v", f"{td}:/w", a.image,
-             "sh", "-c", "mkdir -p /tmp/h && apktool b /w/proj -o /w/unsigned.apk"])
+             # `rm -rf /w/proj` di akhir: apktool (uid 10001) membuat proj/build/* di folder sementara milik pengguna host;
+             # tanpa ini pembersihan TemporaryDirectory di host gagal dengan PermissionError (folder proj 0777, jadi uid 10001 boleh menghapusnya).
+             "sh", "-c", "mkdir -p /tmp/h && apktool b /w/proj -o /w/unsigned.apk && rm -rf /w/proj"])
         unsigned = Path(td) / "unsigned.apk"
         if not unsigned.is_file():
             sys.exit("apktool tidak menghasilkan APK")
