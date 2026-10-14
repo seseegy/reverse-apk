@@ -7,6 +7,7 @@
     /data/files/<analysis_id>/up/     lampiran pengguna di chat (nama disimpan acak; nama asli hanya di DB)
     /data/files/<analysis_id>/ai/     berkas buatan AI (py, js, md, ...); hanya web yang menulis di sini
     /data/builds/<analysis_id>/<build_id>/   artefak build (Tahap 2: hasil bertanda tangan). Path HANYA dihitung dari id bilangan bulat positif
+    /data/signspool/                  antrean berkas worker -> signer (lihat signspool.py; volume terpisah dari spool runner)
     /data/db/app.sqlite               basis data (SQLite, mode WAL)
     /data/spool/                      antrean berkas worker -> runner (lihat spool.py)
 
@@ -43,8 +44,10 @@ class Layout:
         self.db_dir = root / "db"
         self.db_path = self.db_dir / "app.sqlite"
         self.spool = root / "spool"
-        # Artefak build (Tahap 2). Folder BELUM dibuat dan BELUM dipasang di compose pada Tahap 1.
+        # Artefak build (Tahap 2). Folder tidak dibuat di sini; volume `builds` dipasang di worker dan signer.
         self.builds = root / "builds"
+        # Antrean worker -> signer (protokol signspool). Volume terpisah dari `spool`: Spool.claim_next mengklaim apa saja di requests/.
+        self.signspool = root / "signspool"
 
     def upload_path(self, sha256: str) -> Path:
         if not SHA256_RE.match(sha256):

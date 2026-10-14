@@ -26,6 +26,7 @@ def test_builds_root_and_paths(layout, tmp_path):
     assert layout.builds == tmp_path / "builds"
     assert layout.builds_dir(3) == tmp_path / "builds" / "3"
     assert layout.build_dir(3, 7) == tmp_path / "builds" / "3" / "7"
+    assert layout.signspool == tmp_path / "signspool"
 
 
 def test_paths_never_leave_the_root_even_for_huge_ids(layout):
@@ -49,6 +50,7 @@ def test_directories_are_not_created(layout):
     layout.build_dir(1, 1)
     layout.builds_dir(1)
     assert not layout.builds.exists()
+    assert not layout.signspool.exists()
 
 
 def test_existing_paths_unchanged(layout, tmp_path):
