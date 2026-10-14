@@ -6,6 +6,7 @@ Bukti nyata (build image, alat berjalan, isolasi kontainer) ada di `make signer-
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -106,3 +107,32 @@ def test_no_other_service_receives_keystore_or_signer_material():
     top = compose.split("\nsecrets:\n", 1)[1]
     assert re.findall(r"^  (\w+):$", top, re.M) == ["admin_password_hash"]
     assert "secrets:" not in _strip_comments(compose_block("signer"))
+
+
+# ================================================================================ (c) Makefile + skrip
+def _make_recipe(target: str) -> str:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    m = re.search(rf"^{target}:.*\n((?:\t.*\n)+)", makefile, re.M)
+    assert m, f"target {target} tidak ada"
+    return m.group(1)
+
+
+def test_makefile_has_signer_targets():
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    phony = next(ln for ln in makefile.splitlines() if ln.startswith(".PHONY:"))
+    for target in ("signer-selftest", "tools-check"):
+        assert re.search(rf"^{target}:.*## ", makefile, re.M), f"{target} harus punya deskripsi `## ` agar muncul di `make help`"
+        assert re.search(rf"\b{target}\b", phony), f"{target} harus ada di .PHONY"
+    recipe = _make_recipe("signer-selftest")
+    for must in ("--profile build build signer", "--profile build run --rm --no-deps signer signer-selftest"):
+        assert must in recipe, must
+    assert "--toolchain-only" not in recipe
+    assert "./scripts/tools-check.sh" in _make_recipe("tools-check")
+
+
+def test_tools_check_script_is_executable_bash():
+    script = ROOT / "scripts/tools-check.sh"
+    text = script.read_text(encoding="utf-8")
+    assert text.startswith("#!/usr/bin/env bash\n") and "set -uo pipefail" in text
+    assert os.access(script, os.X_OK), "scripts/tools-check.sh harus executable (Makefile memanggilnya langsung)"
+    assert "--profile build" in text and "--no-deps" in text
