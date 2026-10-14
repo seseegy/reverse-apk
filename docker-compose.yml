@@ -295,6 +295,27 @@ services:
     cpus: 0.5
     pids_limit: 128
 
+  # Penanda tangan APK (PRD 09 Bagian B, paket B-1b: HANYA toolchain zipalign + apksigner). BELUM ada daemon, keystore, volume, maupun rahasia; satu-satunya isinya `signer-selftest`
+  # (`make signer-selftest`). Profil `build`: TIDAK ikut `make up` / `docker compose up` sehingga RAM tidak bertambah sampai fitur build dipakai (`docker compose --profile build ...`).
+  signer:
+    build:
+      context: ./services
+      dockerfile: signer/Dockerfile
+    profiles: ["build"]
+    restart: "no"
+    init: true
+    network_mode: none
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,size=256m,nosuid
+    mem_limit: 512m
+    cpus: 1
+    pids_limit: 128
+
 networks:
   # Caddy <-> web. Berjaringan keluar (web akan memanggil DeepSeek untuk chat di M3).
   edge: {}
