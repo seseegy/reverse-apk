@@ -18,13 +18,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     APKTOOL_VERSION=${APKTOOL_VERSION} \
     AAPT2_SHA256=${AAPT2_SHA256} \
     AAPT2_PATH=/opt/apktool/aapt2 \
+    AAPT2_EXEC_DIR=/opt/aapt-exec \
     ANALYZER_VERSION=4 \
     JADX_OPTS="-Xmx2g"
 
-# aapt2 dipasang di rootfs (read-only, milik root, 0755) dan TIDAK diekstrak apktool ke /tmp: /tmp runner sengaja `noexec` (APK tak tepercaya),
-# sedangkan tanpa `--aapt` apktool 3.0.3 mengekstrak aapt2 ke direktori sementara lalu menjalankannya (galat: Permission denied).
-# Wrapper `apktool` menyisipkan `--aapt` untuk subperintah b/build, sehingga setiap pemanggil otomatis aman. Jangan "memperbaikinya" dengan `exec` pada tmpfs.
-# Ekstraksi HARUS sebelum `apt-get purge ... unzip`. aapt2 prebuilt Linux hanya x86-64, jadi build di arsitektur lain digagalkan dengan pesan jelas.
+# aapt2 dipasang di rootfs (/opt/apktool/aapt2: read-only, milik root, 0755, hash dipin) sebagai SUMBER tepercaya dan TIDAK diekstrak apktool ke /tmp:
+# /tmp runner sengaja `noexec` (APK tak tepercaya), sedangkan tanpa `--aapt` apktool 3.0.3 mengekstrak aapt2 ke direktori sementara lalu menjalankannya (Permission denied).
+# Menunjuk `--aapt` langsung ke rootfs juga GAGAL: AaptManager.setBinaryExecutable memanggil File.setExecutable(true) => chmod(2) SELALU, dan chmod ditolak
+# pada rootfs read-only milik root (uid 10001 bukan pemilik) -> "Could not set aapt binary as executable". Karena itu wrapper `apktool` (runner/apktool-wrapper)
+# menyalin aapt2 ke tmpfs khusus /opt/aapt-exec (titik mount dibuat di bawah; tmpfs kecil yang boleh exec, dipasang oleh docker-compose.yml), memverifikasi hash
+# SALINAN terhadap pin (/opt/apktool/aapt2.sha256, ditulis dari ARG di bawah), lalu menyisipkan `--aapt` untuk b/build. Jangan "memperbaikinya" dengan `exec` pada /tmp.
 RUN set -eux; \
     if [ "$(uname -m)" != "x86_64" ]; then \
       echo "GALAT: aapt2 bawaan apktool ${APKTOOL_VERSION} hanya untuk x86-64 (arsitektur ini: $(uname -m)); bangun image untuk linux/amd64." >&2; \
@@ -45,10 +48,10 @@ RUN set -eux; \
     hdr="$(od -An -tx1 -N20 /opt/apktool/aapt2 | tr -d ' \n')"; \
     case "$hdr" in 7f454c4602*3e00) ;; *) echo "GALAT: aapt2 bukan ELF 64-bit x86-64 (header: $hdr)" >&2; exit 1 ;; esac; \
     /opt/apktool/aapt2 version; \
-    printf '%s\n' '#!/bin/sh' \
-      'case "$1" in b|build) sub=$1; shift; set -- "$sub" --aapt /opt/apktool/aapt2 "$@" ;; esac' \
-      'exec java -Xmx2g -Duser.home="$HOME" -Djava.io.tmpdir=/tmp -jar /opt/apktool/apktool.jar "$@"' > /usr/local/bin/apktool; \
-    chmod 0755 /usr/local/bin/apktool; \
+    printf '%s\n' "${AAPT2_SHA256}" > /opt/apktool/aapt2.sha256; \
+    chmod 0644 /opt/apktool/aapt2.sha256; \
+    mkdir -p /opt/aapt-exec; \
+    chmod 0755 /opt/aapt-exec; \
     apt-get purge -y --auto-remove curl unzip; \
     rm -rf /var/lib/apt/lists/* /tmp/*
 
@@ -63,7 +66,8 @@ WORKDIR /app
 COPY rvcore ./rvcore
 COPY runner/analyzer ./analyzer
 COPY runner/runner-selftest runner/runner-daemon /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/runner-selftest /usr/local/bin/runner-daemon
+COPY runner/apktool-wrapper /usr/local/bin/apktool
+RUN chmod 0755 /usr/local/bin/runner-selftest /usr/local/bin/runner-daemon /usr/local/bin/apktool
 
 ENV PYTHONPATH=/app
 USER 10001:10001

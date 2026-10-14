@@ -5,9 +5,10 @@ Dipakai untuk memverifikasi analisis statis (M2): setiap kelemahan di bawah haru
 Membutuhkan: Docker, dan image runner (`docker compose build runner`). Tidak memerlukan Android SDK:
 apktool membangun APK dari smali + manifest yang ditulis di sini.
 
-Opsi tmpfs `/tmp` di bawah (seperti runner sungguhan) di-mount `noexec` oleh Docker. Tanpa `--aapt`, apktool 3.0.3 mengekstrak aapt2 ke /tmp lalu
-menjalankannya, sehingga gagal ("Permission denied"). Karena itu skrip memakai aapt2 yang dipasang di image (/opt/apktool/aapt2, rootfs read-only).
-Jangan "memperbaikinya" dengan menambah `exec` pada tmpfs.
+Ada DUA tmpfs di `docker run` di bawah, persis seperti runner sungguhan. `/tmp` di-mount `noexec` oleh Docker (jangan diberi `exec`). Tanpa `--aapt`, apktool 3.0.3
+mengekstrak aapt2 ke /tmp lalu menjalankannya, sehingga gagal ("Permission denied"); dengan `--aapt` ke berkas di rootfs read-only milik root, apktool memanggil
+File.setExecutable(true) (chmod) yang juga gagal ("Could not set aapt binary as executable"). Karena itu skrip memanggil wrapper image `apktool b ...`, yang menyalin aapt2
+terverifikasi (hash dipin) ke tmpfs khusus `/opt/aapt-exec` (satu-satunya yang boleh exec: kecil, milik uid 10001, nosuid,nodev) lalu menyisipkan `--aapt` ke salinan itu.
 
     python3 scripts/sample-apk/build.py [-o testdata/vulnsample.apk] [--image reverse-apk-runner]
 
@@ -244,9 +245,9 @@ def main() -> int:
             os.chmod(p, 0o777 if p.is_dir() else 0o666)
         print("• membangun APK dengan apktool (container tanpa jaringan)…")
         run(["docker", "run", "--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp:rw,size=256m",
+             "--tmpfs", "/opt/aapt-exec:rw,exec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0755",
              "--cap-drop", "ALL", "--user", "10001:10001", "-e", "HOME=/tmp/h", "-v", f"{td}:/w", a.image,
-             "sh", "-c", "mkdir -p /tmp/h && java -Xmx1g -Duser.home=/tmp/h -jar /opt/apktool/apktool.jar "
-                         "b --aapt /opt/apktool/aapt2 /w/proj -o /w/unsigned.apk"])
+             "sh", "-c", "mkdir -p /tmp/h && apktool b /w/proj -o /w/unsigned.apk"])
         unsigned = Path(td) / "unsigned.apk"
         if not unsigned.is_file():
             sys.exit("apktool tidak menghasilkan APK")

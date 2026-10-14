@@ -192,8 +192,12 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
+    # DUA tmpfs. /tmp TETAP noexec (Docker menambahkan noexec bila `exec` tidak disebut; jangan diberi exec). /opt/aapt-exec = SATU-SATUNYA tmpfs exec di seluruh stack:
+    # hanya berisi salinan aapt2 terverifikasi (wrapper `apktool` yang menyalinnya), karena apktool memanggil chmod pada aapt2 dan rootfs read-only milik root menolaknya.
+    # 16m: aapt2 6,15 MiB; saat penggantian atomik ada paling banyak 2 salinan (~12,3 MiB). Kecil sengaja, supaya permukaan "tulis+eksekusi" minimal.
     tmpfs:
       - /tmp:rw,size=256m,nosuid
+      - /opt/aapt-exec:rw,exec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0755
     environment:
       DATA_DIR: /data
       RUNNER_RECYCLE: ${RUNNER_RECYCLE:-1}

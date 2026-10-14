@@ -1,0 +1,108 @@
+#!/bin/sh
+# Pembungkus `apktool` untuk image runner (dipasang sebagai /usr/local/bin/apktool).
+#
+# Mengapa ada: tanpa `--aapt`, apktool 3.0.3 mengekstrak aapt2 ke /tmp lalu menjalankannya, padahal /tmp runner SENGAJA `noexec` (APK tak tepercaya).
+# Dengan `--aapt <berkas>`, apktool (AaptManager.setBinaryExecutable) memanggil `File.setExecutable(true)` => chmod(2) SELALU, walau bit x sudah ada.
+# chmod gagal pada berkas milik root (EPERM, runner = uid 10001) dan pada rootfs read-only (EROFS) dengan pesan
+# "Could not set aapt binary as executable". Jadi aapt2 di /opt/apktool (rootfs, root, read-only) TIDAK BISA langsung dipakai.
+#
+# Solusi: untuk subperintah `b`/`build`, salin aapt2 terpasang (sumber tepercaya, hash dipin) ke tmpfs khusus yang kecil, boleh exec, dan milik uid runner
+# (/opt/aapt-exec; lihat docker-compose.yml), verifikasi hash SALINAN, lalu sisipkan `--aapt /opt/aapt-exec/aapt2`. /tmp tetap noexec.
+#
+# Batasan terdokumentasi: hanya ARGUMEN PERTAMA yang diperiksa. Opsi global di depan subperintah (`-v b ...`) ditolak apktool 3.0.3 sendiri
+# ("Unrecognized command: -v"); `-v`/`-q` hanya sah SESUDAH subperintah (`apktool b -v ...`). Pemanggil wajib memakai `apktool <subperintah> ...`.
+#
+# Semua jalur bisa diganti lewat variabel lingkungan (untuk uji); bawaan = produksi. Pin hash dibaca dari berkas (ditulis Dockerfile dari ARG AAPT2_SHA256),
+# bukan dari $AAPT2_SHA256: runner-daemon dan runner-selftest menjalankan alat dengan lingkungan yang dibersihkan, jadi ENV tidak ikut.
+set -eu
+
+src="${AAPT2_PATH:-/opt/apktool/aapt2}"
+dir="${AAPT2_EXEC_DIR:-/opt/aapt-exec}"
+pinfile="${AAPT2_PIN_FILE:-/opt/apktool/aapt2.sha256}"
+jar="${APKTOOL_JAR:-/opt/apktool/apktool.jar}"
+dst="$dir/aapt2"
+pin=""
+tmp=""
+
+galat() {
+    echo "GALAT apktool: $*" >&2
+    exit 1
+}
+
+# sha256 sebuah berkas; kosong bila gagal dibaca.
+sha_of() {
+    sha256sum "$1" 2>/dev/null | cut -d' ' -f1
+}
+
+# Berkas ada, bisa dieksekusi, dan hash-nya sama dengan pin.
+sah() {
+    [ -f "$1" ] && [ -x "$1" ] && [ "$(sha_of "$1")" = "$pin" ]
+}
+
+bersihkan() {
+    if [ -n "$tmp" ]; then
+        rm -f "$tmp"
+    fi
+}
+
+# Salin sumber -> $dst secara atomik. Dipanggil di dalam subshell berkunci (lihat siapkan_aapt2).
+salin_aapt2() {
+    # Berkas sementara DI DIREKTORI YANG SAMA lalu rename: atomik, sehingga $dst tidak pernah berisi salinan setengah jadi atau yang hash-nya salah.
+    trap bersihkan EXIT
+    trap 'exit 1' HUP INT TERM
+    if tmp="$(mktemp "$dir/.aapt2.XXXXXX" 2>/dev/null)" && cp "$src" "$tmp" 2>/dev/null && chmod 0755 "$tmp" 2>/dev/null; then
+        got="$(sha_of "$tmp")"
+        if [ "$got" != "$pin" ]; then
+            galat "sha256 salinan aapt2 (${got:-tidak terbaca}) != pin ($pin); salinan dibuang dan $dst tidak dibuat. Sumber $src rusak/diubah — bangun ulang image runner."
+        fi
+        mv -f "$tmp" "$dst" || galat "gagal memindahkan salinan aapt2 ke $dst"
+        tmp=""
+    else
+        # Tanpa flock, build lain yang berjalan bersamaan mungkin sudah menyelesaikannya; bila belum, penyebab paling mungkin ruang tmpfs.
+        sah "$dst" || galat "gagal menyalin aapt2 ke $dir (tmpfs penuh? ukurannya sengaja kecil, 16m)"
+    fi
+}
+
+siapkan_aapt2() {
+    pin="$(tr -d ' \r\n' 2>/dev/null < "$pinfile" || true)"
+    case "$pin" in
+        *[!0-9a-f]*|"") pin="" ;;
+    esac
+    if [ "${#pin}" -ne 64 ]; then
+        galat "pin hash aapt2 tidak terbaca atau tidak valid ($pinfile); image runner rusak — bangun ulang: docker compose build runner"
+    fi
+    if [ ! -d "$dir" ] || [ ! -w "$dir" ] || [ ! -r "$dir" ]; then
+        galat "$dir tidak ada atau tidak bisa dibaca/ditulis oleh uid $(id -u). Runner butuh tmpfs khusus untuk salinan aapt2 (compose: tmpfs '/opt/aapt-exec:rw,exec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0755'; docker run: --tmpfs dengan opsi yang sama). /tmp sengaja noexec — jangan diganti dengan exec."
+    fi
+
+    if ! sah "$dst"; then
+        [ -f "$src" ] || galat "sumber aapt2 tidak ada: $src (image runner rusak — bangun ulang: docker compose build runner)"
+        # Penyalinan dikunci (flock pada direktorinya) agar build serentak tidak menyalin bersamaan: tmpfs 16m hanya muat ~2 salinan, jadi 3+ penyalin
+        # paralel sama-sama kena ENOSPC dan SEMUA gagal. Kunci dilepas saat subshell selesai (fd 9 tidak bocor ke java). Tanpa flock: tetap jalan, tanpa kunci.
+        (
+            if command -v flock >/dev/null 2>&1; then
+                flock 9 || true
+            fi
+            sah "$dst" || salin_aapt2
+        ) 9< "$dir"
+    fi
+
+    got="$(sha_of "$dst")"
+    [ "$got" = "$pin" ] || galat "sha256 $dst (${got:-tidak terbaca}) != pin ($pin)"
+    rc=0
+    "$dst" version >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        galat "aapt2 di $dir tidak bisa dijalankan (kode $rc). Kemungkinan $dir ter-mount noexec atau bukan tmpfs khusus; perbaiki mount-nya, jangan beri exec pada /tmp."
+    fi
+}
+
+case "${1:-}" in
+    b|build)
+        siapkan_aapt2
+        sub="$1"
+        shift
+        set -- "$sub" --aapt "$dst" "$@"
+        ;;
+esac
+
+exec java -Xmx2g -Duser.home="${HOME:-/tmp/home}" -Djava.io.tmpdir=/tmp -jar "$jar" "$@"
