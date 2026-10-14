@@ -48,7 +48,7 @@ apktool, jadx, dan Build-Tools (zipalign + apksigner) dipin dengan SHA-256 di Do
 
 | Alat | Versi terkunci | Image |
 |------|----------------|-------|
-| apktool (aapt2 dibundel di dalam jar) | 3.0.3 | runner |
+| apktool (aapt2 dari dalam jar, dipasang di `/opt/apktool/aapt2`; `/tmp` runner `noexec`) | 3.0.3 | runner |
 | jadx | 1.5.6 | runner |
 | Android SDK Build-Tools (`zipalign`, `apksigner`) | 37.0.0 | signer |
 | OpenJDK JRE (headless, termasuk `keytool`) | 21 (apt Debian trixie) | runner, signer |

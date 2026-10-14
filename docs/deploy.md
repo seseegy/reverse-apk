@@ -111,7 +111,7 @@ git pull --ff-only
 docker compose --profile build build signer   # unduh Build-Tools, verifikasi SHA-256 (build GAGAL bila hash tidak cocok)
 make signer-selftest                          # semua baris harus [OK ]
 make tools-check                              # tabel versi java/apktool/jadx/keytool/zipalign/apksigner dari image runner & signer
-make runner-selftest                          # kini juga membuktikan `apktool b` jalan OFFLINE di kontainer runner
+make runner-selftest                          # juga membuktikan `apktool b` jalan OFFLINE di kontainer runner (aapt2 terpasang) dan /tmp runner tetap noexec
 ```
 `signer-selftest` membuat keystore SEMENTARA di `/tmp` (dihapus di akhir; tidak pernah disimpan), lalu: `zipalign` → `apksigner sign` → `apksigner verify` (v2 dan v3 harus `true`),
 tes negatif (APK tanpa tanda tangan dan APK yang dirusak setelah ditandatangani HARUS ditolak), serta bukti isolasi dari dalam kontainer (bukan root, rootfs read-only, tanpa jaringan, tanpa keystore/rahasia di image).
@@ -125,11 +125,26 @@ Kirim keluaran bila ada `[GAGAL]`.
 | Image `signer` | image dasar + JRE + ±3 MB | `docker images \| grep signer` |
 | RAM | `mem_limit: 512m` **hanya saat profil `build` dipakai**. Jumlah `mem_limit` layanan lain saat ini 5.952 MB → 6.464 MB bila signer ikut berjalan | `docker stats` |
 
+**`/tmp` runner SENGAJA `noexec`; aapt2 ada di `/opt/apktool/aapt2`.** Docker memasang tmpfs `/tmp` runner dengan `noexec` (juga `nosuid`; `exec` TIDAK boleh ditambahkan: runner memproses APK tak tepercaya).
+Tanpa `--aapt`, apktool 3.0.3 mengekstrak aapt2 ke `/tmp` lalu menjalankannya dan gagal (`Cannot run program ... error=13, Permission denied`); karena itu aapt2 dipasang di rootfs read-only saat build image dan wrapper
+`/usr/local/bin/apktool` menyisipkan `--aapt /opt/apktool/aapt2` untuk `b`/`build` (`d` tidak berubah). Apktool hanya menulis jar framework ke `$HOME/.local/share/apktool/framework` (dibaca, tidak dieksekusi), jadi `/tmp` cukup bisa ditulis.
+Image runner **hanya untuk x86-64** (aapt2 prebuilt Linux); build di arm64 sengaja digagalkan dengan pesan `GALAT: aapt2 bawaan apktool ... hanya untuk x86-64` (`docker compose build runner` di host arm64 perlu `--platform linux/amd64`/emulasi).
+
+**Verifikasi di VPS** (setelah pembaruan ini; semua baris harus `[OK ]`):
+```bash
+git pull --ff-only
+docker compose build runner                   # GAGAL bila hash aapt2 tidak cocok atau arsitektur bukan x86-64
+make runner-selftest                          # harus memuat [OK ] "tmp runner noexec", "aapt2 terpasang di rootfs", "apktool b ... OFFLINE", "hasil build adalah APK utuh"
+python3 scripts/sample-apk/build.py           # membangun APK uji lewat apktool b di kontainer (tmpfs tanpa exec) -> testdata/vulnsample.apk
+docker compose run --rm --no-deps runner sh -c 'grep " /tmp " /proc/mounts; ls -l /opt/apktool/aapt2; cp /bin/true /tmp/t && /tmp/t && echo EXEC_OK || echo EXEC_DENIED'   # harus noexec dan EXEC_DENIED
+```
+Bila `[GAGAL]`, pesannya kini memuat baris `Caused by:`/`error=` pertama dan awal keluaran; kirim seluruh baris itu.
+
 **Alat & versi terkunci** (sumber kebenaran: `ARG` di Dockerfile; tes `tests/test_signer_toolchain.py` memastikan tabel ini tidak menyimpang):
 | Alat | Versi | Sumber | Pin hash | Lokasi di image |
 |------|-------|--------|----------|-----------------|
 | apktool | 3.0.3 | github.com/iBotPeaches/Apktool/releases (v3.0.3) | SHA-256 `dbf930b076c6b9be08d57c449cacefc3bdd6b71ebd59b3066fc0e1f5b14f9423` | runner: `/opt/apktool/apktool.jar`, wrapper `/usr/local/bin/apktool` |
-| aapt2 | dibundel di dalam jar apktool 3.0.3 (`prebuilt/linux/aapt2`) | – | ikut hash apktool | tidak dipasang terpisah |
+| aapt2 | dibundel di dalam jar apktool 3.0.3 (`prebuilt/linux/aapt2`, ELF x86-64 statis, 6.449.680 byte); diekstrak saat build image | – | SHA-256 `df312db814c018019b2b79a993b041b738d7b76f4a8f28da25bc874a026368cc` (`ARG AAPT2_SHA256`, dihitung dari jar apktool 3.0.3; hitung ulang bila apktool dinaikkan) | runner: `/opt/apktool/aapt2` (root, 0755, rootfs read-only); `apktool b` diarahkan ke sana oleh wrapper (`--aapt`) |
 | jadx | 1.5.6 | github.com/skylot/jadx/releases (v1.5.6) | SHA-256 `545ea2be9c242511bc145755cf4bda2485ade42966e096f8b4d3da2a230e8974` | runner: `/opt/jadx`, symlink `/usr/local/bin/jadx` |
 | Android SDK Build-Tools (`zipalign` + `apksigner`) | 37.0.0 (stabil; `37.0.0-rc*` adalah preview) | dl.google.com/android/repository/build-tools_r37_linux.zip (`repository2-3.xml`) | SHA-256 zip `01af179347cbcd9c208b7f8171f7b21f6dd1d2f85bcd15e88caa51d5d7b86060` (dihitung sendiri); SHA-1 Google `70954e99f4c3d9d46ee70fa32624672fe7cd6ebe` | signer: `/opt/build-tools/{zipalign,apksigner.jar,lib64/libc++.so}`, symlink `/usr/local/bin/zipalign`, wrapper `/usr/local/bin/apksigner` |
 | JRE (+ `keytool`) | `openjdk-21-jre-headless` dari apt Debian trixie | repositori Debian (versi mengikuti image dasar) | tidak dipin per-hash (praktik yang sudah ada) | runner dan signer |
