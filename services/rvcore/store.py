@@ -6,9 +6,14 @@ yang berlomba (mis. pembatalan vs. worker) tidak saling menimpa status akhir.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import os
+import re
 import sqlite3
 import time
+import unicodedata
 from typing import Any
 
 from .db import tx
@@ -739,3 +744,462 @@ def analysis_snapshot(conn: sqlite3.Connection, analysis_id: int, log_limit: int
         "logs": logs,
         "server_now": now(),
     }
+
+
+# ================================================================== build APK (Tahap 1: tabel `build` + state machine)
+# Aturan: SEMUA perubahan status lewat UPDATE ... WHERE id = ? AND status = ? (CAS) dan rowcount diperiksa; tabel transisi
+# BUILD_TRANSITIONS adalah satu-satunya sumber kebenaran. Tidak ada fungsi "set status" generik. 'approved' HANYA bisa dicapai lewat
+# approve_build (yang menuntut diff_sha256 sama persis dengan yang tercatat) -> AI/kode lain tidak punya jalan untuk memalsukan persetujuan.
+# Setiap fungsi yang menulis membuka `tx` sendiri: pemanggil TIDAK boleh sedang berada di dalam `tx` (SQLite tak mengenal BEGIN bersarang).
+# Penghapusan DIREKTORI artefak build (/data/builds/<analysis_id>/<build_id>/) baru dikerjakan Tahap 2; di sini hanya baris DB
+# (hapus analisis -> baris build ikut hilang lewat ON DELETE CASCADE; prune_builds hanya MENYEBUTKAN id, tidak menghapus apa pun).
+B_AWAITING, B_APPROVED, B_QUEUED, B_BUILDING, B_SIGNING = "awaiting_approval", "approved", "queued", "building", "signing"
+B_DONE, B_REJECTED, B_FAILED, B_CANCELLED = "done", "rejected", "failed", "cancelled"
+BUILD_STATUSES = (B_AWAITING, B_APPROVED, B_QUEUED, B_BUILDING, B_SIGNING, B_DONE, B_REJECTED, B_FAILED, B_CANCELLED)
+BUILD_ACTIVE = (B_AWAITING, B_APPROVED, B_QUEUED, B_BUILDING, B_SIGNING)    # = predikat indeks unik parsial di db.py (v5)
+BUILD_RUNNING = (B_BUILDING, B_SIGNING)
+BUILD_FINAL = (B_DONE, B_REJECTED, B_FAILED, B_CANCELLED)
+
+# dari -> himpunan tujuan yang SAH. Status final tidak punya jalan keluar.
+BUILD_TRANSITIONS: dict[str, frozenset[str]] = {
+    B_AWAITING: frozenset({B_APPROVED, B_REJECTED, B_CANCELLED}),
+    B_APPROVED: frozenset({B_QUEUED, B_FAILED, B_CANCELLED}),
+    B_QUEUED: frozenset({B_BUILDING, B_FAILED, B_CANCELLED}),
+    B_BUILDING: frozenset({B_SIGNING, B_FAILED, B_CANCELLED}),
+    B_SIGNING: frozenset({B_DONE, B_FAILED, B_CANCELLED}),
+    B_DONE: frozenset(),
+    B_REJECTED: frozenset(),
+    B_FAILED: frozenset(),
+    B_CANCELLED: frozenset(),
+}
+
+BUILD_STATUS_LABEL = {
+    B_AWAITING: "Menunggu persetujuan", B_APPROVED: "Disetujui", B_QUEUED: "Antre", B_BUILDING: "Membangun",
+    B_SIGNING: "Menandatangani", B_DONE: "Selesai", B_REJECTED: "Ditolak", B_FAILED: "Gagal", B_CANCELLED: "Dibatalkan",
+}
+
+BUILD_SOURCE_KINDS = ("apk", "xapk", "apks")
+BUILD_NOTE_MAX, BUILD_SUMMARY_MAX, BUILD_ERROR_MAX, BUILD_REASON_MAX, BUILD_STAGE_LOG_MAX = 2000, 8192, 500, 500, 4000
+BUILD_KEEP_DEFAULT, BUILD_KEEP_MIN, BUILD_KEEP_MAX = 10, 1, 100
+
+# Pernyataan wewenang yang ditampilkan saat pengguna menyetujui build. SATU sumber kebenaran untuk UI (Tahap 5) dan store.
+# Teks versi yang sudah dipakai TIDAK BOLEH diubah (hash-nya tersimpan di baris build): ubah teks = tambah versi baru.
+APPROVAL_STATEMENT_VERSION = 1
+APPROVAL_STATEMENTS: dict[int, str] = {
+    1: "Saya berwenang memodifikasi APK ini dan hasilnya hanya untuk riset pribadi di perangkat saya.",
+}
+
+_REQUESTED_BY_RE = re.compile(r"(user|ai:[0-9]{1,18})")
+_HEX64_RE = re.compile(r"[0-9a-f]{64}")
+_OUTPUT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}")
+_ERROR_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,39}")
+# Path internal (kontainer) yang tidak boleh sampai ke layar: /data/work/12/..., /tmp/x, /opt/...
+_INTERNAL_PATH_RE = re.compile(
+    r"(?<![\w<])/(?:data|tmp|opt|app|run|home|work|out|in|w|usr|var|etc|proc|root|mnt|srv|lib|bin|sbin|dev|sys)(?![\w-])"
+    r"(?:/[^\s'\"`]*)?"
+)
+# Pengendali arah tulisan (bisa memalsukan tampilan teks di layar persetujuan) dibuang bersama karakter kontrol.
+_BIDI_CHARS = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+
+
+class BuildError(Exception):
+    """Dasar galat build. Pesan berbahasa Indonesia dan aman ditampilkan ke pengguna."""
+
+
+class BuildInputError(BuildError, ValueError):
+    """Argumen tidak valid (heks, panjang, source_kind, nama berkas, ...)."""
+
+
+class BuildStateError(BuildError):
+    """Transisi tak sah, build tidak ada, kalah balapan, analisis belum siap, atau sudah ada build aktif."""
+
+
+class BuildDiffMismatchError(BuildStateError):
+    """Persetujuan ditolak: diff yang disetujui tidak sama dengan diff yang tercatat (diff berubah setelah diajukan)."""
+
+
+# ------------------------------------------------------------------ pernyataan wewenang
+def approval_statement(version: int = APPROVAL_STATEMENT_VERSION) -> str:
+    if type(version) is not int or version not in APPROVAL_STATEMENTS:
+        raise BuildInputError("Versi pernyataan wewenang tidak dikenal.")
+    return APPROVAL_STATEMENTS[version]
+
+
+def approval_statement_sha256(version: int = APPROVAL_STATEMENT_VERSION) -> str:
+    return hashlib.sha256(approval_statement(version).encode("utf-8")).hexdigest()
+
+
+# ------------------------------------------------------------------ konfigurasi
+def build_keep() -> int:
+    """Jumlah build final yang disimpan per analisis (env BUILD_KEEP; bawaan 10, klem 1-100; nilai rusak -> bawaan)."""
+    raw = os.environ.get("BUILD_KEEP", "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return BUILD_KEEP_DEFAULT
+    return max(BUILD_KEEP_MIN, min(BUILD_KEEP_MAX, value))
+
+
+# ------------------------------------------------------------------ pembantu privat
+def _require_id(name: str, value: object) -> int:
+    if type(value) is not int or value <= 0:
+        raise BuildInputError(f"{name} harus bilangan bulat positif.")
+    return value
+
+
+def _require_hex64(name: str, value: object) -> str:
+    if type(value) is not str or not _HEX64_RE.fullmatch(value):
+        raise BuildInputError(f"{name} harus 64 karakter heksadesimal huruf kecil (SHA-256).")
+    return value
+
+
+def _clean_text(value: Any, limit: int, *, multiline: bool = False, scrub: bool = False) -> str:
+    """Teks bebas (dari AI/pengguna, tak tepercaya): buang NUL/kontrol/pengendali arah, rapikan baris, potong ke `limit`."""
+    text = "" if value is None else str(value)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    keep = "\n\t" if multiline else ""
+    if not multiline:
+        text = re.sub(r"\s+", " ", text)      # SEBELUM menyaring kontrol: '\n' juga karakter kontrol, jangan sampai menempelkan kata
+    text = "".join(
+        ch for ch in text
+        if ch in keep or (ch not in _BIDI_CHARS and unicodedata.category(ch) not in ("Cc", "Cs"))
+    )
+    if multiline:
+        text = re.sub(r"[ \t]+\n", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+    text = text.strip()
+    if scrub:
+        text = _INTERNAL_PATH_RE.sub("<path>", text)
+    return text[:limit].rstrip()
+
+
+def _build_cas(conn: sqlite3.Connection, build_id: int, from_statuses: tuple[str, ...], to_status: str, *,
+               where: str = "", params: tuple = (), **cols: Any) -> bool:
+    """UPDATE bersyarat (CAS): berhasil hanya bila status MASIH salah satu `from_statuses` (+ `where`). Harus di dalam `tx`.
+
+    Menegaskan bahwa setiap (dari, ke) ada di BUILD_TRANSITIONS sebelum SQL dijalankan: salah tulis di kode = AssertionError,
+    bukan transisi gelap. Nama kolom `cols` berasal dari kode (bukan input pengguna).
+    """
+    for frm in from_statuses:
+        assert to_status in BUILD_TRANSITIONS[frm], f"transisi build {frm} -> {to_status} tidak ada di BUILD_TRANSITIONS"
+    cols = {"status": to_status, "updated_at": now(), **cols}
+    assignments = ", ".join(f"{k} = ?" for k in cols)
+    marks = ", ".join("?" for _ in from_statuses)
+    cur = conn.execute(
+        f"UPDATE build SET {assignments} WHERE id = ? AND status IN ({marks})" + (f" AND {where}" if where else ""),
+        [*cols.values(), build_id, *from_statuses, *params],
+    )
+    return cur.rowcount == 1
+
+
+def _build_row(conn: sqlite3.Connection, build_id: int) -> sqlite3.Row:
+    row = conn.execute("SELECT * FROM build WHERE id = ?", (build_id,)).fetchone()
+    if row is None:
+        raise BuildStateError("Build tidak ditemukan.")
+    return row
+
+
+def _state_error(conn: sqlite3.Connection, build_id: int, verb: str) -> BuildStateError:
+    """Galat untuk CAS yang gagal: jelaskan status saat ini (membaca ulang di dalam `tx` yang sama)."""
+    row = conn.execute("SELECT status, cancel_requested FROM build WHERE id = ?", (build_id,)).fetchone()
+    if row is None:
+        return BuildStateError("Build tidak ditemukan.")
+    label = BUILD_STATUS_LABEL.get(row["status"], row["status"])
+    if row["status"] in BUILD_RUNNING and row["cancel_requested"]:
+        return BuildStateError(f"Build #{build_id} berstatus “{label}” dan pembatalan sudah diminta; tidak bisa {verb}.")
+    return BuildStateError(f"Build #{build_id} berstatus “{label}”; tidak bisa {verb}.")
+
+
+def _audit_build(conn: sqlite3.Connection, action: str, row: sqlite3.Row, **extra: Any) -> None:
+    """Audit ringkas: hanya id/hash/ukuran/kode. TIDAK PERNAH note, diff_summary, error_text, alasan, atau path."""
+    audit(conn, action, {"build_id": row["id"], "analysis_id": row["analysis_id"], **extra})
+
+
+def _bool01(name: str, value: Any, allowed: tuple = (0, 1)) -> int:
+    if type(value) not in (int, bool) or int(value) not in allowed:
+        raise BuildInputError(f"{name} tidak valid.")
+    return int(value)
+
+
+# ------------------------------------------------------------------ pembuatan & pembacaan
+def create_build(conn: sqlite3.Connection, analysis_id: int, *, requested_by: str, source_kind: str, diff_sha256: str,
+                 diff_summary: dict[str, Any], note: str = "") -> int:
+    """Ajukan build baru (status awaiting_approval). Butuh analisis 'done' dengan hasil apktool; maksimum SATU build aktif per analisis."""
+    _require_id("analysis_id", analysis_id)
+    if type(requested_by) is not str or not _REQUESTED_BY_RE.fullmatch(requested_by):
+        raise BuildInputError("requested_by harus 'user' atau 'ai:<id sesi chat>'.")
+    if source_kind not in BUILD_SOURCE_KINDS:
+        raise BuildInputError("Format asal harus apk, xapk, atau apks.")
+    _require_hex64("diff_sha256", diff_sha256)
+    if not isinstance(diff_summary, dict):
+        raise BuildInputError("Ringkasan diff harus berupa objek.")
+    try:
+        summary = json.dumps(diff_summary, sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        raise BuildInputError("Ringkasan diff tidak bisa diserialisasi.") from None
+    if len(summary) > BUILD_SUMMARY_MAX:      # JSON terpotong = rusak, jadi ditolak, bukan dipotong
+        raise BuildInputError(f"Ringkasan diff terlalu besar (maksimum {BUILD_SUMMARY_MAX} karakter).")
+    note = _clean_text(note, BUILD_NOTE_MAX, multiline=True)
+    ts = now()
+    with tx(conn):
+        an = conn.execute("SELECT status FROM analysis WHERE id = ?", (analysis_id,)).fetchone()
+        if an is None:
+            raise BuildStateError("Analisis tidak ditemukan.")
+        if an["status"] != DONE:
+            label = STATUS_LABEL.get(an["status"], an["status"])
+            raise BuildStateError(f"Analisis belum siap (status: {label}). Tunggu sampai selesai.")
+        stage = conn.execute(
+            "SELECT status FROM analysis_stage WHERE analysis_id = ? AND name = 'apktool'", (analysis_id,)
+        ).fetchone()
+        if stage is None or stage["status"] not in (OK, WARN):
+            raise BuildStateError("Hasil apktool tidak tersedia untuk analisis ini; tidak bisa dibangun.")
+        marks = ", ".join("?" for _ in BUILD_ACTIVE)
+        act = conn.execute(
+            f"SELECT id, status FROM build WHERE analysis_id = ? AND status IN ({marks}) ORDER BY id DESC LIMIT 1",
+            (analysis_id, *BUILD_ACTIVE),
+        ).fetchone()
+        if act is not None:
+            raise _active_build_error(act)
+        try:
+            cur = conn.execute(
+                "INSERT INTO build (analysis_id, status, requested_by, source_kind, diff_sha256, diff_summary, note, "
+                "                   created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (analysis_id, B_AWAITING, requested_by, source_kind, diff_sha256, summary, note, ts, ts),
+            )
+        except sqlite3.IntegrityError as exc:       # jaring pengaman: indeks unik parsial (build aktif kedua)
+            raise BuildStateError("Sudah ada build aktif untuk analisis ini. Batalkan atau tunggu sampai selesai.") from exc
+        build_id = int(cur.lastrowid)
+        audit(conn, "build_requested", {
+            "build_id": build_id, "analysis_id": analysis_id, "requested_by": requested_by,
+            "source_kind": source_kind, "diff_sha256": diff_sha256,
+        })
+    return build_id
+
+
+def _active_build_error(row: sqlite3.Row) -> BuildStateError:
+    label = BUILD_STATUS_LABEL.get(row["status"], row["status"])
+    return BuildStateError(f"Sudah ada build aktif (#{row['id']}, {label}). Batalkan atau tunggu sampai selesai.")
+
+
+def get_build(conn: sqlite3.Connection, build_id: int, *, analysis_id: int | None = None) -> sqlite3.Row | None:
+    """analysis_id diberikan -> cakupan per analisis (rute tidak boleh membuka build milik analisis lain)."""
+    if analysis_id is None:
+        return conn.execute("SELECT * FROM build WHERE id = ?", (build_id,)).fetchone()
+    return conn.execute("SELECT * FROM build WHERE id = ? AND analysis_id = ?", (build_id, analysis_id)).fetchone()
+
+
+def list_builds(conn: sqlite3.Connection, analysis_id: int, limit: int = 50) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM build WHERE analysis_id = ? ORDER BY id DESC LIMIT ?", (analysis_id, limit)
+    ).fetchall()
+
+
+def active_build(conn: sqlite3.Connection, analysis_id: int) -> sqlite3.Row | None:
+    marks = ", ".join("?" for _ in BUILD_ACTIVE)
+    return conn.execute(
+        f"SELECT * FROM build WHERE analysis_id = ? AND status IN ({marks}) ORDER BY id DESC LIMIT 1",
+        (analysis_id, *BUILD_ACTIVE),
+    ).fetchone()
+
+
+def build_ids_by_status(conn: sqlite3.Connection, *statuses: str, limit: int = 1000) -> list[int]:
+    bad = [s for s in statuses if s not in BUILD_STATUSES]
+    if bad or not statuses:
+        raise BuildInputError("Status build tidak dikenal.")
+    marks = ", ".join("?" for _ in statuses)
+    return [r[0] for r in conn.execute(
+        f"SELECT id FROM build WHERE status IN ({marks}) ORDER BY id LIMIT ?", (*statuses, limit))]
+
+
+def is_build_cancel_requested(conn: sqlite3.Connection, build_id: int) -> bool:
+    row = conn.execute("SELECT cancel_requested, status FROM build WHERE id = ?", (build_id,)).fetchone()
+    return bool(row and (row["cancel_requested"] or row["status"] == B_CANCELLED))
+
+
+# ------------------------------------------------------------------ persetujuan (SATU-SATUNYA jalan ke 'approved')
+def approve_build(conn: sqlite3.Connection, build_id: int, *, diff_sha256: str, statement_sha256: str,
+                  statement_version: int) -> None:
+    """awaiting_approval -> approved, HANYA bila diff_sha256 sama persis dengan yang tercatat saat diajukan.
+
+    Hash diff ikut di klausa WHERE CAS (tanpa celah cek-lalu-ubah). statement_* = pernyataan wewenang yang ditampilkan; harus
+    persis salah satu versi yang dikenal (UI tidak bisa menyetujui dengan teks yang tidak pernah ditampilkan).
+    """
+    _require_id("build_id", build_id)
+    _require_hex64("diff_sha256", diff_sha256)
+    _require_hex64("statement_sha256", statement_sha256)
+    if type(statement_version) is not int or statement_version not in APPROVAL_STATEMENTS:
+        raise BuildInputError("Versi pernyataan wewenang tidak dikenal.")
+    if not hmac.compare_digest(statement_sha256, approval_statement_sha256(statement_version)):
+        raise BuildInputError("Pernyataan wewenang tidak cocok dengan versi yang dikenal.")
+    ts = now()
+    with tx(conn):
+        row = _build_row(conn, build_id)
+        if row["status"] != B_AWAITING:
+            raise _state_error(conn, build_id, "disetujui")
+        if not hmac.compare_digest(diff_sha256, row["diff_sha256"]):
+            raise BuildDiffMismatchError("Diff berubah sejak diajukan; muat ulang dan tinjau lagi.")
+        if not _build_cas(conn, build_id, (B_AWAITING,), B_APPROVED, where="diff_sha256 = ?", params=(diff_sha256,),
+                          approved_at=ts, approval_statement_sha256=statement_sha256,
+                          approval_statement_version=statement_version):
+            raise _state_error(conn, build_id, "disetujui")
+        _audit_build(conn, "build_approved", row, diff_sha256=diff_sha256, statement_version=statement_version,
+                     statement_sha256=statement_sha256)
+
+
+def reject_build(conn: sqlite3.Connection, build_id: int, reason: str = "") -> None:
+    """awaiting_approval -> rejected. Alasan dibersihkan; audit TANPA teks alasan."""
+    _require_id("build_id", build_id)
+    reason = _clean_text(reason, BUILD_REASON_MAX) or "Ditolak pengguna."
+    ts = now()
+    with tx(conn):
+        row = _build_row(conn, build_id)
+        if not _build_cas(conn, build_id, (B_AWAITING,), B_REJECTED, rejected_reason=reason, finished_at=ts):
+            raise _state_error(conn, build_id, "ditolak")
+        _audit_build(conn, "build_rejected", row, diff_sha256=row["diff_sha256"])
+
+
+# ------------------------------------------------------------------ siklus hidup (worker/runner/signer; dipakai mulai Tahap 2)
+def queue_build(conn: sqlite3.Connection, build_id: int) -> None:
+    """approved -> queued."""
+    _require_id("build_id", build_id)
+    with tx(conn):
+        _build_row(conn, build_id)
+        if not _build_cas(conn, build_id, (B_APPROVED,), B_QUEUED):
+            raise _state_error(conn, build_id, "diantrekan")
+
+
+def claim_build(conn: sqlite3.Connection, build_id: int) -> bool:
+    """queued -> building (atomik). False bila kalah balapan/sudah diambil/dibatalkan/tidak ada (pola claim_analysis)."""
+    with tx(conn):
+        return _build_cas(conn, build_id, (B_QUEUED,), B_BUILDING, where="cancel_requested = 0", started_at=now())
+
+
+def mark_signing(conn: sqlite3.Connection, build_id: int, *, stage_log: str | None = None) -> None:
+    """building -> signing. Ditolak bila pembatalan sudah diminta (pelaksana lalu memanggil cancel_build)."""
+    _require_id("build_id", build_id)
+    cols = {} if stage_log is None else {"stage_log": _clean_text(stage_log, BUILD_STAGE_LOG_MAX, multiline=True, scrub=True)}
+    with tx(conn):
+        _build_row(conn, build_id)
+        if not _build_cas(conn, build_id, (B_BUILDING,), B_SIGNING, where="cancel_requested = 0", **cols):
+            raise _state_error(conn, build_id, "masuk tahap tanda tangan")
+
+
+def finish_build(conn: sqlite3.Connection, build_id: int, *, output_name: str, output_sha256: str, output_size: int,
+                 output_format: str, cert_sha256: str, verify_ok: int | bool, stage_log: str | None = None) -> None:
+    """signing -> done. verify_ok HARUS tepat 1/True: tidak ada jalan ke 'done' tanpa verifikasi tanda tangan yang lulus."""
+    _require_id("build_id", build_id)
+    if type(verify_ok) not in (int, bool) or verify_ok != 1:
+        raise BuildInputError("Build hanya boleh selesai bila verifikasi tanda tangan lulus (verify_ok = 1).")
+    if type(output_name) is not str or not _OUTPUT_NAME_RE.fullmatch(output_name):
+        raise BuildInputError("Nama berkas keluaran tidak valid.")
+    _require_hex64("output_sha256", output_sha256)
+    _require_hex64("cert_sha256", cert_sha256)
+    if type(output_size) is not int or output_size < 1:
+        raise BuildInputError("Ukuran berkas keluaran harus bilangan bulat positif.")
+    if output_format not in BUILD_SOURCE_KINDS:
+        raise BuildInputError("Format keluaran harus apk, xapk, atau apks.")
+    cols = {} if stage_log is None else {"stage_log": _clean_text(stage_log, BUILD_STAGE_LOG_MAX, multiline=True, scrub=True)}
+    ts = now()
+    with tx(conn):
+        row = _build_row(conn, build_id)
+        if output_format != row["source_kind"]:
+            raise BuildInputError("Format keluaran harus sama dengan format asal.")
+        if not _build_cas(conn, build_id, (B_SIGNING,), B_DONE, where="cancel_requested = 0", finished_at=ts,
+                          output_name=output_name, output_sha256=output_sha256, output_size=output_size,
+                          output_format=output_format, cert_sha256=cert_sha256, verify_ok=1, **cols):
+            raise _state_error(conn, build_id, "diselesaikan")
+        _audit_build(conn, "build_done", row, diff_sha256=row["diff_sha256"], output_sha256=output_sha256,
+                     output_size=output_size, output_format=output_format, cert_sha256=cert_sha256)
+
+
+def fail_build(conn: sqlite3.Connection, build_id: int, *, error_code: str, error_text: str, stage_log: str | None = None,
+               verify_ok: int | bool | None = None) -> None:
+    """approved/queued/building/signing -> failed. error_text dibersihkan dari path internal; audit TANPA error_text."""
+    _require_id("build_id", build_id)
+    if type(error_code) is not str or not _ERROR_CODE_RE.fullmatch(error_code):
+        raise BuildInputError("Kode galat harus huruf kecil/angka/garis bawah (maksimum 40 karakter).")
+    cols: dict[str, Any] = {"error_code": error_code, "error_text": _clean_text(error_text, BUILD_ERROR_MAX, scrub=True)}
+    if verify_ok is not None:
+        cols["verify_ok"] = _bool01("verify_ok", verify_ok)
+    if stage_log is not None:
+        cols["stage_log"] = _clean_text(stage_log, BUILD_STAGE_LOG_MAX, multiline=True, scrub=True)
+    ts = now()
+    with tx(conn):
+        row = _build_row(conn, build_id)
+        if not _build_cas(conn, build_id, (B_APPROVED, B_QUEUED, B_BUILDING, B_SIGNING), B_FAILED, finished_at=ts, **cols):
+            raise _state_error(conn, build_id, "ditandai gagal")
+        _audit_build(conn, "build_failed", row, error_code=error_code, from_status=row["status"])
+
+
+# ------------------------------------------------------------------ pembatalan
+def request_cancel_build(conn: sqlite3.Connection, build_id: int) -> str:
+    """'cancelled' (belum berjalan: langsung batal) | 'requested' (building/signing: pelaksana yang menyelesaikan) | 'noop' (final)."""
+    _require_id("build_id", build_id)
+    ts = now()
+    with tx(conn):
+        row = _build_row(conn, build_id)
+        if _build_cas(conn, build_id, (B_AWAITING, B_APPROVED, B_QUEUED), B_CANCELLED, cancel_requested=1,
+                      error_code=E_CANCELLED, finished_at=ts):
+            _audit_build(conn, "build_cancelled", row, from_status=row["status"], by="request")
+            return "cancelled"
+        cur = conn.execute(
+            "UPDATE build SET cancel_requested = 1, updated_at = ? WHERE id = ? AND status IN (?, ?)",
+            (ts, build_id, B_BUILDING, B_SIGNING),
+        )
+        return "requested" if cur.rowcount == 1 else "noop"
+
+
+def cancel_build(conn: sqlite3.Connection, build_id: int) -> None:
+    """PELAKSANA: building/signing dengan cancel_requested=1 -> cancelled. Selain itu BuildStateError."""
+    _require_id("build_id", build_id)
+    ts = now()
+    with tx(conn):
+        row = _build_row(conn, build_id)
+        if not _build_cas(conn, build_id, BUILD_RUNNING, B_CANCELLED, where="cancel_requested = 1",
+                          error_code=E_CANCELLED, finished_at=ts):
+            raise BuildStateError(f"Build #{build_id} tidak sedang berjalan dengan permintaan pembatalan.")
+        _audit_build(conn, "build_cancelled", row, from_status=row["status"], by="executor")
+
+
+# ------------------------------------------------------------------ pemulihan & retensi
+def recover_stuck_builds(conn: sqlite3.Connection) -> list[int]:
+    """building/signing yang yatim setelah restart -> failed ('interrupted') (pola mark_interrupted). Mengembalikan id-nya."""
+    ts = now()
+    recovered: list[int] = []
+    with tx(conn):
+        rows = conn.execute(
+            "SELECT * FROM build WHERE status IN (?, ?) ORDER BY id", BUILD_RUNNING).fetchall()
+        for row in rows:
+            if _build_cas(conn, row["id"], (row["status"],), B_FAILED, error_code=E_INTERRUPTED, finished_at=ts,
+                          error_text="Terputus karena server/worker dimulai ulang saat build berjalan. Ajukan build baru."):
+                _audit_build(conn, "build_failed", row, error_code=E_INTERRUPTED, from_status=row["status"])
+                recovered.append(row["id"])
+    return recovered
+
+
+def prune_builds(conn: sqlite3.Connection, analysis_id: int, keep: int | None = None) -> list[int]:
+    """Id build FINAL lama yang melebihi `keep` (urut naik). TIDAK menghapus baris/berkas dan TIDAK PERNAH menyebut build aktif.
+
+    Dihitung terpisah: `done` terbaru sebanyak keep, dan (rejected/failed/cancelled) terbaru sebanyak keep -> deretan build gagal
+    tidak menggusur artefak `done` yang berharga. Pemanggil (Tahap 2) menghapus direktori artefak lebih dulu, baru delete_build.
+    """
+    if keep is None:
+        keep = build_keep()
+    elif type(keep) is not int:
+        raise BuildInputError("keep harus bilangan bulat.")
+    keep = max(BUILD_KEEP_MIN, min(BUILD_KEEP_MAX, keep))
+    old: list[int] = []
+    for group in ((B_DONE,), (B_REJECTED, B_FAILED, B_CANCELLED)):
+        marks = ", ".join("?" for _ in group)
+        ids = [r[0] for r in conn.execute(
+            f"SELECT id FROM build WHERE analysis_id = ? AND status IN ({marks}) ORDER BY id DESC", (analysis_id, *group))]
+        old.extend(ids[keep:])
+    return sorted(old)
+
+
+def delete_build(conn: sqlite3.Connection, build_id: int) -> bool:
+    """Hapus baris build FINAL (dipanggil setelah direktori artefaknya dihapus). False bila masih aktif atau tidak ada."""
+    marks = ", ".join("?" for _ in BUILD_FINAL)
+    with tx(conn):
+        cur = conn.execute(f"DELETE FROM build WHERE id = ? AND status IN ({marks})", (build_id, *BUILD_FINAL))
+        return cur.rowcount == 1

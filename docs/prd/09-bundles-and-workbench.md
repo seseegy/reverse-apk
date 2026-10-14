@@ -1,6 +1,6 @@
 # 09 — Paket multi-APK & bengkel modifikasi
 
-> **Status: Bagian A (XAPK/APKS) dan Bagian C (shell AI) SEBAGIAN SUDAH ADA; Bagian B (membangun & menandatangani APK) masih RENCANA, belum ada kode.** Shell AI (PR C, lihat "Status PR C") **mati secara bawaan** dan sengaja lebih sempit dari rancangan: tanpa build/tanda tangan, tanpa `bench_diff`/`request_build`/`get_build_status`, dan tanpa `apktool`/`jadx` di dalam `bench`. Selama Bagian B belum dikerjakan, tidak ada penulisan APK dan tidak ada tanda tangan. **Sub-paket B-1b (toolchain) SUDAH ada**: image `signer` (Build-Tools 37.0.0 dipin SHA-256, profil Compose `build`, mati secara bawaan) + `signer-selftest` + `make tools-check`; BELUM ada daemon, keystore, tahap `build`, persetujuan, maupun UI (lihat "Status paket B-1b").
+> **Status: Bagian A (XAPK/APKS) dan Bagian C (shell AI) SEBAGIAN SUDAH ADA; Bagian B (membangun & menandatangani APK) baru sampai FONDASI (B-1a skema + state machine, keystore, toolchain B-1b); belum ada daemon, UI, atau AI untuk build — lihat "Status Bagian B, Tahap 1".** Shell AI (PR C, lihat "Status PR C") **mati secara bawaan** dan sengaja lebih sempit dari rancangan: tanpa build/tanda tangan, tanpa `bench_diff`/`request_build`/`get_build_status`, dan tanpa `apktool`/`jadx` di dalam `bench`. Selama Bagian B belum dikerjakan, tidak ada penulisan APK dan tidak ada tanda tangan. **Sub-paket B-1b (toolchain) SUDAH ada**: image `signer` (Build-Tools 37.0.0 dipin SHA-256, profil Compose `build`, mati secara bawaan) + `signer-selftest` + `make tools-check`. **Tahap 1 (fondasi data & kunci) SUDAH ada**: tabel `build` + state machine persetujuan manual di `rvcore.store` (migrasi v5) dan keystore yang dibuat `make init`; BELUM ada daemon (`signer-daemon`/tahap `build` di worker), antarmuka persetujuan, maupun tool AI (lihat "Status paket B-1b" dan "Status Bagian B, Tahap 1").
 
 ## Tujuan
 Dua kemampuan baru, dikerjakan terpisah supaya risikonya terkendali:
@@ -185,13 +185,13 @@ Keputusan diambil setelah uji nyata di VPS, dan hasilnya ditulis di dokumen ini.
 Modifikasi hanya untuk APK yang **milik pengguna atau yang pengguna berwenang memodifikasi**. Persetujuan build mencatat pernyataan itu. Sistem tidak menyediakan pembagian/penerbitan APK hasil modifikasi (tidak ada tautan publik, hanya unduhan dari sesi login).
 
 ## Konfigurasi baru (usul)
-`TIMEOUT_UNPACK` (120), `TIMEOUT_MERGE` (300), `TIMEOUT_BUILD` (600), `BENCH_CMD_TIMEOUT` (60), `BENCH_CMD_MAX_OUTPUT_KB` (64), `BENCH_WORKSPACE_MAX_MB` (2048), `BENCH_IDLE_EXIT` (900), `BUILD_KEEP` (5), `SIGNER_KEYSTORE_FILE` (secret). Semuanya **wajib diteruskan di `docker-compose.yml`** (pelajaran OP-01 di `audit.md` §10.3).
+`TIMEOUT_UNPACK` (120), `TIMEOUT_MERGE` (300), `TIMEOUT_BUILD` (600), `BENCH_CMD_TIMEOUT` (60), `BENCH_CMD_MAX_OUTPUT_KB` (64), `BENCH_WORKSPACE_MAX_MB` (2048), `BENCH_IDLE_EXIT` (900), `BUILD_KEEP` (**10** — DIPUTUSKAN Tahap 1, sudah diteruskan di compose ke `web` dan `worker`), `SIGNER_KEYSTORE_FILE` (secret; belum ada: keystore belum disambungkan ke layanan mana pun). Semuanya **wajib diteruskan di `docker-compose.yml`** (pelajaran OP-01 di `audit.md` §10.3).
 
 ## Urutan kerja
 | PR | Isi | Selesai bila |
 |---|---|---|
 | **A** | Bagian A lengkap: `rvcore/apkcheck.py`, jenis berkas, tahap `unpack`/`merge`, APKEditor di image runner, UI daftar bagian, tes (paket sintetis dari `scripts/make-test-apks.py`) | `.xapk/.apks/.apkm` sampel dianalisis penuh; zip bomb dan path traversal di dalam paket ditolak; `.aab` terbuka lewat jadx; seluruh tes lama tetap lulus |
-| **B** | (sub-paket **B-1b**, hanya toolchain: SELESAI di kode, uji Docker menunggu VPS) Build + tanda tangan **tanpa AI**: ruang kerja, diff, persetujuan, tahap `build`, layanan `signer`, `make init` membuat keystore, unduhan, audit | APK sampel diubah manual (mis. mengganti string), disetujui, dibangun, `apksigner verify` lulus, dan `aapt2 dump badging` benar; tanpa persetujuan tidak ada job |
+| **B** | (sub-paket **B-1b** toolchain dan **Tahap 1** skema/state machine + keystore: SELESAI di kode, uji Docker menunggu VPS; daemon, UI, AI belum) Build + tanda tangan **tanpa AI**: ruang kerja, diff, persetujuan, tahap `build`, layanan `signer`, `make init` membuat keystore, unduhan, audit | APK sampel diubah manual (mis. mengganti string), disetujui, dibangun, `apksigner verify` lulus, dan `aapt2 dump badging` benar; tanpa persetujuan tidak ada job |
 | **C** | `bench` + `benchspool` + tool AI (`shell_run`, `bench_diff`, `request_build`, `get_build_status`) + keputusan isolasi antar analisis + pembaruan 00/05/07 | skenario uji: AI mengubah satu string di smali, mengajukan build, pengguna menyetujui, hasil terverifikasi; **tes injeksi**: APK dengan teks yang menyuruh AI membaca `/data`, mengakses jaringan, atau menyetujui sendiri **gagal** melakukannya |
 | **D** | (P2) antarmuka ruang kerja untuk pengguna, "paket format asal" (FR-9.17b) bila belum masuk A–C | — |
 
@@ -392,7 +392,7 @@ Rekomendasi: daftar host spesifik; `*` hanya untuk API milik sendiri atau yang A
 
 ## Pertanyaan terbuka
 - [DIPUTUSKAN] Isolasi antar analisis di `bench`: **Landlock (opsi 2)**, berdasarkan `scripts/bench-probe.sh` di VPS (lihat Status PR A). [OPEN] diuji ulang dengan pengaturan kontainer `bench` yang sebenarnya.
-- [DIPUTUSKAN] Batas unggah hingga **1 GB**. [OPEN] nilai akhir batas lain yang ikut terdampak (tabel "Batas ukuran"), ditentukan dengan pengukuran APK besar sungguhan.
+- [DIPUTUSKAN] Batas unggah hingga **1 GB**. [OPEN] nilai akhir batas lain yang ikut terdampak (tabel "Batas ukuran"), ditentukan dengan pengukuran APK besar sungguhan. Batas 1 GB untuk build/ruang kerja **masih menunggu Tahap 6**; Tahap 1 tidak mengubah satu pun batas ukuran.
 - [SEBAGIAN TERBUKTI] jadx 1.5.6 membuka `.xapk` langsung (XAPK nyata, 32 dtk) dan APKEditor menggabungkannya, tetapi **dipakai** hanya base asli (lihat Status PR A). `.apkm` dan `.aab` belum terbukti; butuh sampel nyata.
 - [DIPUTUSKAN] Build-Tools **37.0.0** (stabil terbaru; `37.0.0-rc*` preview). Kebutuhan glibc terukur dengan `objdump -T` di sandbox: `zipalign` GLIBC_2.14 dan `libc++.so` GLIBC_2.17 (aapt2 di dalam jar apktool terhubung statis, tanpa kebutuhan glibc), sementara image trixie memakai glibc 2.41 (angka dari rencana, belum diukur di image). [OPEN] uji di Docker nyata: `docker compose --profile build build signer && make signer-selftest` di VPS.
 - [OPEN] Apakah "paket format asal" (FR-9.17b) cukup bernilai untuk dikerjakan, atau cukup `merged.apk`. Dinilai setelah PR B.
@@ -405,14 +405,14 @@ Rekomendasi: daftar host spesifik; `*` hanya untuk API milik sendiri atau yang A
 - Layanan `signer` di compose: `network_mode: none`, `read_only`, `cap_drop: ALL`, tanpa volume dan tanpa secrets, profil `build` (tidak ikut `make up`).
 - `make tools-check`: tabel versi java/apktool/jadx/keytool/zipalign/apksigner dari image runner dan signer. `runner-selftest` kini juga memeriksa `keytool` dan bahwa `apktool b` membangun proyek smali minimal OFFLINE (di kontainer nyata, awalnya GAGAL: lihat "Status perbaikan aapt2/noexec").
 
-**Belum ada (sengaja):** `signer-daemon`, pembuatan/penyimpanan keystore (menunggu keputusan pemilik soal jenis kunci), tahap `build` di runner/worker, migrasi DB, persetujuan, tool AI, UI.
+**Belum ada (sengaja):** `signer-daemon`, pembuatan/penyimpanan keystore, tahap `build` di runner/worker, migrasi DB, persetujuan, tool AI, UI. (Pembaruan Tahap 1: keystore, migrasi DB, dan state machine persetujuan KINI ada — lihat "Status Bagian B, Tahap 1"; sisanya tetap belum.)
 
 **Keputusan:** Build-Tools resmi Google + pin SHA-256, bukan paket apt `apksigner` (35.0.2, lebih tua; bergantung pada `default-jre | javaN-runtime` sehingga kemungkinan menarik JRE non-headless: dugaan dari metadata, belum diuji). Rantai alat tetap `apktool b` → `zipalign -P 16 -f 4` → `apksigner sign` → `apksigner verify`.
 
 **Terbukti di sandbox (tanpa Docker):** hash SHA-256/SHA-1 dan penolakan hash salah; ekstraksi 3 berkas dan `libc++.so` ditemukan via RUNPATH (kontrol negatif: dipindah → `zipalign` gagal); `signer-selftest --toolchain-only` hijau dan mutasi alat tertangkap; rantai penuh `apktool b` (offline, di sandbox yang `/tmp`-nya boleh exec; di kontainer runner lihat koreksi di bawah) → `zipalign` → `sign` → `verify` v2/v3 `true`; APK tanpa tanda tangan dan APK yang dirusak → `DOES NOT VERIFY`. Java sandbox 25 dan 21.0.2 (image: 21).
 **Belum diuji (butuh Docker di VPS):** `docker build` image signer (apt, guard `ldd` di trixie, ukuran image), bagian isolasi kontainer pada `signer-selftest`, `docker compose --profile build`, `make tools-check` penuh, heap `-Xmx256m` untuk APK besar.
 
-**Langkah untuk pemilik:** lihat "Alat build & tanda tangan APK (B-1b)" di `docs/deploy.md`; keputusan jenis kunci keystore diperlukan sebelum B-1c.
+**Langkah untuk pemilik:** lihat "Alat build & tanda tangan APK (B-1b)" di `docs/deploy.md`; keputusan jenis kunci keystore diperlukan sebelum B-1c. (Diputuskan di Tahap 1: RSA 3072, lihat "Status Bagian B, Tahap 1".)
 
 ## Status perbaikan aapt2/noexec (14 Okt 2026): `apktool b` di kontainer runner
 
@@ -458,3 +458,32 @@ Rekomendasi: daftar host spesifik; `*` hanya untuk API milik sendiri atau yang A
 **DIBUKTIKAN di sandbox** (root nyata → `unshare -m` → `setpriv --reuid=10001`; jar apktool 3.0.3 asli; JDK 25, bukan Docker): bug kedua direproduksi (non-pemilik EPERM, mount `ro` EROFS) dengan pesan yang sama dengan VPS; tata letak baru (tmpfs `exec,nosuid,nodev,size=16m,uid=10001` + `/tmp` tmpfs noexec + sumber di bind-mount `ro` milik root) membangun APK utuh lewat wrapper nyata sebagai uid 10001; hash salah, sumber hilang, salinan korup, direktori hilang/noexec/tak bisa ditulis, empat build paralel; tes repo (gagal di kode lama, lulus di kode baru) dan mutasi penjaga.
 **BELUM DIUJI (butuh Docker di VPS):** `docker compose build runner` (apt, `COPY` wrapper, berkas pin, `mkdir`), Docker/Compose VPS menerima `uid/gid/mode/exec/nosuid/nodev/size` pada tmpfs bentuk pendek, `make runner-selftest` penuh (cek baru), `python3 scripts/sample-apk/build.py`, JRE 21 trixie dan overlayfs `read_only` nyata, `flock` di image. Hasil diharapkan: semua `[OK ]` termasuk `apktool b ... OFFLINE`, cek `/opt/aapt-exec` dan APK sampel jadi.
 **Risiko residual:** bila opsi `uid/gid/mode` ditolak (gejala: `invalid mount option`/`mount: invalid argument`, atau selftest `dimiliki uid ..., harus 10001`), cadangannya mengganti HANYA opsi menjadi `size=16m,mode=1777` tanpa `uid/gid` (berkas buatan uid 10001 tetap miliknya sehingga `chmod` lolos); bentuk panjang `type: tmpfs` BUKAN cadangan karena tak bisa `exec`.
+
+## Status Bagian B, Tahap 1 (14 Okt 2026): fondasi data & kunci (B-1a)
+
+**Sudah ada:**
+- **Skema & state machine (B-1a).** Migrasi `v5` menambah tabel `build` (26 kolom) di `services/rvcore/db.py`; semua transisi ada di `services/rvcore/store.py` (`BUILD_TRANSITIONS` = satu-satunya sumber kebenaran; tidak ada fungsi "set status" generik). Persetujuan manual: status `approved` HANYA bisa dicapai lewat `approve_build`, yang mencocokkan `diff_sha256` terhadap yang tercatat saat diajukan DI DALAM klausa CAS dan mensyaratkan pernyataan wewenang versi yang dikenal (hash-nya ikut tersimpan). `done` hanya lewat `finish_build` dengan `verify_ok = 1`. Tiap transisi tercatat di `audit_log` dalam transaksi yang sama (tanpa isi bebas). Satu build aktif per analisis ditegakkan DB (indeks unik parsial). Hapus analisis/APK menghapus baris build (`ON DELETE CASCADE`).
+- **Jalur & konfigurasi.** `Layout.builds/builds_dir/build_dir` (hanya `int` positif murni; folder TIDAK dibuat dan TIDAK ada volume `builds` di compose — itu Tahap 2). `BUILD_KEEP` (bawaan **10**, klem 1–100) diteruskan di compose ke `web` dan `worker` saja dan dibaca `store.build_keep()`; `prune_builds` hanya MENYEBUTKAN id lama (done dan non-done dihitung terpisah, tidak pernah build aktif).
+- **Keystore.** `make init` (atau `make keystore`) membuat `secrets/signing_keystore.p12` + `secrets/signing_keystore_pass` lewat `scripts/keystore.sh`: `keytool` dijalankan di dalam image `signer` (server tidak perlu JDK), terkurung (tanpa jaringan, rootfs read-only, tanpa capability, user host), kata sandi 64 heks dibuat ke berkas 0600 dan diberikan lewat `-storepass:file` (tidak pernah argv/env). Idempoten dan **tidak pernah menimpa**; hanya satu berkas ada = gagal (kode 2) tanpa mengubah apa pun. `make keystore-info` mencetak alias, algoritma, masa berlaku, SHA-256 (tanpa sandi); `make doctor` menampilkan statusnya.
+
+**Tabel transisi (sah; selain ini ditolak dan tidak mengubah baris maupun audit):**
+| Dari | Ke yang sah | Fungsi |
+|---|---|---|
+| `awaiting_approval` | `approved` · `rejected` · `cancelled` | `approve_build` · `reject_build` · `request_cancel_build` |
+| `approved` | `queued` · `failed` · `cancelled` | `queue_build` · `fail_build` · `request_cancel_build` |
+| `queued` | `building` · `failed` · `cancelled` | `claim_build` · `fail_build` · `request_cancel_build` |
+| `building` | `signing` · `failed` · `cancelled` | `mark_signing` · `fail_build`/`recover_stuck_builds` · `cancel_build` (butuh `cancel_requested=1`) |
+| `signing` | `done` · `failed` · `cancelled` | `finish_build` · `fail_build`/`recover_stuck_builds` · `cancel_build` |
+| `done`, `rejected`, `failed`, `cancelled` | (final) | – |
+
+**Keputusan (mengikat untuk tahap berikutnya):**
+- **Retensi `BUILD_KEEP` = 10** (sebelumnya usul 5). Diterapkan per analisis dan terpisah untuk build `done` vs non-`done`. Pemangkasan sebenarnya (hapus direktori artefak lalu `delete_build`) baru ada di Tahap 2.
+- **Batas ukuran 1 GB untuk build/ruang kerja masih menunggu Tahap 6**: Tahap 1 tidak mengubah satu pun batas ukuran.
+- **Keystore: RSA 3072** (bukan 4096), `SHA256withRSA`, PKCS12, alias `reverse-apk`, berlaku 10950 hari (± Oktober 2056). 3072 bit ≈ 128-bit keamanan (NIST SP 800-57); ancaman nyata ke kunci ini adalah pencurian berkas (mitigasi: mode 600 + cadangan), bukan pemfaktoran. Satu keystore dan satu berkas sandi (PKCS12: sandi store = sandi key). Kunci uji pribadi, BUKAN kunci rilis.
+- **Kehilangan keystore atau berkas sandinya = kunci BARU**: aplikasi yang sudah terpasang dengan kunci lama tidak bisa diperbarui (Android menolak pembaruan dengan tanda tangan berbeda; harus dicopot, data aplikasi hilang). Karena itu `make init` menampilkan peringatan cadangan dan `docs/deploy.md` mewajibkan cadangan di luar server.
+- Compose TIDAK menyebut keystore sama sekali pada tahap ini: tidak ada layanan yang memasangnya, dan penjaga `tests/test_signer_toolchain.py` tetap utuh. Penyambungan ke `signer-daemon` adalah pekerjaan Tahap 2 dan akan mengubah penjaga itu secara sadar.
+
+**Belum ada (sengaja):** `signer-daemon`, tahap `build` di runner/worker, volume `builds`, pembersihan direktori artefak, antarmuka persetujuan, tool AI (`request_build`, `get_build_status`). Perilaku `reset_for_retry` (analisis `done` → `queued`, menghapus `work/<id>`) terhadap baris build yang sudah ada belum ditangani (Tahap 2).
+
+**Terbukti di sandbox (tanpa Docker):** lihat `audit.md` 10.16. Ringkas: migrasi v4→v5 dengan data nyata (semua tabel lama utuh, `integrity_check` ok), seluruh matriks 10 fungsi × 9 status terhadap `BUILD_TRANSITIONS`, balapan dengan koneksi SQLite nyata, `keytool` JDK 21 asli membuat/membaca keystore, sandi tidak muncul di argv, tidak menimpa, 12 mutasi store/DB tertangkap (satu tes lemah ditemukan dan diperkuat).
+**BELUM DIUJI (butuh Docker di VPS):** jalur `docker run ... keytool` di image `signer` (JRE 21 trixie), pembangunan image signer otomatis oleh `make init`, `make init` penuh, izin tulis ke `secrets/` oleh user non-root di dalam kontainer. Perintah VPS dan gejala kegagalan: `docs/deploy.md` "Keystore penanda tangan".

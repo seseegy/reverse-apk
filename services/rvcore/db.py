@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-# Skema versi 1 (M1). Tabel finding / ai_call / chat_* ditambahkan oleh migrasi milestone berikutnya.
+# Skema versi 1 (M1). Tabel finding / ai_call / chat_* / build ditambahkan oleh migrasi milestone berikutnya.
 _MIGRATIONS: list[str] = [
     """
     CREATE TABLE apk (
@@ -182,6 +182,63 @@ _MIGRATIONS: list[str] = [
         PRIMARY KEY (message_id, file_id)
     );
     CREATE INDEX message_file_file ON message_file(file_id)
+    """,
+    # --- v5 (B-1c): permintaan build APK + persetujuan manual (isi artefak ada di disk: /data/builds/<analysis_id>/<build_id>/)
+    #   status  : awaiting_approval -> approved -> queued -> building -> signing -> done; cabang rejected / failed / cancelled
+    #             (tabel transisi yang sah ada di rvcore.store.BUILD_TRANSITIONS; semua perubahan status lewat fungsi store)
+    #   diff_sha256 = hash diff yang DISETUJUI; 'approved' dan seterusnya wajib membawa bukti persetujuan (approved_at + hash/versi
+    #   pernyataan wewenang), 'done' wajib verify_ok=1 + seluruh kolom keluaran. CHECK boleh dipakai di sini karena tabel baru.
+    #   Indeks unik parsial: paling banyak SATU build aktif (belum final) per analisis, ditegakkan DB (bukan hanya SELECT-lalu-INSERT).
+    #   ON DELETE CASCADE: hapus analisis/apk menghapus baris build; DIREKTORI artefak build dihapus Tahap 2 (bukan di sini).
+    #   Catatan aturan migrasi: tanpa ';' selain pemisah pernyataan, tanpa trigger, tanpa komentar SQL (_split_statements memecah di ';').
+    """
+    CREATE TABLE build (
+        id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+        analysis_id                INTEGER NOT NULL REFERENCES analysis(id) ON DELETE CASCADE,
+        status                     TEXT    NOT NULL DEFAULT 'awaiting_approval'
+            CHECK (status IN ('awaiting_approval', 'approved', 'queued', 'building', 'signing',
+                              'done', 'rejected', 'failed', 'cancelled')),
+        requested_by               TEXT    NOT NULL
+            CHECK (length(requested_by) <= 40 AND (requested_by = 'user' OR requested_by GLOB 'ai:[0-9]*')),
+        source_kind                TEXT    NOT NULL CHECK (source_kind IN ('apk', 'xapk', 'apks')),
+        diff_sha256                TEXT    NOT NULL
+            CHECK (length(diff_sha256) = 64 AND diff_sha256 NOT GLOB '*[^0-9a-f]*'),
+        diff_summary               TEXT    NOT NULL DEFAULT '{}' CHECK (length(diff_summary) <= 8192),
+        note                       TEXT    NOT NULL DEFAULT '' CHECK (length(note) <= 2000),
+        created_at                 REAL    NOT NULL,
+        updated_at                 REAL    NOT NULL,
+        approved_at                REAL,
+        approval_statement_sha256  TEXT
+            CHECK (approval_statement_sha256 IS NULL OR (length(approval_statement_sha256) = 64
+                   AND approval_statement_sha256 NOT GLOB '*[^0-9a-f]*')),
+        approval_statement_version INTEGER CHECK (approval_statement_version IS NULL OR approval_statement_version >= 1),
+        rejected_reason            TEXT    CHECK (rejected_reason IS NULL OR length(rejected_reason) <= 500),
+        started_at                 REAL,
+        finished_at                REAL,
+        error_code                 TEXT    CHECK (error_code IS NULL OR length(error_code) <= 40),
+        error_text                 TEXT    CHECK (error_text IS NULL OR length(error_text) <= 500),
+        cancel_requested           INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1)),
+        output_name                TEXT    CHECK (output_name IS NULL OR length(output_name) <= 120),
+        output_sha256              TEXT
+            CHECK (output_sha256 IS NULL OR (length(output_sha256) = 64 AND output_sha256 NOT GLOB '*[^0-9a-f]*')),
+        output_size                INTEGER CHECK (output_size IS NULL OR output_size >= 0),
+        output_format              TEXT    CHECK (output_format IS NULL OR output_format IN ('apk', 'xapk', 'apks')),
+        cert_sha256                TEXT
+            CHECK (cert_sha256 IS NULL OR (length(cert_sha256) = 64 AND cert_sha256 NOT GLOB '*[^0-9a-f]*')),
+        verify_ok                  INTEGER CHECK (verify_ok IS NULL OR verify_ok IN (0, 1)),
+        stage_log                  TEXT    CHECK (stage_log IS NULL OR length(stage_log) <= 4000),
+        CHECK (status NOT IN ('approved', 'queued', 'building', 'signing', 'done')
+               OR (approved_at IS NOT NULL AND approval_statement_sha256 IS NOT NULL
+                   AND approval_statement_version IS NOT NULL)),
+        CHECK (status <> 'done'
+               OR (COALESCE(verify_ok, 0) = 1 AND output_name IS NOT NULL AND output_sha256 IS NOT NULL
+                   AND output_size IS NOT NULL AND output_format IS NOT NULL AND cert_sha256 IS NOT NULL)),
+        CHECK (output_format IS NULL OR output_format = source_kind)
+    );
+    CREATE INDEX build_analysis ON build(analysis_id, id DESC);
+    CREATE INDEX build_status ON build(status);
+    CREATE UNIQUE INDEX build_one_open_per_analysis ON build(analysis_id)
+        WHERE status IN ('awaiting_approval', 'approved', 'queued', 'building', 'signing')
     """,
 ]
 
