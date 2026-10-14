@@ -554,3 +554,17 @@ Lihat `docs/prd/09-bundles-and-workbench.md` "Status PR D". Fitur ini **mati sec
 - **Angka:** suite 966 lulus (274 tes baru: egress policy 154, egress server 40, `test_shell_net` 64, `test_netprobe` 16), dihitung dari keluaran pytest.
 
 **Belum terbukti:** **tidak ada Docker di sandbox**: `benchnet` tanpa rute keluar, rute keluar `egress`, DNS Docker untuk `egress`, dan build image `bench` (`apt-get install curl ca-certificates`) belum teruji. **Landlock di sandbox ABI v2** (VPS: v4), jadi penguncian TCP hanya teruji pada argumen syscall; perilaku kernel baru terbukti oleh `make bench-selftest` di VPS. **Kebocoran DNS** lewat DNS tertanam Docker pada jaringan internal tidak diketahui (diukur oleh `bench-selftest`, GAGAL bila bocor). `http://` lewat terowongan ke port 80 yang diizinkan belum dicoba; IPv6 keluar belum diuji. Jalur web → bench → egress dengan model AI asli belum dijalankan.
+
+### 10.13 Toolchain penanda tangan (14 Okt 2026, paket B-1b)
+
+Lihat `docs/prd/09-bundles-and-workbench.md` "Status paket B-1b". Hanya penyediaan alat (image `signer`, profil `build`, mati secara bawaan). Temuan:
+
+- **`ldd` pada symlink menyesatkan.** `ldd /usr/local/bin/zipalign` (symlink) melaporkan `libc++.so => not found`, padahal eksekusi jalan karena RUNPATH `$ORIGIN/lib64` dihitung dari path asli. Penjaga build memakai `ldd /opt/build-tools/zipalign`; kontrol negatif (memindahkan `libc++.so`) membuat `zipalign` gagal.
+- **`! cmd` tidak menggagalkan `set -e`.** Penjaga `! ldd ... | grep -q 'not found'` akan diam-diam lolos di `RUN set -e`; ditulis `if ...; then ... exit 1; fi` dan dikunci tes (mutasi `if ! ldd` tertangkap).
+- **minSdk menentukan skema tanda tangan.** Dengan `--min-sdk-version 24` apksigner tidak membuat v1; yang dinilai v2 dan v3 (cukup untuk Android 14, FR-9.22). Tanpa opsi itu apksigner mem-parse `AndroidManifest.xml` (AXML) sehingga APK uji sintetis ditolak.
+- **Tes perusakan butuh payload terbaca.** `classes.dex` di APK uji disimpan STORED agar satu byte-nya bisa dibalik tanpa merusak struktur ZIP; versi DEFLATED pertama gagal karena penanda tidak ditemukan.
+- **Paket apt `apksigner` ditolak:** 35.0.2 (lebih tua dari 37.0.0) dan bergantung pada `default-jre | javaN-runtime` (dugaan dari metadata: menarik JRE non-headless; belum diuji).
+- **Hijau palsu dicegah:** pada percobaan pertama, dasar tes baru TIDAK hijau (kutip ikut terbaca di nama anggota `unzip`; blok `signer` yang terakhir di compose terpotong di komentar `networks:`), jadi hasil mutasi pertama dibuang dan diulang setelah dasar hijau: 8 mutasi compose/Dockerfile/compose-lain tertangkap, plus 3 mutasi Makefile/mode berkas. Di skrip tiruan, kontrol hash salah awalnya tidak mengubah apa pun (digit terakhir hash sudah `0`; `sha256sum -c` tetap lulus) dan diperbaiki sebelum dipakai sebagai bukti.
+- **Tes compose lama bergantung pada urutan teks.** `compose_block` memotong di komentar berindentasi 2 spasi; layanan terakhir (signer) ikut terpotong di komentar bagian `networks:`. Helper tes baru memotong `networks:` lebih dulu.
+
+**Belum terbukti:** **tidak ada Docker di sandbox** (`conmon` tidak ada): `docker build` image signer, `docker compose --profile build config`, bagian isolasi kontainer pada `signer-selftest`, `make tools-check` penuh, dan ukuran image belum teruji. Java 21 diuji lewat JDK terpisah di sandbox, bukan paket apt trixie. Heap `-Xmx256m` untuk APK besar belum diukur.

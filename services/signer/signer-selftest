@@ -99,13 +99,11 @@ def stored_data_offsets(path: str) -> dict[str, int]:
 
 
 def find_keystores(root: str, skip: tuple[str, ...] = PRUNE) -> list[str]:
-    """Cari berkas keystore/kunci privat di bawah `root`. `cacerts` (trust store JKS publik milik Java) dikecualikan."""
+    """Cari berkas keystore/kunci privat di bawah `root` (berdasarkan ekstensi/nama). `cacerts` (trust store publik Java) tak berekstensi, jadi tidak ikut."""
     found: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if os.path.join(dirpath, d) not in skip]
         for name in filenames:
-            if name == "cacerts":
-                continue
             if name.lower().endswith(KEY_EXT) or name in KEY_NAMES:
                 found.append(os.path.join(dirpath, name))
     return found

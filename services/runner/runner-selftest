@@ -113,7 +113,7 @@ for label, cmd in (
 proj = os.path.join(work, "proj")
 os.makedirs(os.path.join(proj, "smali", "com", "example", "selftest"))
 with open(os.path.join(proj, "apktool.yml"), "w") as fh:
-    fh.write(f"version: {os.environ.get('APKTOOL_VERSION', '3.0.3')}\napkFileName: built.apk\nusesFramework:\n  ids:\n  - 1\n"
+    fh.write(f"version: {version(['apktool', '--version'])}\napkFileName: built.apk\nusesFramework:\n  ids:\n  - 1\n"
              "sdkInfo:\n  minSdkVersion: 24\n  targetSdkVersion: 33\nversionInfo:\n  versionCode: 1\n  versionName: 1.0-selftest\n")
 with open(os.path.join(proj, "AndroidManifest.xml"), "w") as fh:
     fh.write('<?xml version="1.0" encoding="utf-8" standalone="no"?>\n'

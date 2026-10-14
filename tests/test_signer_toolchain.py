@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import os
 import re
+import zipfile
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 DOCKERFILE = (ROOT / "services/signer/Dockerfile").read_text(encoding="utf-8")
@@ -136,3 +139,113 @@ def test_tools_check_script_is_executable_bash():
     assert text.startswith("#!/usr/bin/env bash\n") and "set -uo pipefail" in text
     assert os.access(script, os.X_OK), "scripts/tools-check.sh harus executable (Makefile memanggilnya langsung)"
     assert "--profile build" in text and "--no-deps" in text
+
+
+# ================================================================================ (d) pin konsisten dengan yang didokumentasikan
+def test_pins_in_dockerfiles_match_the_documented_table():
+    runner = (ROOT / "services/runner/Dockerfile").read_text(encoding="utf-8")
+    deploy = (ROOT / "docs/deploy.md").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    versions = {
+        "apktool": _arg("APKTOOL_VERSION", runner),
+        "jadx": _arg("JADX_VERSION", runner),
+        "build-tools": _arg("BUILD_TOOLS_VERSION"),
+    }
+    hashes = {
+        "apktool": _arg("APKTOOL_SHA256", runner),
+        "jadx": _arg("JADX_SHA256", runner),
+        "build-tools": _arg("BUILD_TOOLS_SHA256"),
+    }
+    for name, h in hashes.items():
+        assert re.fullmatch(r"[0-9a-f]{64}", h), name
+        assert h in deploy, f"SHA-256 {name} di Dockerfile tidak ada di docs/deploy.md"
+    for name, v in versions.items():
+        assert re.search(rf"\b{re.escape(v)}\b", deploy), f"versi {name} {v} tidak ada di docs/deploy.md"
+        assert re.search(rf"\b{re.escape(v)}\b", readme), f"versi {name} {v} tidak ada di README.md"
+    # SHA-1 yang diterbitkan Google (pembanding SHA-256 yang dihitung sendiri) harus tercatat di dokumen.
+    assert DOCKERFILE.count("70954e99f4c3d9d46ee70fa32624672fe7cd6ebe") == 1 and "70954e99f4c3d9d46ee70fa32624672fe7cd6ebe" in deploy
+
+
+def test_build_tools_zip_and_dir_follow_the_pinned_version():
+    major, minor, _patch = _arg("BUILD_TOOLS_VERSION").split(".")
+    rev = major if minor == "0" else f"{major}.{minor}"
+    assert _arg("BUILD_TOOLS_ZIP") == f"build-tools_r{rev}_linux.zip"
+    assert _arg("BUILD_TOOLS_DIR") == f"android-{major}.{minor}"
+
+
+def test_scripts_read_pins_from_the_image_instead_of_duplicating_them():
+    runner = (ROOT / "services/runner/Dockerfile").read_text(encoding="utf-8")
+    pins = [_arg("BUILD_TOOLS_VERSION"), _arg("BUILD_TOOLS_SHA256"), _arg("APKTOOL_VERSION", runner), _arg("APKTOOL_SHA256", runner),
+            _arg("JADX_VERSION", runner), _arg("JADX_SHA256", runner)]
+    for rel in ("services/signer/signer-selftest", "services/runner/runner-selftest", "scripts/tools-check.sh"):
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        for pin in pins:
+            assert pin not in text, f"{rel} menyalin pin {pin}; baca dari ENV image"
+    assert "BUILD_TOOLS_VERSION" in (ROOT / "scripts/tools-check.sh").read_text(encoding="utf-8")
+
+
+# ================================================================================ helper signer-selftest (tanpa Docker/Java)
+def _selftest():
+    import importlib.machinery
+    import importlib.util
+
+    path = str(ROOT / "services/signer/signer-selftest")
+    loader = importlib.machinery.SourceFileLoader("signer_selftest", path)
+    spec = importlib.util.spec_from_loader("signer_selftest", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def test_selftest_builds_valid_zip_and_misaligned_variant(tmp_path):
+    st = _selftest()
+    good, bad = str(tmp_path / "a.apk"), str(tmp_path / "b.apk")
+    st.make_test_apk(good)
+    st.make_test_apk(bad, misaligned=True)
+    for p in (good, bad):
+        with zipfile.ZipFile(p) as zf:
+            assert zf.testzip() is None
+            assert {"AndroidManifest.xml", "classes.dex", "resources.arsc", "lib/arm64-v8a/libuji.so"} <= set(zf.namelist())
+            assert all(zf.getinfo(n).compress_type == zipfile.ZIP_STORED for n in ("resources.arsc", "lib/arm64-v8a/libuji.so", "classes.dex"))
+    assert any(off % 4 for off in st.stored_data_offsets(bad).values()), "varian tak selaras harus punya offset ganjil"
+    assert st.DEX_MARKER in Path(good).read_bytes()
+
+
+def test_selftest_tamper_flips_exactly_one_payload_byte_and_keeps_zip_readable(tmp_path):
+    st = _selftest()
+    src, dst = str(tmp_path / "s.apk"), str(tmp_path / "t.apk")
+    st.make_test_apk(src)
+    st.tamper(src, dst)
+    a, b = Path(src).read_bytes(), Path(dst).read_bytes()
+    assert len(a) == len(b) and sum(x != y for x, y in zip(a, b)) == 1
+    with zipfile.ZipFile(dst) as zf:
+        assert zf.namelist() == zipfile.ZipFile(src).namelist()
+        assert zf.testzip() == "classes.dex", "CRC entri yang dirusak harus tidak cocok"
+    with pytest.raises(ValueError):
+        st.tamper(src, dst, marker=b"TIDAK-ADA")
+
+
+def test_selftest_finds_keystores_but_not_the_public_cacerts_or_pruned_dirs(tmp_path):
+    st = _selftest()
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc" / "x.p12").write_bytes(b"k")
+    (tmp_path / "opt").mkdir()
+    (tmp_path / "opt" / "A.JKS").write_bytes(b"k")
+    (tmp_path / "opt" / "id_rsa").write_bytes(b"k")
+    (tmp_path / "opt" / "cacerts").write_bytes(b"publik")
+    (tmp_path / "opt" / "biasa.txt").write_bytes(b"x")
+    (tmp_path / "tmp").mkdir()
+    (tmp_path / "tmp" / "sementara.p12").write_bytes(b"k")
+    found = {os.path.relpath(p, tmp_path) for p in st.find_keystores(str(tmp_path), skip=(str(tmp_path / "tmp"),))}
+    assert found == {os.path.join("etc", "x.p12"), os.path.join("opt", "A.JKS"), os.path.join("opt", "id_rsa")}
+
+
+def test_selftest_fails_with_exit_1_when_tools_are_missing(tmp_path, monkeypatch, capsys):
+    st = _selftest()
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    assert st.main(["--toolchain-only"]) == 1
+    out = capsys.readouterr().out
+    assert "[GAGAL] java" in out and "DILEWATI" in out
+    assert not list((tmp_path / "home").glob("selftest-*")), "direktori kerja sementara harus dibersihkan walau gagal"
