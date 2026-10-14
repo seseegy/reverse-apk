@@ -954,7 +954,8 @@ def test_every_build_env_read_by_store_is_forwarded_by_compose():
 def test_compose_gains_no_volume_or_secret_and_stays_clean_for_signing_guard():
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     vols = set(re.findall(r"^  ([A-Za-z0-9_]+):", compose.split("\nvolumes:\n", 1)[1].split("\nsecrets:\n", 1)[0], re.M))
-    assert vols == {"uploads", "work", "files", "db", "spool", "bench", "benchspool", "redisdata", "caddy_data", "caddy_config"}
+    # Tahap 2a menambah TEPAT dua volume sadar: builds (artefak) dan signspool (antrean worker -> signer). Secret dasar tetap hanya admin_password_hash.
+    assert vols == {"uploads", "work", "files", "db", "spool", "bench", "benchspool", "redisdata", "caddy_data", "caddy_config", "builds", "signspool"}
     secrets = set(re.findall(r"^  ([A-Za-z0-9_]+):", compose.split("\nsecrets:\n", 1)[1], re.M))
     assert secrets == {"admin_password_hash"}
     # Jaga test_signer_toolchain: web/worker tidak boleh menyebut keystore/signer (komentar sudah dibuang oleh _block).

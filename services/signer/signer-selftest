@@ -6,7 +6,8 @@ Dijalankan lewat `make signer-selftest`, yang memakai opsi isolasi yang sama den
   - zipalign dan apksigner bisa dijalankan;
   - rantai buat keystore SEMENTARA -> zipalign -> apksigner sign -> apksigner verify lulus (v2 dan v3);
   - berkas yang belum ditandatangani dan yang dirusak setelah ditandatangani DITOLAK;
-  - kontainer terisolasi (bukan root, rootfs read-only, tanpa jaringan) dan tidak membawa keystore/rahasia.
+  - kontainer terisolasi (bukan root, rootfs read-only, tanpa jaringan), tidak membawa keystore LAIN/rahasia di image, dan isi /run/secrets serta /data
+    hanya yang sah (dua berkas keystore bila dipasang; volume builds dan signspool yang dapat ditulis uid 10001).
 
 Opsi `--toolchain-only` melewati HANYA bagian isolasi kontainer (untuk membuktikan jalur fungsional di luar Docker,
 mis. di mesin pengembangan). Makefile/Dockerfile/compose tidak pernah memakainya.
@@ -29,7 +30,13 @@ failed = False
 DEX_MARKER = b"MARKER-DEX"
 KEY_EXT = (".jks", ".keystore", ".p12", ".pfx", ".bks", ".uber", ".p8", ".key")
 KEY_NAMES = ("id_rsa", "id_ed25519")
-PRUNE = ("/proc", "/sys", "/dev", "/tmp", "/run")
+# /run/secrets (keystore pemilik yang SAH, dipasang compose) dan /data (volume) tidak dipindai; sisa /run tetap dipindai.
+PRUNE = ("/proc", "/sys", "/dev", "/tmp", "/run/secrets", "/data")
+SECRETS_DIR = "/run/secrets"
+SECRETS_NAMES = ("signing_keystore", "signing_keystore_pass")
+DATA_DIR = "/data"
+DATA_NAMES = ("builds", "signspool")
+WRAPPER_FLAGS = ("--enable-native-access=ALL-UNNAMED", "-Xmx256m", "-XX:MaxDirectMemorySize=64m")
 SECRET_ENV = ("API_KEY", "SECRET", "PASSWORD", "TOKEN", "REDIS", "KEYSTORE", "STOREPASS")
 
 
@@ -131,10 +138,46 @@ def check_tools() -> None:
             report(False, label, f"{type(exc).__name__}: {exc}")
     try:
         wrapper = open(shutil.which("apksigner") or "/usr/local/bin/apksigner").read()
-        missing = [f for f in ("--enable-native-access=ALL-UNNAMED", "-Xmx256m") if f not in wrapper]
+        missing = [f for f in WRAPPER_FLAGS if f not in wrapper]
         report(not missing, "wrapper apksigner", "flag lengkap" if not missing else "tidak memuat: " + ", ".join(missing))
     except OSError as exc:
         report(False, "wrapper apksigner", str(exc))
+
+
+def check_secrets_dir(path: str = SECRETS_DIR) -> tuple[bool, str]:
+    """`/run/secrets` hanya berisi TEPAT {signing_keystore, signing_keystore_pass} bila keystore dipasang, atau tidak ada/kosong bila tidak.
+    Hanya NAMA yang dilaporkan; isi berkas tidak dibaca."""
+    if not os.path.lexists(path):
+        return True, "tidak ada (keystore tidak dipasang)"
+    if not os.path.isdir(path):
+        return False, f"{path} bukan direktori"
+    names = sorted(os.listdir(path))
+    if not names:
+        return True, "kosong (keystore tidak dipasang)"
+    if names != sorted(SECRETS_NAMES):
+        return False, "isi tidak sesuai: " + ", ".join(names)
+    bad = [n for n in names if os.path.islink(os.path.join(path, n)) or not os.path.isfile(os.path.join(path, n))]
+    if bad:
+        return False, "bukan berkas biasa: " + ", ".join(bad)
+    return True, "tepat dua berkas keystore (" + ", ".join(names) + ")"
+
+
+def check_data_dir(path: str = DATA_DIR) -> tuple[bool, str]:
+    """`/data` hanya berisi `builds` dan `signspool`; akar keduanya dapat ditulis uid ini (tulis-hapus berkas `.selftest-<acak>`)."""
+    if not os.path.isdir(path):
+        return False, f"{path} tidak ada (volume builds/signspool tidak terpasang?)"
+    names = sorted(os.listdir(path))
+    if names != sorted(DATA_NAMES):
+        return False, "isi " + path + " tidak sesuai: " + (", ".join(names) or "(kosong)") + "; seharusnya " + ", ".join(sorted(DATA_NAMES))
+    for name in DATA_NAMES:
+        probe = os.path.join(path, name, f".selftest-{secrets.token_hex(6)}")
+        try:
+            with open(probe, "w"):
+                pass
+            os.remove(probe)
+        except OSError as exc:
+            return False, f"{os.path.join(path, name)} tidak dapat ditulis oleh uid {os.geteuid()}: {exc.strerror or exc}"
+    return True, "builds dan signspool; akar keduanya dapat ditulis uid " + str(os.geteuid())
 
 
 def check_isolation() -> None:
@@ -175,9 +218,11 @@ def check_isolation() -> None:
     report(not bad, "environment tanpa rahasia", "tidak ada variabel bernuansa rahasia" if not bad else "ADA: " + ", ".join(bad))
 
     keys = find_keystores("/")
-    report(not keys, "tidak ada keystore/kunci di image", "tidak ada" if not keys else "DITEMUKAN: " + ", ".join(keys[:5]))
-    leftovers = [p for p in ("/run/secrets", "/data") if os.path.exists(p) and (not os.path.isdir(p) or os.listdir(p))]
-    report(not leftovers, "tanpa /run/secrets dan /data berisi", "tidak ada" if not leftovers else "ADA: " + ", ".join(leftovers))
+    report(not keys, "tidak ada keystore LAIN di image/FS di luar /run/secrets", "tidak ada" if not keys else "DITEMUKAN: " + ", ".join(keys[:5]))
+    ok, detail = check_secrets_dir()
+    report(ok, "/run/secrets hanya berisi tepat {signing_keystore, signing_keystore_pass} bila dipasang, atau tidak ada/kosong", detail)
+    ok, detail = check_data_dir()
+    report(ok, "/data hanya berisi builds dan signspool, akar keduanya dapat ditulis uid 10001", detail)
 
 
 def check_toolchain() -> None:

@@ -139,6 +139,8 @@ services:
       - work:/data/work
       - db:/data/db
       - spool:/data/spool
+      - builds:/data/builds
+      - signspool:/data/signspool
     networks: [backend]
     depends_on:
       redis:
@@ -302,14 +304,15 @@ services:
     cpus: 0.5
     pids_limit: 128
 
-  # Penanda tangan APK (PRD 09 Bagian B, paket B-1b: HANYA toolchain zipalign + apksigner). BELUM ada daemon, keystore, volume, maupun rahasia; satu-satunya isinya `signer-selftest`
-  # (`make signer-selftest`). Profil `build`: TIDAK ikut `make up` / `docker compose up` sehingga RAM tidak bertambah sampai fitur build dipakai (`docker compose --profile build ...`).
+  # Penanda tangan APK (PRD 09 Bagian B, paket B-1b/2a): daemon `signer-daemon` (zipalign + apksigner) yang mengambil job dari volume `signspool` dan menulis `signed.apk`
+  # di volume `builds`; selain itu `signer-selftest` (`make signer-selftest`). Profil `build`: TIDAK ikut `docker compose up` biasa; Makefile mengaktifkannya (COMPOSE_PROFILES=build)
+  # hanya bila keystore ada. Kunci TIDAK ada di blok ini: dipasang oleh docker-compose.keystore.yml, hanya ke layanan ini. Tanpa jaringan, rootfs read-only, uid 10001, tanpa capability.
   signer:
     build:
       context: ./services
       dockerfile: signer/Dockerfile
     profiles: ["build"]
-    restart: "no"
+    restart: unless-stopped
     init: true
     network_mode: none
     read_only: true
@@ -319,6 +322,20 @@ services:
       - no-new-privileges:true
     tmpfs:
       - /tmp:rw,size=256m,nosuid
+    environment:
+      DATA_DIR: /data
+      SIGN_TIMEOUT: ${SIGN_TIMEOUT:-900}
+      SIGN_MAX_MB: ${SIGN_MAX_MB:-1100}
+    volumes:
+      - builds:/data/builds
+      - signspool:/data/signspool
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "signer-daemon", "--health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     mem_limit: 512m
     cpus: 1
     pids_limit: 128
@@ -343,6 +360,8 @@ volumes:
   spool:     # antrean berkas worker -> runner; hanya worker & runner
   bench:     # ruang kerja shell AI per analisis (bench/<id>/); web memasangnya untuk membersihkan, bench untuk bekerja
   benchspool: # antrean web -> bench (perintah shell AI); HANYA web & bench, terpisah dari spool worker/runner
+  builds:    # artefak build: signer rw, worker rw; runner/bench TIDAK memasangnya di 2a
+  signspool: # antrean worker -> signer; hanya worker & signer
   redisdata:
   caddy_data:
   caddy_config:

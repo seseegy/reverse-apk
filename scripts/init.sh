@@ -41,9 +41,11 @@ chmod 700 secrets
 [ -f secrets/admin_password_hash ] || { : > secrets/admin_password_hash; chmod 644 secrets/admin_password_hash; }
 
 # Keystore dibuat lewat keytool di image `signer` (server tidak perlu JDK; butuh Docker). Gagal = init berhenti (gagal-tertutup); mengulang `make init` aman.
+# Kunci dibuat mode 644 di dalam secrets/ (700) agar terbaca kontainer signer (uid 10001); `make up` memasangnya ke signer lewat docker-compose.keystore.yml.
 ./scripts/keystore.sh create
 
 echo "Selesai. Langkah berikut: make password"
+echo "Catatan: 'make up' memasang kunci ke signer (kunci mode 644 di folder secrets/ mode 700); jalankan 'make init' dan 'make up' sebagai dua perintah terpisah."
 if [ -f secrets/signing_keystore.p12 ] && [ -f secrets/signing_keystore_pass ]; then
   echo "⚠ INGAT: cadangkan secrets/signing_keystore.p12 DAN secrets/signing_keystore_pass di tempat aman. Kehilangan = kunci baru (aplikasi terpasang tidak bisa diperbarui)."
 fi
