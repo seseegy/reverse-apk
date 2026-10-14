@@ -531,6 +531,21 @@ def test_sample_build_script_uses_the_exec_tmpfs_and_the_production_wrapper():
     assert "chmod" in BUILD_PY.split("def main()", 1)[0] and "setExecutable" in BUILD_PY, "komentar menjelaskan akar masalah chmod"
 
 
+def test_sample_build_script_removes_the_container_made_tree_before_the_host_cleans_up():
+    """Bug nyata di VPS: apktool (uid 10001) membuat proj/build/* di folder sementara milik pengguna host, lalu `TemporaryDirectory`
+    gagal membersihkannya (PermissionError) sehingga skrip berakhir dengan traceback walau APK sudah jadi. Kontainer harus menghapus
+    `/w/proj` sendiri SETELAH build berhasil (`&&`, bukan `;`, supaya galat build tidak tertutup)."""
+    cmd = BUILD_PY.split("def main()", 1)[1].split("unsigned = Path(td)", 1)[0]
+    shell = re.search(r'"sh", "-c", "([^"]+)"', cmd)
+    assert shell, "perintah sh -c di docker run tidak ditemukan"
+    script = shell.group(1)
+    build = script.index("apktool b /w/proj -o /w/unsigned.apk")
+    remove = script.index("rm -rf /w/proj")
+    assert build < remove, "penghapusan harus SESUDAH build"
+    assert script[build:remove].rstrip().endswith("&&"), "pakai && agar kegagalan apktool tidak tertutup oleh rm"
+    assert "ignore_cleanup_errors" not in BUILD_PY, "jangan menutupi galat pembersihan; hapus sumbernya di kontainer"
+
+
 # ================================================================================ (g) dokumen
 def test_docs_record_the_exec_tmpfs_root_cause_and_the_sandbox_lesson():
     pin = re.search(r"^ARG AAPT2_SHA256=(\S+)$", RUNNER_DOCKERFILE, re.M).group(1)
