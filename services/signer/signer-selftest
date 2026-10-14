@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""Uji mandiri image signer. Keluar dengan kode != 0 bila ada pemeriksaan yang gagal.
+
+Dijalankan lewat `make signer-selftest`, yang memakai opsi isolasi yang sama dengan layanan asli
+(network_mode: none, read_only, cap_drop ALL, dst). Membuktikan dari DALAM kontainer bahwa:
+  - zipalign dan apksigner bisa dijalankan;
+  - rantai buat keystore SEMENTARA -> zipalign -> apksigner sign -> apksigner verify lulus (v2 dan v3);
+  - berkas yang belum ditandatangani dan yang dirusak setelah ditandatangani DITOLAK;
+  - kontainer terisolasi (bukan root, rootfs read-only, tanpa jaringan) dan tidak membawa keystore/rahasia.
+
+Opsi `--toolchain-only` melewati HANYA bagian isolasi kontainer (untuk membuktikan jalur fungsional di luar Docker,
+mis. di mesin pengembangan). Makefile/Dockerfile/compose tidak pernah memakainya.
+Keystore dibuat sementara di direktori kerja dan dihapus di akhir; kata sandinya acak dan hanya lewat ENV subprocess.
+"""
+
+import os
+import re
+import secrets
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import zipfile
+
+failed = False
+
+DEX_MARKER = b"MARKER-DEX"
+KEY_EXT = (".jks", ".keystore", ".p12", ".pfx", ".bks", ".uber", ".p8", ".key")
+KEY_NAMES = ("id_rsa", "id_ed25519")
+PRUNE = ("/proc", "/sys", "/dev", "/tmp", "/run")
+SECRET_ENV = ("API_KEY", "SECRET", "PASSWORD", "TOKEN", "REDIS", "KEYSTORE", "STOREPASS")
+
+
+def report(ok: bool, name: str, detail: str = "") -> None:
+    global failed
+    failed = failed or not ok
+    print(f"[{'OK ' if ok else 'GAGAL'}] {name}" + (f" — {detail}" if detail else ""))
+
+
+def info(name: str, detail: str = "") -> None:
+    print(f"[ -- ] {name}" + (f" — {detail}" if detail else ""))
+
+
+def run(cmd: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL, env=env)
+
+
+def first_line(out: subprocess.CompletedProcess) -> str:
+    text = (out.stdout or out.stderr).strip().splitlines()
+    return text[0] if text else f"(kode {out.returncode})"
+
+
+def tail(out: subprocess.CompletedProcess, n: int = 3) -> str:
+    text = (out.stdout + out.stderr).strip().splitlines()
+    return " | ".join(text[-n:]) if text else f"(kode {out.returncode})"
+
+
+# ---------------------------------------------------------------- helper murni (diuji tanpa Docker/Java)
+def make_test_apk(path: str, *, misaligned: bool = False) -> None:
+    """ZIP minimal bergaya APK, dari stdlib. `misaligned=True` menyisipkan entri STORED berukuran ganjil di depan
+    agar offset data entri STORED berikutnya BUKAN kelipatan 4 (zipalign -c gagal, zipalign -f mengubahnya)."""
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("AndroidManifest.xml", b"\x00junk-manifest" * 8)
+        if misaligned:
+            zf.writestr(zipfile.ZipInfo("assets/ganjil.bin"), b"x" * 13, compress_type=zipfile.ZIP_STORED)
+        # classes.dex disimpan apa adanya (STORED) agar marker perusakan terbaca utuh di dalam berkas.
+        zf.writestr(zipfile.ZipInfo("classes.dex"), b"dex\n035\x00" + DEX_MARKER + bytes(range(64)) * 4, compress_type=zipfile.ZIP_STORED)
+        zf.writestr(zipfile.ZipInfo("resources.arsc"), b"arsc-data-" * 32, compress_type=zipfile.ZIP_STORED)
+        zf.writestr(zipfile.ZipInfo("lib/arm64-v8a/libuji.so"), b"\x7fELF" + b"\x00" * 60, compress_type=zipfile.ZIP_STORED)
+
+
+def tamper(src: str, dst: str, marker: bytes = DEX_MARKER) -> None:
+    """Salin `src` ke `dst` lalu balik SATU byte di dalam payload (marker unik), bukan di header ZIP.
+    Struktur ZIP tetap terbaca tetapi isinya berubah (digest tak lagi cocok dengan tanda tangan)."""
+    with open(src, "rb") as fh:
+        data = bytearray(fh.read())
+    at = data.find(marker)
+    if at < 0:
+        raise ValueError("marker tidak ditemukan; APK uji tidak berisi payload yang bisa dirusak")
+    data[at] ^= 0xFF
+    with open(dst, "wb") as fh:
+        fh.write(data)
+
+
+def stored_data_offsets(path: str) -> dict[str, int]:
+    """Offset awal data tiap entri STORED (dihitung dari header lokal), untuk memeriksa keselarasan."""
+    out: dict[str, int] = {}
+    with zipfile.ZipFile(path) as zf, open(path, "rb") as fh:
+        for zi in zf.infolist():
+            if zi.compress_type != zipfile.ZIP_STORED:
+                continue
+            fh.seek(zi.header_offset)
+            hdr = fh.read(30)
+            n, m = struct.unpack("<HH", hdr[26:30])
+            out[zi.filename] = zi.header_offset + 30 + n + m
+    return out
+
+
+def find_keystores(root: str, skip: tuple[str, ...] = PRUNE) -> list[str]:
+    """Cari berkas keystore/kunci privat di bawah `root`. `cacerts` (trust store JKS publik milik Java) dikecualikan."""
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if os.path.join(dirpath, d) not in skip]
+        for name in filenames:
+            if name == "cacerts":
+                continue
+            if name.lower().endswith(KEY_EXT) or name in KEY_NAMES:
+                found.append(os.path.join(dirpath, name))
+    return found
+
+
+# ---------------------------------------------------------------- bagian-bagian
+def check_tools() -> None:
+    for label, cmd in (
+        ("java", ["java", "-version"]),
+        ("keytool", ["keytool", "-version"]),
+        ("apksigner", ["apksigner", "--version"]),
+        ("zipalign", ["zipalign"]),
+    ):
+        try:
+            out = run(cmd)
+            if label == "zipalign":
+                # zipalign tak punya --version; tanpa argumen ia mencetak usage dan keluar dengan kode != 0.
+                ok = "Zip alignment utility" in (out.stdout + out.stderr)
+                report(ok, label, first_line(out) + f" (paket Build-Tools {os.environ.get('BUILD_TOOLS_VERSION', '?')})")
+            elif label == "apksigner":
+                report(out.returncode == 0, label, f"{first_line(out)} (paket Build-Tools {os.environ.get('BUILD_TOOLS_VERSION', '?')})")
+            else:
+                report(out.returncode == 0, label, first_line(out))
+        except Exception as exc:  # noqa: BLE001
+            report(False, label, f"{type(exc).__name__}: {exc}")
+    try:
+        wrapper = open(shutil.which("apksigner") or "/usr/local/bin/apksigner").read()
+        missing = [f for f in ("--enable-native-access=ALL-UNNAMED", "-Xmx256m") if f not in wrapper]
+        report(not missing, "wrapper apksigner", "flag lengkap" if not missing else "tidak memuat: " + ", ".join(missing))
+    except OSError as exc:
+        report(False, "wrapper apksigner", str(exc))
+
+
+def check_isolation() -> None:
+    report(os.geteuid() != 0, "bukan root", f"uid={os.geteuid()}")
+
+    # Rootfs read-only dibaca dari opsi mount, BUKAN dengan mencoba menulis: user non-root memang tak boleh menulis ke /.
+    root_opts = None
+    with open("/proc/self/mountinfo") as fh:
+        for line in fh:
+            parts = line.split()
+            if len(parts) > 5 and parts[4] == "/":
+                root_opts = parts[5].split(",")
+                break
+    report(root_opts is not None and "ro" in root_opts, "rootfs read-only",
+           "mount / opsi: " + (",".join(root_opts) if root_opts else "tidak ditemukan"))
+
+    try:
+        probe = os.path.join(os.environ.get("HOME", "/tmp/home"), "probe")
+        os.makedirs(os.path.dirname(probe), exist_ok=True)
+        with open(probe, "w"):
+            pass
+        os.remove(probe)
+        report(True, "/tmp dapat ditulis", "tmpfs tersedia untuk kerja alat")
+    except OSError as exc:
+        report(False, "/tmp dapat ditulis", str(exc))
+
+    reachable = False
+    for host in ("1.1.1.1", "8.8.8.8"):
+        try:
+            with socket.create_connection((host, 443), timeout=3):
+                reachable = True
+                break
+        except OSError:
+            pass
+    report(not reachable, "jaringan terisolasi", "koneksi keluar gagal (benar)" if not reachable else "internet TERJANGKAU")
+
+    bad = sorted(k for k in os.environ if any(t in k.upper() for t in SECRET_ENV))
+    report(not bad, "environment tanpa rahasia", "tidak ada variabel bernuansa rahasia" if not bad else "ADA: " + ", ".join(bad))
+
+    keys = find_keystores("/")
+    report(not keys, "tidak ada keystore/kunci di image", "tidak ada" if not keys else "DITEMUKAN: " + ", ".join(keys[:5]))
+    leftovers = [p for p in ("/run/secrets", "/data") if os.path.exists(p) and (not os.path.isdir(p) or os.listdir(p))]
+    report(not leftovers, "tanpa /run/secrets dan /data berisi", "tidak ada" if not leftovers else "ADA: " + ", ".join(leftovers))
+
+
+def check_toolchain() -> None:
+    base = os.environ.get("HOME", "/tmp/home")
+    os.makedirs(base, exist_ok=True)
+    work = tempfile.mkdtemp(prefix="selftest-", dir=base)
+    try:
+        _toolchain(work)
+    except Exception as exc:  # noqa: BLE001
+        report(False, "rantai tanda tangan", f"{type(exc).__name__}: {exc}")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    report(not os.path.exists(work), "keystore sementara terhapus", "direktori kerja dihapus" if not os.path.exists(work) else work)
+
+
+def _toolchain(work: str) -> None:
+    def p(n: str) -> str:
+        return os.path.join(work, n)
+
+    pw = secrets.token_urlsafe(24)
+    env = {**os.environ, "SELFTEST_PW": pw, "HOME": work}
+
+    # Keystore sementara (PKCS12, RSA 2048, berlaku 2 hari). Kata sandi hanya lewat ENV, tak pernah di argv.
+    out = run(["keytool", "-genkeypair", "-keystore", p("ks.p12"), "-storetype", "PKCS12", "-alias", "selftest",
+               "-keyalg", "RSA", "-keysize", "2048", "-validity", "2", "-dname", "CN=signer-selftest",
+               "-storepass:env", "SELFTEST_PW", "-keypass:env", "SELFTEST_PW",
+               f"-J-Duser.home={work}", "-J-Xmx128m"], env=env)
+    report(out.returncode == 0 and os.path.exists(p("ks.p12")), "keytool membuat keystore sementara", "PKCS12 RSA-2048, kata sandi acak lewat ENV" if out.returncode == 0 else tail(out, 1))
+    if out.returncode != 0:
+        return
+
+    # zipalign: kontrol positif. ZIP tak selaras HARUS ditolak -c, lalu diperbaiki -f.
+    make_test_apk(p("misaligned.apk"), misaligned=True)
+    odd = [n for n, off in stored_data_offsets(p("misaligned.apk")).items() if off % 4]
+    chk = run(["zipalign", "-c", "-P", "16", "4", p("misaligned.apk")])
+    report(bool(odd) and chk.returncode != 0, "zipalign -c menolak ZIP tak selaras", f"entri ganjil: {len(odd)}; kode {chk.returncode}")
+    fix = run(["zipalign", "-P", "16", "-f", "4", p("misaligned.apk"), p("fixed.apk")])
+    chk = run(["zipalign", "-c", "-P", "16", "4", p("fixed.apk")])
+    report(fix.returncode == 0 and chk.returncode == 0, "zipalign -f memperbaiki, -c lulus", f"kode {fix.returncode}/{chk.returncode}")
+
+    # Rantai utama: zipalign -> sign -> verify. minSdk 24 supaya apksigner tidak mem-parse manifest sintetis (bukan AXML);
+    # konsekuensinya tanda tangan v1 tidak dibuat, jadi yang dinilai v2 dan v3 (cukup untuk API 24+).
+    make_test_apk(p("in.apk"))
+    out = run(["zipalign", "-P", "16", "-f", "4", p("in.apk"), p("aligned.apk")])
+    chk = run(["zipalign", "-c", "-P", "16", "4", p("aligned.apk")])
+    report(out.returncode == 0 and chk.returncode == 0, "zipalign APK uji", f"kode {out.returncode}/{chk.returncode}")
+
+    out = run(["apksigner", "sign", "--ks", p("ks.p12"), "--ks-key-alias", "selftest", "--ks-pass", "env:SELFTEST_PW",
+               "--key-pass", "env:SELFTEST_PW", "--min-sdk-version", "24", "--out", p("signed.apk"), p("aligned.apk")], env=env)
+    report(out.returncode == 0 and os.path.exists(p("signed.apk")), "apksigner sign", tail(out, 1) if out.returncode else "signed.apk dibuat")
+    if out.returncode != 0:
+        return
+
+    ver = run(["apksigner", "verify", "--verbose", "--print-certs", "--min-sdk-version", "24", p("signed.apk")])
+    text = ver.stdout + ver.stderr
+    v2 = re.search(r"APK Signature Scheme v2\): true", text) is not None
+    v3 = re.search(r"APK Signature Scheme v3\): true", text) is not None
+    report(ver.returncode == 0 and v2 and v3 and "CN=signer-selftest" in text, "apksigner verify lulus (v2 dan v3)",
+           f"kode {ver.returncode}; v2={v2} v3={v3}")
+
+    # Tes negatif: keduanya HARUS ditolak. Dilaporkan OK hanya bila benar-benar ditolak.
+    neg = run(["apksigner", "verify", "--min-sdk-version", "24", p("aligned.apk")])
+    rejected = neg.returncode != 0 and "DOES NOT VERIFY" in (neg.stdout + neg.stderr)
+    report(rejected, "negatif: APK tanpa tanda tangan ditolak", f"kode {neg.returncode}; " + tail(neg, 1))
+
+    tamper(p("signed.apk"), p("tampered.apk"))
+    neg = run(["apksigner", "verify", "--min-sdk-version", "24", p("tampered.apk")])
+    rejected = neg.returncode != 0 and "DOES NOT VERIFY" in (neg.stdout + neg.stderr)
+    report(rejected, "negatif: APK yang dirusak setelah ditandatangani ditolak", f"kode {neg.returncode}; " + tail(neg, 1))
+
+
+def main(argv: list[str] | None = None) -> int:
+    global failed
+    failed = False
+    args = sys.argv[1:] if argv is None else argv
+    toolchain_only = "--toolchain-only" in args
+    os.makedirs(os.environ.get("HOME", "/tmp/home"), exist_ok=True)
+
+    check_tools()
+    if toolchain_only:
+        info("bagian isolasi kontainer DILEWATI", "--toolchain-only")
+    else:
+        check_isolation()
+    check_toolchain()
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
