@@ -9,8 +9,17 @@ cd "$(dirname "$0")/.."
 COMPOSE="${COMPOSE:-docker compose}"
 
 # Pra-periksa: --profile hanya ada di Docker Compose v2. Tanpa itu layanan signer (profil `build`) tidak dikenali.
-if ! $COMPOSE --profile build config --services 2>/dev/null | grep -qx signer; then
-  echo "✗ Compose Anda tidak mendukung --profile (butuh Docker Compose v2) atau layanan signer tidak ada di docker-compose.yml."
+# Galat `config` ditampilkan apa adanya (mis. .env belum ada -> variabel wajib kosong), bukan disembunyikan.
+cfg_err="$(mktemp)"
+if ! services="$($COMPOSE --profile build config --services 2>"$cfg_err")"; then
+  echo "✗ '$COMPOSE --profile build config --services' gagal:"; sed 's/^/    /' "$cfg_err"; rm -f "$cfg_err"
+  echo "  Bila pesannya soal variabel wajib kosong (APP_DOMAIN/SECRET_KEY/...), jalankan 'make init' dulu."
+  echo "  Bila Compose tidak mengenal --profile, pasang Docker Compose v2."
+  exit 1
+fi
+rm -f "$cfg_err"
+if ! grep -qx signer <<<"$services"; then
+  echo "✗ layanan signer tidak ada di docker-compose.yml (atau Compose Anda tidak mendukung --profile: butuh Docker Compose v2)."
   echo "  Periksa: $COMPOSE version   dan   $COMPOSE --profile build config --services"
   exit 1
 fi

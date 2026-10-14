@@ -44,7 +44,7 @@ scripts/init.sh           Penyiapan .env dan secrets/
 ```
 
 ## Alat & versi terkunci
-Semua dipin dengan SHA-256 di Dockerfile dan diverifikasi saat build. Rincian (sumber, hash, lokasi, cara menaikkan versi): [docs/deploy.md](docs/deploy.md#alat-build--tanda-tangan-apk-b-1b). Cek di server: `make tools-check`.
+apktool, jadx, dan Build-Tools (zipalign + apksigner) dipin dengan SHA-256 di Dockerfile dan diverifikasi saat build. JRE (apt Debian trixie) dan image dasar `python:3.12-slim-trixie` TIDAK dipin per-hash/digest (praktik yang sudah ada; lihat docs/deploy.md). Rincian (sumber, hash, lokasi, cara menaikkan versi): [docs/deploy.md](docs/deploy.md#alat-build--tanda-tangan-apk-b-1b). Cek di server: `make tools-check`.
 
 | Alat | Versi terkunci | Image |
 |------|----------------|-------|
