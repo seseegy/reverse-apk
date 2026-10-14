@@ -21,7 +21,7 @@ make doctor      # periksa kesehatan
 Panduan lengkap untuk VPS: [docs/deploy.md](docs/deploy.md).
 
 ## Perintah
-`make help` menampilkan semuanya: `init`, `password`, `up`, `down`, `restart`, `logs`, `ps`, `update`, `runner-selftest`, `bench-selftest`, `net-check` (shell AI dan jaringannya, lihat `.env.example`), `doctor`, `test`.
+`make help` menampilkan semuanya: `init`, `password`, `up`, `down`, `restart`, `logs`, `ps`, `update`, `runner-selftest`, `signer-selftest`, `tools-check` (tabel versi alat build), `bench-selftest`, `net-check` (shell AI dan jaringannya, lihat `.env.example`), `doctor`, `test`.
 
 Tes (tanpa Docker): `pip install -r services/web/requirements.txt -r tests/requirements.txt` lalu `make test`. CI menjalankannya di setiap PR.
 
@@ -35,6 +35,7 @@ deploy/Caddyfile          HTTPS otomatis + reverse proxy (batas body upload hany
 services/web              FastAPI + Jinja (login, dashboard, upload, detail analisis, SSE)
 services/worker           Worker RQ: orkestrasi pipeline, ringkasan manifest, pemulihan setelah restart
 services/runner           jadx + apktool; TANPA jaringan, read-only, non-root; menerima job lewat spool berkas
+services/signer           zipalign + apksigner (Build-Tools dipin SHA-256); HANYA toolchain + selftest, profil Compose `build` (belum ada daemon/keystore)
 services/runner/analyzer  Analisis statis (indeks FTS5, deteksi secret/kripto/jaringan, sertifikat) — berjalan di runner
 services/rvcore           Kode bersama (skema SQLite, protokol spool, utilitas berkas); hanya stdlib
 design-system/            Token & aturan visual (UI/UX Pro Max)
@@ -42,12 +43,23 @@ docs/prd/                 Dokumen kebutuhan produk per bagian
 scripts/init.sh           Penyiapan .env dan secrets/
 ```
 
+## Alat & versi terkunci
+apktool, jadx, dan Build-Tools (zipalign + apksigner) dipin dengan SHA-256 di Dockerfile dan diverifikasi saat build. JRE (apt Debian trixie) dan image dasar `python:3.12-slim-trixie` TIDAK dipin per-hash/digest (praktik yang sudah ada; lihat docs/deploy.md). Rincian (sumber, hash, lokasi, cara menaikkan versi): [docs/deploy.md](docs/deploy.md#alat-build--tanda-tangan-apk-b-1b). Cek di server: `make tools-check`.
+
+| Alat | Versi terkunci | Image |
+|------|----------------|-------|
+| apktool (aapt2 dibundel di dalam jar) | 3.0.3 | runner |
+| jadx | 1.5.6 | runner |
+| Android SDK Build-Tools (`zipalign`, `apksigner`) | 37.0.0 | signer |
+| OpenJDK JRE (headless, termasuk `keytool`) | 21 (apt Debian trixie) | runner, signer |
+
 ## Keamanan singkat
 - Semua layanan berjalan non-root, `cap_drop: ALL`, `no-new-privileges`, rootfs read-only.
 - Redis dan worker berada di jaringan `internal` (tanpa rute ke internet); hanya Caddy mempublikasikan port.
 - Login: argon2id, sesi bertanda tangan (cookie `__Host-`, HttpOnly, SameSite=Strict), CSRF, pembatas percobaan per IP.
 - Header CSP ketat, tanpa skrip/gaya inline, font di-host sendiri (tanpa permintaan ke pihak ketiga).
 - Image `runner` memverifikasi SHA-256 jadx dan apktool saat build; APK tidak pernah dieksekusi.
+- Image `signer` memverifikasi SHA-256 Android Build-Tools saat build. Pada tahap ini: tanpa jaringan, tanpa keystore, tanpa volume, dan mati secara bawaan (profil `build`).
 - Hanya runner yang mem-parsing APK. Runner **tanpa jaringan, tanpa Redis/DB, tanpa Docker socket**; APK dimount read-only.
   Timeout, pembatalan, dan batas ukuran keluaran dipaksakan dengan mematikan seluruh process group tool.
 - Upload: streaming ke disk (tidak ke RAM), validasi struktur ZIP tanpa dekompresi (rasio, jumlah entri, path traversal,

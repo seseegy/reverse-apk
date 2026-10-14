@@ -1,6 +1,6 @@
 # 09 — Paket multi-APK & bengkel modifikasi
 
-> **Status: Bagian A (XAPK/APKS) dan Bagian C (shell AI) SEBAGIAN SUDAH ADA; Bagian B (membangun & menandatangani APK) masih RENCANA, belum ada kode.** Shell AI (PR C, lihat "Status PR C") **mati secara bawaan** dan sengaja lebih sempit dari rancangan: tanpa build/tanda tangan, tanpa `bench_diff`/`request_build`/`get_build_status`, dan tanpa `apktool`/`jadx` di dalam `bench`. Selama Bagian B belum dikerjakan, tidak ada penulisan APK dan tidak ada tanda tangan.
+> **Status: Bagian A (XAPK/APKS) dan Bagian C (shell AI) SEBAGIAN SUDAH ADA; Bagian B (membangun & menandatangani APK) masih RENCANA, belum ada kode.** Shell AI (PR C, lihat "Status PR C") **mati secara bawaan** dan sengaja lebih sempit dari rancangan: tanpa build/tanda tangan, tanpa `bench_diff`/`request_build`/`get_build_status`, dan tanpa `apktool`/`jadx` di dalam `bench`. Selama Bagian B belum dikerjakan, tidak ada penulisan APK dan tidak ada tanda tangan. **Sub-paket B-1b (toolchain) SUDAH ada**: image `signer` (Build-Tools 37.0.0 dipin SHA-256, profil Compose `build`, mati secara bawaan) + `signer-selftest` + `make tools-check`; BELUM ada daemon, keystore, tahap `build`, persetujuan, maupun UI (lihat "Status paket B-1b").
 
 ## Tujuan
 Dua kemampuan baru, dikerjakan terpisah supaya risikonya terkendali:
@@ -191,7 +191,7 @@ Modifikasi hanya untuk APK yang **milik pengguna atau yang pengguna berwenang me
 | PR | Isi | Selesai bila |
 |---|---|---|
 | **A** | Bagian A lengkap: `rvcore/apkcheck.py`, jenis berkas, tahap `unpack`/`merge`, APKEditor di image runner, UI daftar bagian, tes (paket sintetis dari `scripts/make-test-apks.py`) | `.xapk/.apks/.apkm` sampel dianalisis penuh; zip bomb dan path traversal di dalam paket ditolak; `.aab` terbuka lewat jadx; seluruh tes lama tetap lulus |
-| **B** | Build + tanda tangan **tanpa AI**: ruang kerja, diff, persetujuan, tahap `build`, layanan `signer`, `make init` membuat keystore, unduhan, audit | APK sampel diubah manual (mis. mengganti string), disetujui, dibangun, `apksigner verify` lulus, dan `aapt2 dump badging` benar; tanpa persetujuan tidak ada job |
+| **B** | (sub-paket **B-1b**, hanya toolchain: SELESAI di kode, uji Docker menunggu VPS) Build + tanda tangan **tanpa AI**: ruang kerja, diff, persetujuan, tahap `build`, layanan `signer`, `make init` membuat keystore, unduhan, audit | APK sampel diubah manual (mis. mengganti string), disetujui, dibangun, `apksigner verify` lulus, dan `aapt2 dump badging` benar; tanpa persetujuan tidak ada job |
 | **C** | `bench` + `benchspool` + tool AI (`shell_run`, `bench_diff`, `request_build`, `get_build_status`) + keputusan isolasi antar analisis + pembaruan 00/05/07 | skenario uji: AI mengubah satu string di smali, mengajukan build, pengguna menyetujui, hasil terverifikasi; **tes injeksi**: APK dengan teks yang menyuruh AI membaca `/data`, mengakses jaringan, atau menyetujui sendiri **gagal** melakukannya |
 | **D** | (P2) antarmuka ruang kerja untuk pengguna, "paket format asal" (FR-9.17b) bila belum masuk A–C | — |
 
@@ -238,7 +238,8 @@ VPS: kernel `6.8.0-146-generic` x86_64, Docker `29.9.0`, profil `apparmor` + `se
 ### Temuan alat
 - **jadx** mencantumkan `.aab`, `.xapk`, `.apkm`, `.apks` sebagai masukan yang didukung (README cabang utama). Artinya analisis kode dapat berjalan **tanpa** menggabung dulu; penggabungan tetap dibutuhkan untuk apktool (tab Manifes) dan untuk modifikasi. Versi yang dipin (1.5.6) belum dicocokkan dengan README itu; dibuktikan dengan sampel nyata di PR A.
 - **Sampel dari pemilik (12 Okt 2026)**: `sample.xapk/.apks/.apkm/.aab` ternyata **placeholder** (isi `AndroidManifest.xml` berupa teks "PLACEHOLDER", `classes.dex` 40 byte, `toc.pb` berisi teks). Strukturnya benar dan berguna untuk **tes pendeteksi jenis** (nama berkas dan kolom `manifest.json` / `info.json`), tetapi **tidak bisa** dibuka apktool/jadx/APKEditor, jadi tidak membuktikan gabung atau dekompilasi. Sampel nyata tetap dibutuhkan.
-- **`apksigner` / `zipalign`** dari Android SDK Build-Tools (terbaru 37.0.0, zip Linux ±66 MB). Google menerbitkan **hanya SHA-1** untuk paket ini; maka SHA-256 dihitung sendiri saat pertama diunduh, dipin di Dockerfile, dan SHA-1 Google dipakai sebagai pembanding.
+- **`apksigner` / `zipalign`** dari Android SDK Build-Tools (terbaru 37.0.0, zip Linux ±66 MB). Google menerbitkan **hanya SHA-1** untuk paket ini; maka SHA-256 dihitung sendiri saat pertama diunduh, dipin di Dockerfile, dan SHA-1 Google dipakai sebagai pembanding. Dipin: SHA-256 `01af179347cbcd9c208b7f8171f7b21f6dd1d2f85bcd15e88caa51d5d7b86060` (SHA-1 Google `70954e99f4c3d9d46ee70fa32624672fe7cd6ebe` cocok).
+- Dari zip itu hanya **3 berkas** yang dipakai (±3 MB): `zipalign`, `lib/apksigner.jar`, dan `lib64/libc++.so`. `zipalign` memuat `libc++.so` lewat RUNPATH (`$ORIGIN/lib64`), jadi keduanya harus berdampingan. **aapt2 sudah dibundel di dalam jar apktool 3.0.3** (`prebuilt/linux/aapt2`) sehingga tidak dipasang terpisah; `apktool b` terbukti jalan offline di sandbox (`unshare -n`, bukan di kontainer runner; pembuktian di kontainer = `make runner-selftest` di VPS).
 - Dokumentasi Google menegaskan `zipalign` dijalankan **sebelum** `apksigner` (menandatangani lalu mengubah berkas membatalkan tanda tangan) → sudah di FR-9.22.
 
 ## Status PR A (12 Okt 2026): XAPK dan APKS
@@ -393,5 +394,22 @@ Rekomendasi: daftar host spesifik; `*` hanya untuk API milik sendiri atau yang A
 - [DIPUTUSKAN] Isolasi antar analisis di `bench`: **Landlock (opsi 2)**, berdasarkan `scripts/bench-probe.sh` di VPS (lihat Status PR A). [OPEN] diuji ulang dengan pengaturan kontainer `bench` yang sebenarnya.
 - [DIPUTUSKAN] Batas unggah hingga **1 GB**. [OPEN] nilai akhir batas lain yang ikut terdampak (tabel "Batas ukuran"), ditentukan dengan pengukuran APK besar sungguhan.
 - [SEBAGIAN TERBUKTI] jadx 1.5.6 membuka `.xapk` langsung (XAPK nyata, 32 dtk) dan APKEditor menggabungkannya, tetapi **dipakai** hanya base asli (lihat Status PR A). `.apkm` dan `.aab` belum terbukti; butuh sampel nyata.
-- [OPEN] Versi pasti Build-Tools yang dipin (kandidat: 37.0.0) dan uji bahwa `zipalign`/`apksigner` berjalan di image `python:3.12-slim-trixie` (pustaka sistem yang dibutuhkan biner bawaan Google).
+- [DIPUTUSKAN] Build-Tools **37.0.0** (stabil terbaru; `37.0.0-rc*` preview). Kebutuhan glibc terukur dengan `objdump -T` di sandbox: `zipalign` GLIBC_2.14 dan `libc++.so` GLIBC_2.17 (aapt2 di dalam jar apktool terhubung statis, tanpa kebutuhan glibc), sementara image trixie memakai glibc 2.41 (angka dari rencana, belum diukur di image). [OPEN] uji di Docker nyata: `docker compose --profile build build signer && make signer-selftest` di VPS.
 - [OPEN] Apakah "paket format asal" (FR-9.17b) cukup bernilai untuk dikerjakan, atau cukup `merged.apk`. Dinilai setelah PR B.
+
+## Status paket B-1b (14 Okt 2026): toolchain penanda tangan
+
+**Sudah ada (HANYA penyediaan alat):**
+- `services/signer/Dockerfile`: `python:3.12-slim-trixie` + `openjdk-21-jre-headless` + `zipalign` dan `apksigner` dari Build-Tools 37.0.0 resmi Google, SHA-256 dipin dan diverifikasi (`sha256sum -c`) SEBELUM ekstraksi. Tanpa keystore di image, user uid 10001.
+- `services/signer/signer-selftest` (`make signer-selftest`): keystore SEMENTARA → `zipalign` → `apksigner sign` → `apksigner verify` (v2 dan v3), tes negatif (tanpa tanda tangan; dirusak setelah ditandatangani), dan bukti isolasi kontainer.
+- Layanan `signer` di compose: `network_mode: none`, `read_only`, `cap_drop: ALL`, tanpa volume dan tanpa secrets, profil `build` (tidak ikut `make up`).
+- `make tools-check`: tabel versi java/apktool/jadx/keytool/zipalign/apksigner dari image runner dan signer. `runner-selftest` kini juga memeriksa `keytool` dan bahwa `apktool b` membangun proyek smali minimal OFFLINE.
+
+**Belum ada (sengaja):** `signer-daemon`, pembuatan/penyimpanan keystore (menunggu keputusan pemilik soal jenis kunci), tahap `build` di runner/worker, migrasi DB, persetujuan, tool AI, UI.
+
+**Keputusan:** Build-Tools resmi Google + pin SHA-256, bukan paket apt `apksigner` (35.0.2, lebih tua; bergantung pada `default-jre | javaN-runtime` sehingga kemungkinan menarik JRE non-headless: dugaan dari metadata, belum diuji). Rantai alat tetap `apktool b` → `zipalign -P 16 -f 4` → `apksigner sign` → `apksigner verify`.
+
+**Terbukti di sandbox (tanpa Docker):** hash SHA-256/SHA-1 dan penolakan hash salah; ekstraksi 3 berkas dan `libc++.so` ditemukan via RUNPATH (kontrol negatif: dipindah → `zipalign` gagal); `signer-selftest --toolchain-only` hijau dan mutasi alat tertangkap; rantai penuh `apktool b` (offline) → `zipalign` → `sign` → `verify` v2/v3 `true`; APK tanpa tanda tangan dan APK yang dirusak → `DOES NOT VERIFY`. Java sandbox 25 dan 21.0.2 (image: 21).
+**Belum diuji (butuh Docker di VPS):** `docker build` image signer (apt, guard `ldd` di trixie, ukuran image), bagian isolasi kontainer pada `signer-selftest`, `docker compose --profile build`, `make tools-check` penuh, heap `-Xmx256m` untuk APK besar.
+
+**Langkah untuk pemilik:** lihat "Alat build & tanda tangan APK (B-1b)" di `docs/deploy.md`; keputusan jenis kunci keystore diperlukan sebelum B-1c.

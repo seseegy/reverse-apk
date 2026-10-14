@@ -2,7 +2,7 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 COMPOSE ?= docker compose
 
-.PHONY: help init password up down restart logs ps update runner-selftest bench-selftest net-check ai-check env-check doctor test
+.PHONY: help init password up down restart logs ps update runner-selftest signer-selftest tools-check bench-selftest net-check ai-check env-check doctor test
 
 help: ## Tampilkan daftar perintah
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[32m%-16s\033[0m %s\n", $$1, $$2}'
@@ -46,6 +46,13 @@ update: ## Ambil kode terbaru lalu build ulang
 runner-selftest: ## Uji runner: alat benar-benar bisa bekerja + bukti isolasi (jaringan, rootfs, non-root)
 	$(COMPOSE) build runner
 	$(COMPOSE) run --rm --no-deps runner runner-selftest
+
+signer-selftest: ## Uji signer: zipalign + apksigner (keystore sementara -> sign -> verify, tes negatif) + bukti isolasi dari dalam kontainer (profil `build`, tidak ikut `make up`)
+	$(COMPOSE) --profile build build signer
+	$(COMPOSE) --profile build run --rm --no-deps signer signer-selftest
+
+tools-check: ## Tabel versi semua alat build (java, apktool, jadx, keytool, zipalign, apksigner) dari image runner & signer, dibandingkan dengan pin
+	@COMPOSE="$(COMPOSE)" ./scripts/tools-check.sh
 
 bench-selftest: ## Uji bench: BUKTI isolasi shell AI dari dalam kontainer (jalankan SEBELUM AI_SHELL_ENABLED=1; bila AI_SHELL_NET_ALLOW terisi, juga bukti jaringan)
 	$(COMPOSE) build bench egress

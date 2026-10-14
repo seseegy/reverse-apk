@@ -101,6 +101,53 @@ dijalankan aplikasi. Butuh analisis statis selesai (agar pencarian tersedia). Ek
 **Privasi:** potongan kode APK yang Anda tanyakan dikirim ke provider (dan model di belakangnya). Secret diredaksi lebih dulu.
 Kunci hanya dibaca service `web`; tidak pernah dikirim ke browser, worker, atau runner, dan tidak dicatat di log.
 
+## Alat build & tanda tangan APK (B-1b)
+Paket ini HANYA menyediakan alat di server; **belum ada** daemon penanda tangan, keystore, tahap `build`, maupun UI. Layanan `signer` memakai profil Compose `build`,
+jadi `make up` / `docker compose up` **tidak** menjalankannya dan RAM tidak bertambah sampai fitur build dipakai.
+
+**Memasang / memperbarui di VPS** (butuh Docker Compose v2 untuk `--profile`):
+```bash
+git pull --ff-only
+docker compose --profile build build signer   # unduh Build-Tools, verifikasi SHA-256 (build GAGAL bila hash tidak cocok)
+make signer-selftest                          # semua baris harus [OK ]
+make tools-check                              # tabel versi java/apktool/jadx/keytool/zipalign/apksigner dari image runner & signer
+make runner-selftest                          # kini juga membuktikan `apktool b` jalan OFFLINE di kontainer runner
+```
+`signer-selftest` membuat keystore SEMENTARA di `/tmp` (dihapus di akhir; tidak pernah disimpan), lalu: `zipalign` → `apksigner sign` → `apksigner verify` (v2 dan v3 harus `true`),
+tes negatif (APK tanpa tanda tangan dan APK yang dirusak setelah ditandatangani HARUS ditolak), serta bukti isolasi dari dalam kontainer (bukan root, rootfs read-only, tanpa jaringan, tanpa keystore/rahasia di image).
+Kirim keluaran bila ada `[GAGAL]`.
+
+**Perkiraan sumber daya** (belum diukur di VPS; isi kolom "ukur" setelah `docker images`):
+| Hal | Perkiraan | Ukur di VPS |
+|-----|-----------|-------------|
+| Berkas Build-Tools yang disalin ke image | 2.983.423 byte (zipalign 256.480 + apksigner.jar 1.181.416 + libc++.so 1.545.448), terukur; zip unduhan ±66 MB dibuang di layer yang sama | – |
+| `openjdk-21-jre-headless` | ≈ 199 MB terpasang (amd64, menurut packages.debian.org; bukan diukur di sini) | `docker images` |
+| Image `signer` | image dasar + JRE + ±3 MB | `docker images \| grep signer` |
+| RAM | `mem_limit: 512m` **hanya saat profil `build` dipakai**. Jumlah `mem_limit` layanan lain saat ini 5.952 MB → 6.464 MB bila signer ikut berjalan | `docker stats` |
+
+**Alat & versi terkunci** (sumber kebenaran: `ARG` di Dockerfile; tes `tests/test_signer_toolchain.py` memastikan tabel ini tidak menyimpang):
+| Alat | Versi | Sumber | Pin hash | Lokasi di image |
+|------|-------|--------|----------|-----------------|
+| apktool | 3.0.3 | github.com/iBotPeaches/Apktool/releases (v3.0.3) | SHA-256 `dbf930b076c6b9be08d57c449cacefc3bdd6b71ebd59b3066fc0e1f5b14f9423` | runner: `/opt/apktool/apktool.jar`, wrapper `/usr/local/bin/apktool` |
+| aapt2 | dibundel di dalam jar apktool 3.0.3 (`prebuilt/linux/aapt2`) | – | ikut hash apktool | tidak dipasang terpisah |
+| jadx | 1.5.6 | github.com/skylot/jadx/releases (v1.5.6) | SHA-256 `545ea2be9c242511bc145755cf4bda2485ade42966e096f8b4d3da2a230e8974` | runner: `/opt/jadx`, symlink `/usr/local/bin/jadx` |
+| Android SDK Build-Tools (`zipalign` + `apksigner`) | 37.0.0 (stabil; `37.0.0-rc*` adalah preview) | dl.google.com/android/repository/build-tools_r37_linux.zip (`repository2-3.xml`) | SHA-256 zip `01af179347cbcd9c208b7f8171f7b21f6dd1d2f85bcd15e88caa51d5d7b86060` (dihitung sendiri); SHA-1 Google `70954e99f4c3d9d46ee70fa32624672fe7cd6ebe` | signer: `/opt/build-tools/{zipalign,apksigner.jar,lib64/libc++.so}`, symlink `/usr/local/bin/zipalign`, wrapper `/usr/local/bin/apksigner` |
+| JRE (+ `keytool`) | `openjdk-21-jre-headless` dari apt Debian trixie | repositori Debian (versi mengikuti image dasar) | tidak dipin per-hash (praktik yang sudah ada) | runner dan signer |
+| Image dasar | `python:3.12-slim-trixie` | Docker Hub | tidak dipin per-digest (praktik yang sudah ada) | semua image Python |
+
+**Mengapa bukan paket apt `apksigner`/`zipalign`?** Debian trixie hanya punya `apksigner` 35.0.2-1 dan `zipalign` 1:10.0.0+r36-1.1 (lebih tua dari 37.0.0), dan `apksigner` bergantung pada `default-jre | javaN-runtime`:
+menurut packages.debian.org, alternatif itu dipenuhi `default-jre`/`openjdk-21-jre` (bukan varian `-headless`), sehingga apt kemungkinan menarik JRE non-headless yang besar. Ini **dugaan dari metadata paket**, belum diuji dengan `apt` (tidak ada di sandbox pengembangan).
+Build-Tools resmi Google dengan hash terkunci lebih baru dan hasilnya dapat diperiksa.
+
+**Menaikkan versi:** ubah `ARG` + hash di Dockerfile terkait; untuk Build-Tools hitung SHA-256 sendiri dari unduhan, cocokkan SHA-1-nya dengan `repository2-3.xml` (abaikan paket ber-`<preview>`), lalu perbarui tabel di atas dan di README. Tes akan gagal bila lupa.
+Pemeriksaan stabil terakhir (14 Okt 2026): apktool v3.0.3 dan jadx v1.5.6 sudah rilis stabil terbaru (tidak ada selisih), Build-Tools 37.0.0 stabil terbaru.
+
+**Risiko yang diketahui:** heap `apksigner` dibatasi `-Xmx256m` di wrapper; belum diukur untuk APK ratusan MB (diukur di paket B-1c; batas kontainer 512 MB).
+`--enable-native-access=ALL-UNNAMED` di wrapper mencegah peringatan conscrypt pada JDK baru.
+
+**Pemecahan masalah:** `libc++.so: cannot open shared object file` → `libc++.so` harus berdampingan di `/opt/build-tools/lib64/` (RUNPATH `$ORIGIN/lib64`). Jangan percaya `ldd /usr/local/bin/zipalign`
+(symlink) yang selalu melaporkan `not found`; periksa `ldd /opt/build-tools/zipalign` atau jalankan `zipalign` langsung. `unknown flag: --profile` → Compose terlalu lama (butuh v2).
+
 ## Upload besar dan Cloudflare
 Batas ukuran APK diatur `MAX_UPLOAD_MB` di `.env` (bawaan 200). Nilai yang sama dipakai aplikasi dan Caddy.
 Jika proxy Cloudflare (awan oranye) dinyalakan, paket gratis membatasi body request ~100 MB sehingga APK yang
