@@ -2,13 +2,19 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 COMPOSE ?= docker compose
 
-.PHONY: help init password up down restart logs ps update runner-selftest signer-selftest tools-check bench-selftest net-check ai-check env-check doctor test
+.PHONY: help init keystore keystore-info password up down restart logs ps update runner-selftest signer-selftest tools-check bench-selftest net-check ai-check env-check doctor test
 
 help: ## Tampilkan daftar perintah
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[32m%-16s\033[0m %s\n", $$1, $$2}'
 
-init: ## Buat .env (rahasia acak) dan folder secrets/
+init: ## Buat .env (rahasia acak), folder secrets/, dan keystore penanda tangan (butuh Docker; membangun image signer bila perlu)
 	@./scripts/init.sh
+
+keystore: ## Buat keystore penanda tangan (secrets/signing_keystore.p12) bila belum ada; aman diulang, TIDAK PERNAH menimpa
+	@./scripts/keystore.sh create
+
+keystore-info: ## Cetak sidik jari SHA-256, DN, masa berlaku, algoritma keystore (tanpa kata sandi)
+	@./scripts/keystore.sh info
 
 password: ## Atur password admin (disimpan sebagai hash argon2id)
 	@test -f .env || { echo "Jalankan 'make init' dulu."; exit 1; }
@@ -80,6 +86,7 @@ doctor: ## Periksa konfigurasi dan kesehatan layanan
 	@! grep -q '=__GENERATE__' .env || { echo "✗ .env masih berisi __GENERATE__ (make init)"; exit 1; }
 	@echo "✓ .env terisi"
 	@test -s secrets/admin_password_hash && echo "✓ password admin sudah diatur" || { echo "✗ password admin belum diatur (make password)"; exit 1; }
+	@./scripts/keystore.sh status || true
 	@$(COMPOSE) config -q && echo "✓ docker-compose.yml valid"
 	@$(COMPOSE) ps
 	@set -a; . ./.env; set +a; \

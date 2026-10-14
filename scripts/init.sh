@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Menyiapkan .env (dengan rahasia acak) dan folder secrets/. Aman dijalankan berulang kali:
-# nilai yang sudah ada tidak ditimpa.
+# Menyiapkan .env (dengan rahasia acak), folder secrets/, dan keystore penanda tangan APK. Aman dijalankan berulang kali:
+# nilai yang sudah ada tidak ditimpa (keystore yang sudah ada TIDAK PERNAH dibuat ulang).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -40,4 +40,10 @@ chmod 700 secrets
 # File harus ada agar `docker compose` mau jalan; isinya diisi oleh `make password`.
 [ -f secrets/admin_password_hash ] || { : > secrets/admin_password_hash; chmod 644 secrets/admin_password_hash; }
 
+# Keystore dibuat lewat keytool di image `signer` (server tidak perlu JDK; butuh Docker). Gagal = init berhenti (gagal-tertutup); mengulang `make init` aman.
+./scripts/keystore.sh create
+
 echo "Selesai. Langkah berikut: make password"
+if [ -f secrets/signing_keystore.p12 ] && [ -f secrets/signing_keystore_pass ]; then
+  echo "⚠ INGAT: cadangkan secrets/signing_keystore.p12 DAN secrets/signing_keystore_pass di tempat aman. Kehilangan = kunci baru (aplikasi terpasang tidak bisa diperbarui)."
+fi
