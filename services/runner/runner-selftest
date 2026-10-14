@@ -6,6 +6,7 @@ Dijalankan lewat `make runner-selftest`, yang memakai opsi isolasi yang sama den
 """
 
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -30,6 +31,7 @@ os.makedirs(os.environ.get("HOME", "/tmp/home"), exist_ok=True)
 # 1. Alat terpasang dan bisa dijalankan
 for label, cmd in (
     ("java", ["java", "-version"]),
+    ("keytool", ["keytool", "-version"]),
     ("jadx", ["jadx", "--version"]),
     ("apktool", ["apktool", "--version"]),
 ):
@@ -104,4 +106,39 @@ for label, cmd in (
     except Exception as exc:  # noqa: BLE001
         report(False, label, f"{type(exc).__name__}: {exc}")
 
+# 6. Kelayakan build: `apktool b` membangun proyek smali minimal OFFLINE (kebutuhan B-1: AI memodifikasi lalu membangun ulang).
+#    aapt2 sudah dibundel di dalam jar apktool, jadi tidak ada alat lain yang dipasang. Bukti jaringan mati ada di pemeriksaan 4 di atas;
+#    di sini yang dibuktikan hanya bahwa build selesai di kontainer yang sama (tanpa jaringan, rootfs read-only, non-root).
+#    Proyek diturunkan dari scripts/sample-apk/build.py (APKTOOL_YML, smali_class) dan sengaja tanpa referensi @string/res.
+proj = os.path.join(work, "proj")
+os.makedirs(os.path.join(proj, "smali", "com", "example", "selftest"))
+with open(os.path.join(proj, "apktool.yml"), "w") as fh:
+    fh.write(f"version: {os.environ.get('APKTOOL_VERSION', '3.0.3')}\napkFileName: built.apk\nusesFramework:\n  ids:\n  - 1\n"
+             "sdkInfo:\n  minSdkVersion: 24\n  targetSdkVersion: 33\nversionInfo:\n  versionCode: 1\n  versionName: 1.0-selftest\n")
+with open(os.path.join(proj, "AndroidManifest.xml"), "w") as fh:
+    fh.write('<?xml version="1.0" encoding="utf-8" standalone="no"?>\n'
+             '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.selftest">\n'
+             '    <application android:allowBackup="false"/>\n</manifest>\n')
+with open(os.path.join(proj, "smali", "com", "example", "selftest", "Hello.smali"), "w") as fh:
+    fh.write(".class public Lcom/example/selftest/Hello;\n.super Ljava/lang/Object;\n\n"
+             ".method public constructor <init>()V\n    .locals 0\n"
+             "    invoke-direct {p0}, Ljava/lang/Object;-><init>()V\n    return-void\n.end method\n")
+built = os.path.join(work, "built.apk")
+try:
+    out = subprocess.run(["apktool", "b", proj, "-o", built], capture_output=True, text=True, timeout=180, env=tool_env, stdin=subprocess.DEVNULL)
+    text = out.stdout + out.stderr
+    bad = [e for e in ENV_ERRORS if e in text]
+    report(out.returncode == 0 and not bad, "apktool b dapat membangun proyek smali minimal OFFLINE",
+           "build selesai tanpa galat lingkungan" if out.returncode == 0 and not bad else f"kode {out.returncode}: " + " | ".join(text.strip().splitlines()[-3:]))
+    ok_zip, names, magic = False, [], b""
+    if os.path.exists(built):
+        with zipfile.ZipFile(built) as zf:
+            ok_zip, names = zf.testzip() is None, zf.namelist()
+            magic = zf.read("classes.dex")[:4] if "classes.dex" in names else b""
+    report(ok_zip and "AndroidManifest.xml" in names and magic == b"dex\n", "hasil build adalah APK utuh",
+           "ZIP valid, AndroidManifest.xml dan classes.dex (magic dex) ada" if ok_zip and magic == b"dex\n" else f"zip_ok={ok_zip} entri={names[:5]} magic={magic!r}")
+except Exception as exc:  # noqa: BLE001
+    report(False, "apktool b dapat membangun proyek smali minimal OFFLINE", f"{type(exc).__name__}: {exc}")
+
+shutil.rmtree(work, ignore_errors=True)
 sys.exit(1 if failed else 0)
