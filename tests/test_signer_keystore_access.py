@@ -524,7 +524,8 @@ def test_deep_merge_keeps_every_hardening_key_of_the_signer_identical_to_base():
     for key in HARDENING:
         assert key in b, f"{key} tidak ada di base"
         assert m[key] == b[key], f"{key} berubah setelah digabung dengan berkas tambahan"
-    assert m["volumes"] == ["builds:/data/builds", "signspool:/data/signspool"] and len(m["volumes"]) == 2
+    # 2b (sadar): + signwork, ruang kerja privat signer (penutupan R3/R10); berkas tambahan keystore tidak menyentuh daftar volume.
+    assert m["volumes"] == ["builds:/data/builds", "signspool:/data/signspool", "signwork:/data/signwork"] and len(m["volumes"]) == 3
     assert m["tmpfs"] == ["/tmp:rw,size=256m,nosuid"]
     assert m["secrets"] == ["signing_keystore", "signing_keystore_pass"] and "secrets" not in b
     assert list(m["labels"]) == ["reverse-apk.keystore-stamp"]

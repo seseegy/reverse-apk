@@ -5,11 +5,15 @@ Isolasi (ditegakkan oleh docker-compose.yml): network_mode none, non-root (uid 1
 memori/CPU/PID. Kunci hanya ada di /run/secrets (dibaca-saja); kata sandi TIDAK PERNAH ada di argv, env, stdin, log, maupun hasil: alat membaca
 berkasnya sendiri (`--ks-pass file:`) dan daemon hanya memeriksa bentuknya.
 
-Urutan satu job (lihat plan.md 5.3; menimpa design.md 5.2 sesuai ADENDUM):
-  claim -> validasi ketat -> status kunci -> buka unsigned.apk aman (dir_fd + O_NOFOLLOW|O_NONBLOCK) -> BERSIHKAN SISA -> cek disk
-  -> zipalign (+ -c) -> apksigner sign -> apksigner verify (sertifikat HARUS == keystore pemilik) -> hash + os.replace atomik ke signed.apk
-  -> pembersihan -> Spool.finish (3 percobaan; pembersihan SEBELUM finish agar disk penuh tidak membuat hasil hilang).
-`signed.apk` tidak pernah ada selain hasil yang lulus verifikasi dan pembandingan sertifikat.
+Urutan satu job (design.md 7.2 + adendum A-02; menutup R3/R10: runner yang menulis `builds` tidak boleh bisa menukar apa pun saat signer bekerja):
+  claim -> validasi ketat -> status kunci -> buka folder build lewat rantai dir_fd (O_NOFOLLOW) -> buka unsigned.apk SEKALI (O_NOFOLLOW|O_NONBLOCK, berkas biasa,
+  nlink==1) -> BERSIHKAN SISA -> cek disk dua volume -> SALIN dari fd yang SAMA ke ruang kerja PRIVAT `signwork/<job>/in.apk` sambil menghitung SHA-256
+  -> tolak `input_unsafe` bila hash salinan != `expect_sha256` (SEBELUM alat apa pun jalan) -> zipalign (+ -c) -> apksigner sign -> apksigner verify
+  (sertifikat HARUS == keystore pemilik), SEMUA di `signwork` (volume yang tidak dipasang ke runner) -> terbitkan ke folder build dengan cara tahan balapan
+  (`.sign-signed.tmp` dibuat O_CREAT|O_EXCL|O_NOFOLLOW lalu rename atomik ke signed.apk) -> BACA ULANG signed.apk dan cocokkan hash -> pembersihan -> Spool.finish
+  (3 percobaan; pembersihan SEBELUM finish agar disk penuh tidak membuat hasil hilang).
+`signed.apk` tidak pernah ada selain hasil yang lulus verifikasi dan pembandingan sertifikat; nama keluaran yang ditanam penyerang membuat job GAGAL
+(EEXIST), tidak pernah menimpa/mengikuti sasaran lain.
 
 Daya tahan: tiap alat berjalan di process group sendiri; tenggat, pembatalan, SIGTERM, dan batas keluaran mematikan SELURUH grup. Detak jantung
 (signer.hb) ditulis tiap 5 detik, juga saat keytool/alat berjalan lama. Tidak ada recycle: tak ada keadaan per-job yang tersisa.
@@ -21,6 +25,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import hmac
 import os
 import re
 import signal
@@ -32,7 +37,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
-from rvcore.fsutil import safe_rmtree
+from rvcore.fsutil import DIR_FLAGS, open_dir_chain, rmtree_at, safe_rmtree
 from rvcore.paths import Layout
 from rvcore.signkeys import ALIAS, OPEN_FLAGS, inspect_key_file, owner_fingerprint
 from rvcore.signkeys import ToolResult as KeyToolResult
@@ -82,7 +87,8 @@ CLOCK: Callable[[], float] = time.monotonic     # disuntik tes untuk pelambatan 
 STOP = threading.Event()
 
 UNSIGNED, SIGNED = "unsigned.apk", "signed.apk"
-TMP_ALIGNED, TMP_SIGNED = ".sign-aligned.tmp", ".sign-signed.tmp"
+TMP_ALIGNED, TMP_SIGNED = ".sign-aligned.tmp", ".sign-signed.tmp"          # TMP_SIGNED: perantara PENERBITAN di folder build
+W_IN, W_ALIGNED, W_SIGNED = "in.apk", "aligned.apk", "signed.apk"             # berkas di ruang kerja privat signwork/<job>/
 _KEY_STATES = ("stale", "unreadable", "missing", "invalid")      # urutan keparahan saat dua berkas bermasalah
 _ERROR_LINE = re.compile(r"(?i)(exception|error|fatal|failed|cannot|unable)")
 _SCHEME_RE = re.compile(r"^Verified using v(1|2|3) scheme \(.*\): (true|false)\s*$", re.M)
@@ -155,37 +161,39 @@ def map_tool_error(code: str, rc: int | None, text: str, extra: tuple[str, ...] 
 
 
 def check_disk(free: int, size: int) -> tuple[bool, int]:
-    """(cukup, dibutuhkan). Puncak = unsigned (sudah ada) + aligned + signed ~ 2x ukuran baru + blok tanda tangan + cadangan."""
+    """(cukup, dibutuhkan) untuk volume `signwork`. Puncak = in.apk + aligned.apk, lalu aligned.apk + signed.apk (in.apk dihapus setelah zipalign)
+    ~ 2x ukuran + blok tanda tangan + cadangan."""
     need = 2 * size + SIG_SLACK + RESERVE
     return free >= need, need
 
 
-def _open_dir(name: str, dir_fd: int | None = None) -> int:
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    return os.open(name, flags) if dir_fd is None else os.open(name, flags, dir_fd=dir_fd)
+def check_disk_builds(free: int, size: int) -> tuple[bool, int]:
+    """(cukup, dibutuhkan) untuk volume `builds`: salinan terbit (`.sign-signed.tmp` -> signed.apk) = 1x ukuran + blok tanda tangan + cadangan."""
+    need = size + SIG_SLACK + RESERVE
+    return free >= need, need
 
 
 def open_build_dir(analysis_id: int, build_id: int) -> int:
-    """fd folder build lewat rantai builds -> <aid> -> <bid> (O_DIRECTORY|O_NOFOLLOW, dir_fd). Id non-int ditolak Layout (ValueError).
-    SEMUA operasi berkas signer sesudahnya memakai dir_fd ini, jadi symlink yang diselipkan di komponen perantara tidak diikuti."""
-    target = LAYOUT.build_dir(analysis_id, build_id)
-    chain = [str(LAYOUT.builds), target.parent.name, target.name]
-    fd = -1
+    """fd folder build lewat rantai builds -> <aid> -> <bid> (`fsutil.open_dir_chain`: O_DIRECTORY|O_NOFOLLOW relatif dir_fd). Id non-int ditolak Layout
+    (ValueError). SEMUA operasi berkas signer pada folder itu sesudahnya memakai fd ini, jadi symlink yang diselipkan di komponen perantara tidak diikuti."""
+    LAYOUT.build_dir(analysis_id, build_id)
     try:
-        for name in chain:
-            nxt = _open_dir(name, None if fd < 0 else fd)
-            if fd >= 0:
-                os.close(fd)
-            fd = nxt
-        return fd
+        return open_dir_chain(LAYOUT.builds, str(analysis_id), str(build_id))
     except OSError as exc:
-        if fd >= 0:
-            os.close(fd)
         if exc.errno == errno.ENOENT:
             raise JobError("input_missing", f"folder build {analysis_id}/{build_id} tidak ditemukan") from exc
         if exc.errno in (errno.ELOOP, errno.ENOTDIR):
             raise JobError("input_unsafe", "folder build bukan direktori biasa (symlink atau jenis lain) sehingga ditolak") from exc
         raise JobError("internal", f"folder build tidak bisa dibuka ({errno.errorcode.get(exc.errno or 0, 'galat')})") from exc
+
+
+def open_signwork() -> int:
+    """fd akar ruang kerja privat `signwork` (dibuat bila belum ada; volume ini HANYA dipasang ke signer)."""
+    try:
+        os.makedirs(LAYOUT.signwork, mode=0o700, exist_ok=True)
+        return os.open(LAYOUT.signwork, DIR_FLAGS)
+    except OSError as exc:
+        raise JobError("internal", f"ruang kerja signwork tidak bisa dibuka ({errno.errorcode.get(exc.errno or 0, 'galat')})") from exc
 
 
 def open_input(bfd: int, name: str, max_bytes: int) -> tuple[int, int]:
@@ -249,6 +257,17 @@ def cleanup_job_files(bfd: int | None, home: Any = None) -> bool:
         except OSError:
             clean = False
     return clean
+
+
+def cleanup_work_dir(wfd: int | None, name: str | None) -> bool:
+    """Hapus `signwork/<job>` (salinan masukan, aligned, signed) tanpa mengikuti symlink. IDEMPOTEN, tidak pernah melempar. True bila bersih."""
+    if wfd is None or name is None:
+        return True
+    try:
+        rmtree_at(wfd, name)
+    except OSError:
+        return False
+    return True
 
 
 def build_zipalign_cmd(src: Any, dst: Any) -> list[str]:
@@ -502,7 +521,7 @@ def write_hb(state: str, job: str | None = None) -> None:
     key: KeyInfo = KEY_STATE["last"]
     HB.update(state=state, job=job, last=CLOCK(), sig=(state, job, key.state, key.cert_sha256))
     try:
-        SPOOL.write_signer_heartbeat(state, job, {"state": key.state, "detail": key.detail, "cert_sha256": key.cert_sha256})
+        SPOOL.write_signer_heartbeat(state, job, {"state": key.state, "detail": scrub(key.detail), "cert_sha256": key.cert_sha256})
     except OSError as exc:
         _io_failed("write_signer_heartbeat", exc)
     else:
@@ -579,10 +598,10 @@ def key_status() -> KeyInfo:
 
 
 def _result(ok: bool, started: float, *, code: str | None = None, text: str = "", size: int = 0, sha: str | None = None, cert: str | None = None,
-            verify: Verify | None = None) -> dict[str, Any]:
+            verify: Verify | None = None, input_sha: str | None = None) -> dict[str, Any]:
     return {
         "ok": ok, "error_code": code, "error_text": text[:TEXT_MAX], "output_name": SIGNED, "output_size": size, "output_sha256": sha,
-        "cert_sha256": cert, "verify": {"v1": verify.v1 if verify else None, "v2": bool(verify and verify.v2), "v3": bool(verify and verify.v3)},
+        "input_sha256": input_sha, "cert_sha256": cert, "verify": {"v1": verify.v1 if verify else None, "v2": bool(verify and verify.v2), "v3": bool(verify and verify.v3)},
         "signer_count": verify.signer_count if verify else None, "elapsed": round(time.monotonic() - started, 2),
     }
 
@@ -592,6 +611,8 @@ class _Job:
         self.id = job_id
         self.aid = self.bid = 0
         self.bfd: int | None = None
+        self.wfd: int | None = None          # fd akar signwork
+        self.wname: str | None = None        # nama folder kerja job di signwork (= job id)
         self.home: Path | None = None
         self.size = 0
         self.last_cmd = ""
@@ -627,9 +648,100 @@ def _guard(job: _Job) -> None:
         raise JobError("cancelled", ERROR_TEXT["cancelled"])
 
 
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+
+
+def copy_input(src_fd: int, wdfd: int, max_bytes: int, on_tick: Callable[[], None]) -> tuple[str, int]:
+    """Salin `src_fd` (fd unsigned.apk yang SUDAH divalidasi) ke `in.apk` di ruang kerja privat sambil menghitung SHA-256. Mengembalikan (sha256, byte disalin):
+    hash dihitung dari byte yang SUNGGUH disalin. Berkas yang tumbuh melewati `max_bytes` saat disalin -> input_too_large. `in.apk` dibuat O_EXCL|O_NOFOLLOW 0600."""
+    out = os.open(W_IN, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=wdfd)
+    digest = hashlib.sha256()
+    total = since = 0
+    try:
+        while True:
+            chunk = os.read(src_fd, MIB)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise JobError("input_too_large", f"{UNSIGNED} tumbuh melewati batas {max_bytes // MIB} MiB (SIGN_MAX_MB) saat disalin")
+            digest.update(chunk)
+            _write_all(out, chunk)
+            since += len(chunk)
+            if since >= HASH_CHECK_EVERY:
+                since = 0
+                on_tick()
+    finally:
+        os.close(out)
+    return digest.hexdigest(), total
+
+
+def _unlink_quiet(name: str, dir_fd: int) -> None:
+    try:
+        os.unlink(name, dir_fd=dir_fd)
+    except OSError:
+        pass
+
+
+def publish_signed(bfd: int, signed_fd: int, sha: str, size: int, on_tick: Callable[[], None]) -> None:
+    """Terbitkan hasil terverifikasi (fd di ruang kerja privat) ke folder build yang bisa ditulis runner, tahan balapan:
+      * `.sign-signed.tmp` dibuat O_CREAT|O_EXCL|O_NOFOLLOW: nama yang sudah ada (ditanam penyerang: berkas, FIFO, symlink, direktori) -> EEXIST -> gagal-tertutup
+        `internal`, TIDAK pernah menimpa atau mengikuti sasaran lain;
+      * isi disalin dari fd yang sama sambil dihitung ulang (harus == `sha`), fsync, lalu `os.replace` (rename atomik; tidak mengikuti symlink; tujuan
+        direktori berisi -> galat -> gagal);
+      * BACA ULANG `signed.apk` dari folder build: berkas biasa, nlink==1, ukuran dan hash sama. Beda (ditukar dalam jendela signer) -> hapus + `internal`."""
+    try:
+        out = os.open(TMP_SIGNED, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644, dir_fd=bfd)
+    except FileExistsError as exc:
+        raise JobError("internal", f"{TMP_SIGNED} sudah ada di folder build (ditanam pihak lain?); penerbitan dibatalkan") from exc
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise JobError("internal", f"{TMP_SIGNED} berupa symlink di folder build; penerbitan dibatalkan") from exc
+        raise
+    try:
+        os.lseek(signed_fd, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        total = since = 0
+        while True:
+            chunk = os.read(signed_fd, MIB)
+            if not chunk:
+                break
+            digest.update(chunk)
+            _write_all(out, chunk)
+            total += len(chunk)
+            since += len(chunk)
+            if since >= HASH_CHECK_EVERY:
+                since = 0
+                on_tick()
+        os.fsync(out)
+    finally:
+        os.close(out)
+    if total != size or not hmac.compare_digest(digest.hexdigest(), sha):
+        raise JobError("internal", "salinan terbit tidak sama dengan hasil yang diverifikasi")
+    os.replace(TMP_SIGNED, SIGNED, src_dir_fd=bfd, dst_dir_fd=bfd)
+    try:
+        fd = os.open(SIGNED, OPEN_FLAGS, dir_fd=bfd)
+    except OSError as exc:
+        _unlink_quiet(SIGNED, bfd)                       # symlink/berkas aneh yang ditukar masuk: jangan dibiarkan bernama signed.apk
+        raise JobError("internal", f"{SIGNED} tidak dapat dibaca ulang setelah diterbitkan ({errno.errorcode.get(exc.errno or 0, 'galat')})") from exc
+    try:
+        st = os.fstat(fd)
+        again = None
+        if stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_size == size:
+            again, _n = sha256_fd(fd, on_tick)
+        if again is None or not hmac.compare_digest(again, sha):
+            _unlink_quiet(SIGNED, bfd)
+            raise JobError("internal", "keluaran berubah saat diterbitkan")
+    finally:
+        os.close(fd)
+
+
 def _process(job: _Job, request: dict[str, Any], started: float) -> dict[str, Any]:
     try:
-        job.aid, job.bid, req_timeout = validate_request(request, job.id)
+        job.aid, job.bid, req_timeout, expect_sha = validate_request(request, job.id)
     except ValueError as exc:
         raise JobError("bad_request", f"request tidak valid: {scrub(exc)}") from exc
     timeout_s = min(req_timeout, SIGN_TIMEOUT)
@@ -638,55 +750,84 @@ def _process(job: _Job, request: dict[str, Any], started: float) -> dict[str, An
     key = key_status()
     if key.state != "ok" or not key.cert_sha256:
         state = key.state if key.state != "ok" else "invalid"
-        raise JobError(f"keystore_{state}", key.detail or ERROR_TEXT[f"keystore_{state}"])
+        raise JobError(f"keystore_{state}", scrub(key.detail) or ERROR_TEXT[f"keystore_{state}"])
     owner = key.cert_sha256
 
     job.bfd = open_build_dir(job.aid, job.bid)
-    fd, job.size = open_input(job.bfd, UNSIGNED, SIGN_MAX_MB * MIB)
-    os.close(fd)
-    job.home = TOOL_HOME_ROOT / job.id
-    os.makedirs(job.home, mode=0o700, exist_ok=True)
-
-    if sweep_leftovers(job.bfd):
-        raise JobError("input_unsafe", "sisa berkas keluaran lama di folder build tidak bisa dihapus")
-    st = os.statvfs(job.bfd)
-    free = st.f_bavail * st.f_frsize
-    enough, need = check_disk(free, job.size)
-    if not enough:
-        raise JobError("no_space", f"butuh {need // MIB} MiB, bebas {free // MIB} MiB (puncak 2x ukuran APK + 16 MiB + cadangan 1 GiB)")
-
-    bdir = LAYOUT.build_dir(job.aid, job.bid)
-    src, aligned, signed_tmp = bdir / UNSIGNED, bdir / TMP_ALIGNED, bdir / TMP_SIGNED
-    _step(job, build_zipalign_cmd(src, aligned), deadline, "align_failed", timeout_s)
-    _step(job, build_zipalign_check_cmd(aligned), deadline, "align_failed", timeout_s)
+    # unsigned.apk dibuka SEKALI; fd ini dipegang sampai penyalinan selesai. Sesudah itu folder build milik runner TIDAK dibaca lagi untuk masukan.
+    in_fd, job.size = open_input(job.bfd, UNSIGNED, SIGN_MAX_MB * MIB)
     try:
-        _step(job, build_sign_cmd(aligned, signed_tmp), deadline, "sign_failed", timeout_s)
-    finally:
+        job.home = TOOL_HOME_ROOT / job.id
+        os.makedirs(job.home, mode=0o700, exist_ok=True)
+
+        if sweep_leftovers(job.bfd):
+            raise JobError("input_unsafe", "sisa berkas keluaran lama di folder build tidak bisa dihapus")
+        job.wfd = open_signwork()
+        free = _free(job.wfd)
+        enough, need = check_disk(free, job.size)
+        if not enough:
+            raise JobError("no_space", f"signwork butuh {need // MIB} MiB, bebas {free // MIB} MiB (2x ukuran APK + 16 MiB + cadangan 1 GiB)")
+        free = _free(job.bfd)
+        enough, need = check_disk_builds(free, job.size)
+        if not enough:
+            raise JobError("no_space", f"builds butuh {need // MIB} MiB, bebas {free // MIB} MiB (1x ukuran APK + 16 MiB + cadangan 1 GiB)")
+
+        job.wname = job.id
+        cleanup_work_dir(job.wfd, job.wname)                  # id job unik; sisa (mustahil) dibuang dulu
+        os.mkdir(job.wname, 0o700, dir_fd=job.wfd)
+        wdfd = os.open(job.wname, DIR_FLAGS, dir_fd=job.wfd)
         try:
-            os.unlink(TMP_ALIGNED, dir_fd=job.bfd)
-        except OSError:
-            pass
-    res = _step(job, build_verify_cmd(signed_tmp), deadline, "verify_failed", timeout_s)
-    verify = parse_verify(res.rc, res.text())
-    ok, code, text = evaluate_verify(verify, owner)
-    if not ok:
-        raise JobError(code or "verify_failed", text)
+            input_sha, _copied = copy_input(in_fd, wdfd, SIGN_MAX_MB * MIB, lambda: _guard(job))
+            # A-02: berkas yang ditukar sejak runner selesai ditolak SEBELUM alat apa pun dijalankan.
+            if not hmac.compare_digest(input_sha, expect_sha):
+                raise JobError("input_unsafe", "unsigned.apk berubah sejak build selesai (hash tak cocok)")
+            os.close(in_fd)
+            in_fd = -1
+            wdir = LAYOUT.signwork / job.wname
+            src, aligned, signed = wdir / W_IN, wdir / W_ALIGNED, wdir / W_SIGNED
+            _step(job, build_zipalign_cmd(src, aligned), deadline, "align_failed", timeout_s)
+            _step(job, build_zipalign_check_cmd(aligned), deadline, "align_failed", timeout_s)
+            os.unlink(W_IN, dir_fd=wdfd)
+            try:
+                _step(job, build_sign_cmd(aligned, signed), deadline, "sign_failed", timeout_s)
+            finally:
+                try:
+                    os.unlink(W_ALIGNED, dir_fd=wdfd)
+                except OSError:
+                    pass
+            res = _step(job, build_verify_cmd(signed), deadline, "verify_failed", timeout_s)
+            verify = parse_verify(res.rc, res.text())
+            ok, code, text = evaluate_verify(verify, owner)
+            if not ok:
+                raise JobError(code or "verify_failed", text)
 
-    fd = os.open(TMP_SIGNED, OPEN_FLAGS, dir_fd=job.bfd)
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
-            raise JobError("input_unsafe", f"{TMP_SIGNED} bukan berkas biasa sehingga tidak diterbitkan")
-        sha, size = sha256_fd(fd, lambda: _guard(job))
+            # Folder kerja privat: tidak ada pihak lain yang bisa menukar signed.apk di sini (tetap divalidasi dari fd).
+            fd = os.open(W_SIGNED, OPEN_FLAGS, dir_fd=wdfd)
+            try:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                    raise JobError("input_unsafe", f"{W_SIGNED} bukan berkas biasa sehingga tidak diterbitkan")
+                sha, size = sha256_fd(fd, lambda: _guard(job))
+                if size <= 0:
+                    raise JobError("verify_failed", "keluaran tanda tangan kosong")
+                publish_signed(job.bfd, fd, sha, size, lambda: _guard(job))
+            finally:
+                os.close(fd)
+        finally:
+            os.close(wdfd)
     finally:
-        os.close(fd)
-    if size <= 0:
-        raise JobError("verify_failed", "keluaran tanda tangan kosong")
-    os.replace(TMP_SIGNED, SIGNED, src_dir_fd=job.bfd, dst_dir_fd=job.bfd)
-    return _result(True, started, size=size, sha=sha, cert=verify.digests[0], verify=verify)
+        if in_fd >= 0:
+            os.close(in_fd)
+    return _result(True, started, size=size, sha=sha, cert=verify.digests[0], verify=verify, input_sha=input_sha)
 
 
-def finish_with_retry(job_id: str, result: dict[str, Any], bfd: int | None = None, home: Any = None) -> bool:
+def _free(fd: int) -> int:
+    """Byte bebas pada filesystem yang memuat `fd`."""
+    st = os.statvfs(fd)
+    return st.f_bavail * st.f_frsize
+
+
+def finish_with_retry(job_id: str, result: dict[str, Any], bfd: int | None = None, home: Any = None, work: tuple[int | None, str | None] = (None, None)) -> bool:
     """Spool.finish dengan 3 percobaan (jeda 1 dtk, pembersihan ulang tiap gagal). Tetap gagal -> hasil minimal; itupun gagal -> hanya log ERROR
     (request tetap di running/ dan dijawab 'aborted' saat start berikut). Tidak pernah melempar."""
     last: BaseException | None = None
@@ -698,6 +839,7 @@ def finish_with_retry(job_id: str, result: dict[str, Any], bfd: int | None = Non
             last = exc
             say(f"[{job_id}] WARN finish gagal percobaan {attempt + 1}/{FINISH_ATTEMPTS} ({type(exc).__name__})")
             cleanup_job_files(bfd, home)
+            cleanup_work_dir(*work)
             if attempt + 1 < FINISH_ATTEMPTS:
                 time.sleep(FINISH_RETRY_DELAY)
     code = "no_space" if isinstance(last, OSError) and last.errno == errno.ENOSPC else "internal"
@@ -725,24 +867,48 @@ def run_job(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
             say(f"[{job_id}] ERROR galat internal: {type(exc).__name__}")
             result = _result(False, started, code="internal", text=f"galat internal signer: {type(exc).__name__}")
         cleanup_job_files(job.bfd, job.home)
-        finish_with_retry(job_id, result, job.bfd, job.home)
+        cleanup_work_dir(job.wfd, job.wname)
+        finish_with_retry(job_id, result, job.bfd, job.home, (job.wfd, job.wname))
         say(f"[{job_id}] aid={job.aid} bid={job.bid} {'ok' if result['ok'] else result['error_code']} ukuran={result['output_size']} {result['elapsed']}s"
             + ("" if result["ok"] or not job.last_cmd else f" langkah={job.last_cmd}"))
         return result
     finally:
         cleanup_job_files(job.bfd, job.home)
-        if job.bfd is not None:
-            try:
-                os.close(job.bfd)
-            except OSError:
-                pass
+        cleanup_work_dir(job.wfd, job.wname)
+        for fd in (job.bfd, job.wfd):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
 
 # ------------------------------------------------------------------ siklus daemon
 
 
+def clear_signwork() -> None:
+    """Kosongkan SELURUH isi `signwork` saat start: hanya signer yang memakai volume ini dan tidak ada job berjalan saat daemon naik, jadi semua isinya sisa."""
+    try:
+        wfd = os.open(LAYOUT.signwork, DIR_FLAGS)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        _io_failed("clear_signwork", exc)
+        return
+    try:
+        for name in os.listdir(wfd):
+            try:
+                rmtree_at(wfd, name)
+            except OSError as exc:
+                _io_failed("clear_signwork", exc)
+    finally:
+        os.close(wfd)
+
+
 def abort_orphans() -> None:
-    """Job yang tercatat 'running' tetapi prosesnya hilang dijawab 'aborted'; signed.apk + .sign-* + *.idsig di folder build-nya dihapus."""
+    """Job yang tercatat 'running' tetapi prosesnya hilang dijawab 'aborted'; signed.apk + .sign-* + *.idsig di folder build-nya dihapus.
+    Seluruh isi `signwork` (ruang kerja privat job yang mati) ikut dikosongkan."""
+    clear_signwork()
     for job_id in SPOOL.running_job_ids():
         m = JOB_ID_RE.match(job_id)
         if m is not None:

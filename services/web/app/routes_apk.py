@@ -22,7 +22,7 @@ from starlette.requests import ClientDisconnect
 
 from rvcore import shellspool, store
 from rvcore.db import tx
-from rvcore.fsutil import read_json_under, safe_rmtree
+from rvcore.fsutil import open_dir_chain, read_json_under, rmtree_at, safe_rmtree
 
 from . import codeindex, decompile
 from . import status as system_status
@@ -971,6 +971,18 @@ def _delete(apk_id: int, ip: str) -> str:
     for analysis_id in ids:
         safe_rmtree(layout.work_dir(analysis_id))
         file_store.remove_all(analysis_id)         # lampiran & berkas buatan AI (baris DB sudah hilang lewat CASCADE)
+        # Artefak build. Runner menulis akar `builds` (uid sama), jadi TIDAK lewat jalur string/safe_rmtree: rantai dirfd O_NOFOLLOW (desain §7.7); `builds/<id>` yang
+        # ditanam symlink hanya di-unlink (sasarannya tidak disentuh). Satu kegagalan tidak menggagalkan yang lain (yatim dibersihkan pemilik, R-16).
+        try:
+            builds_fd = open_dir_chain(layout.builds)
+            try:
+                rmtree_at(builds_fd, str(analysis_id))
+            finally:
+                os.close(builds_fd)
+        except FileNotFoundError:
+            pass                                    # akar `builds` belum ada: tak ada yang dihapus
+        except OSError:
+            log.exception("gagal menghapus artefak builds analisis %s", analysis_id)
         # Ruang kerja shell AI (bench). Web hanya MENGHAPUS (safe_rmtree tidak mengikuti symlink) dan tidak pernah membaca isinya: itu data tak tepercaya.
         # Langsung, bukan lewat daemon bench, agar tetap bersih walau bench sedang mati. (Uid sama dengan bench: uid terpisah membuat web EACCES, terukur.)
         try:

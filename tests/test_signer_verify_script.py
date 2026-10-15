@@ -726,7 +726,13 @@ def test_short_password_file_skips_the_check(rig):
 def test_script_text_follows_the_addendum_rules():
     text = SCRIPT_SRC.read_text(encoding="utf-8")
     assert text.startswith("#!/usr/bin/env bash\n") and "set -uo pipefail" in text and os.access(SCRIPT_SRC, os.X_OK)
-    assert "pw=\"$(tr -d '\\r\\n' <secrets/signing_keystore_pass" in text and '[ "${#pw}" -lt 16 ]' in text and 'grep -F -q -e "$pw"' in text
+    assert "pw=\"$(tr -d '\\r\\n' <secrets/signing_keystore_pass" in text and '[ "${#pw}" -lt 16 ]' in text
+    # Warisan 2a (non-blocking): sandi TIDAK boleh muncul di argv `grep` (terlihat di /proc/<pid>/cmdline dan `ps`); pola dibaca dari substitusi proses
+    # dengan `printf` builtin. Satu-satunya baris kode yang menyebut "$pw" selain penetapan/pemeriksaan panjang adalah pembuat pola itu.
+    code = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+    assert 'grep -F -q -f <(printf \'%s\\n\' "$pw")' in text and 'grep -F -q -e "$pw"' not in text and not re.search(r"grep[^\n]*(-e|--regexp)[ =]+\"?\$pw", text)
+    carrying = [ln for ln in code if '"$pw"' in ln or "$pw" in ln.replace("${#pw}", "")]
+    assert all(("printf" in ln) or ln.lstrip().startswith(("pw=", 'pw=""')) or "pw=" in ln.split("$pw")[0] for ln in carrying), carrying
     assert "sed -n 's/^detail=//p'" in text
     assert "flock -n 9" in text and "secrets/.signer-verify.lock" in text
     assert not re.search(r"\bjq\b|python3? -c|json\.load", text), "bash tidak boleh mem-parse JSON"

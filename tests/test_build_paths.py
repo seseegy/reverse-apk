@@ -7,7 +7,6 @@ Folder TIDAK dibuat oleh `Layout`. Volume `builds`/`signspool` dipasang compose 
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -58,29 +57,3 @@ def test_existing_paths_unchanged(layout, tmp_path):
     assert layout.work_dir(5) == tmp_path / "work" / "5"
     assert layout.files_dir(5) == tmp_path / "files" / "5"
     assert layout.upload_path("a" * 64) == tmp_path / "uploads" / ("a" * 64 + ".apk")
-
-
-def _service_names(compose: str) -> list[str]:
-    body = compose.split("\nservices:\n", 1)[1].split("\nnetworks:\n", 1)[0]
-    return re.findall(r"(?m)^  ([\w-]+):[ \t]*$", body)
-
-
-def _mounters(compose: str, volume: str) -> set[str]:
-    """Layanan yang memasang volume bernama `volume` (baris `- volume:/jalur` di blok layanan, komentar dibuang)."""
-    body = compose.split("\nservices:\n", 1)[1].split("\nnetworks:\n", 1)[0]
-    code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
-    parts = re.split(r"(?m)^  ([\w-]+):[ \t]*$", code)
-    return {parts[i] for i in range(1, len(parts), 2) if re.search(rf"(?m)^\s+- {re.escape(volume)}:/", parts[i + 1])}
-
-
-def test_compose_mounts_builds_and_signspool_only_for_worker_and_signer():
-    """Penjaga SADAR (menggantikan 'belum ada volume builds' Tahap 1): `builds` dan `signspool` hanya untuk worker + signer; runner/bench/egress/caddy/web/redis TIDAK."""
-    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    vols = compose.split("\nvolumes:\n", 1)[1].split("\nsecrets:\n", 1)[0]
-    names = set(re.findall(r"^  ([A-Za-z0-9_]+):", vols, re.M))
-    assert {"builds", "signspool"} <= names
-    assert _mounters(compose, "builds") == {"worker", "signer"}
-    assert _mounters(compose, "signspool") == {"worker", "signer"}
-    for service in ("runner", "bench", "egress", "caddy", "web", "redis"):
-        assert service in _service_names(compose), service
-        assert service not in _mounters(compose, "builds") | _mounters(compose, "signspool"), service

@@ -18,8 +18,9 @@ from rvcore.fsutil import atomic_write_json
 from rvcore.paths import Layout
 from rvcore.signspool import SignSpool, SignerUnavailable
 
+EXP = "e" * 64                      # expect_sha256 / input_sha256 tiruan (hash unsigned.apk menurut runner)
 GOOD = {"ok": True, "error_code": None, "error_text": "", "output_name": "signed.apk", "output_size": 1234,
-        "output_sha256": "b" * 64, "cert_sha256": "c" * 64, "verify": {"v1": False, "v2": True, "v3": True}, "signer_count": 1, "elapsed": 1.5}
+        "output_sha256": "b" * 64, "input_sha256": EXP, "cert_sha256": "c" * 64, "verify": {"v1": False, "v2": True, "v3": True}, "signer_count": 1, "elapsed": 1.5}
 KS_OK = {"state": "ok", "detail": "", "cert_sha256": "c" * 64}
 
 
@@ -57,7 +58,7 @@ def jid(aid=1, bid=1, tail="abcdef12"):
 
 def req(job_id=None, **extra):
     job_id = job_id or jid()
-    return {"job_id": job_id, "op": "sign", "analysis_id": 1, "build_id": 1, "timeout": 60, "created": 1.0, **extra}
+    return {"job_id": job_id, "op": "sign", "analysis_id": 1, "build_id": 1, "timeout": 60, "expect_sha256": EXP, "created": 1.0, **extra}
 
 
 # ------------------------------------------------------------------------------------------------------------ id
@@ -85,33 +86,36 @@ def test_sender_side_validation_rejects(bad):
     with pytest.raises(ValueError):
         S.new_job_id(1, bad)
     with pytest.raises(ValueError):
-        S.build_sign_request(bad, 1, 60)
+        S.build_sign_request(bad, 1, 60, EXP)
     with pytest.raises(ValueError):
-        S.build_sign_request(1, bad, 60)
+        S.build_sign_request(1, bad, 60, EXP)
     with pytest.raises(ValueError):
-        S.build_sign_request(1, 1, bad)
+        S.build_sign_request(1, 1, bad, EXP)
 
 
 def test_build_sign_request_shape():
-    r = S.build_sign_request(5, 6, 120)
-    assert set(r) == {"job_id", "op", "analysis_id", "build_id", "timeout", "created"}
+    r = S.build_sign_request(5, 6, 120, EXP)
+    assert set(r) == {"job_id", "op", "analysis_id", "build_id", "timeout", "expect_sha256", "created"} and r["expect_sha256"] == EXP
     assert r["op"] == "sign" and (r["analysis_id"], r["build_id"], r["timeout"]) == (5, 6, 120) and isinstance(r["created"], float)
     assert S.JOB_ID_RE.match(r["job_id"]) and r["job_id"].startswith("g5-6-")
-    assert S.build_sign_request(2**31 - 1, 2**31 - 1, 2**31 - 1)["analysis_id"] == 2**31 - 1
+    assert S.build_sign_request(2**31 - 1, 2**31 - 1, 2**31 - 1, EXP)["analysis_id"] == 2**31 - 1
 
 
 # --------------------------------------------------------------------------------------------------- validate_request
 def test_validate_request_returns_ids_and_clamped_timeout():
-    assert S.validate_request(req(timeout=60), jid()) == (1, 1, 60)
+    assert S.validate_request(req(timeout=60), jid()) == (1, 1, 60, EXP)
     assert S.validate_request(req(timeout=1), jid())[2] == 10
     assert S.validate_request(req(timeout=10**9), jid())[2] == 3600
-    assert S.validate_request(req(jid(12, 34), analysis_id=12, build_id=34), jid(12, 34)) == (12, 34, 60)
+    assert S.validate_request(req(jid(12, 34), analysis_id=12, build_id=34), jid(12, 34)) == (12, 34, 60, EXP)
 
 
 @pytest.mark.parametrize("mut", [
     {"op": "verify"}, {"op": None}, {"op": "SIGN"}, {"analysis_id": "1"}, {"analysis_id": 1.0}, {"analysis_id": True}, {"analysis_id": 0}, {"analysis_id": -1},
     {"analysis_id": 2**31}, {"analysis_id": 2}, {"build_id": "1"}, {"build_id": True}, {"build_id": 0}, {"build_id": 2**31}, {"build_id": 3},
     {"timeout": "60"}, {"timeout": 60.0}, {"timeout": True}, {"timeout": None}, {"job_id": jid(tail="00000000")}, {"analysis_id": "../etc"},
+    # A-02: expect_sha256 wajib heks-64 huruf kecil
+    {"expect_sha256": ""}, {"expect_sha256": "E" * 64}, {"expect_sha256": "e" * 63}, {"expect_sha256": "e" * 65}, {"expect_sha256": "g" * 64}, {"expect_sha256": None},
+    {"expect_sha256": 5}, {"expect_sha256": "e" * 64 + "\n"},
 ])
 def test_validate_request_rejects(mut):
     with pytest.raises(ValueError):
@@ -126,6 +130,8 @@ def test_validate_request_rejects_non_dict_and_bad_job_id():
         S.validate_request(req("../x"), "../x")
     with pytest.raises(ValueError):
         S.validate_request({k: v for k, v in req().items() if k != "timeout"}, jid())
+    with pytest.raises(ValueError):
+        S.validate_request({k: v for k, v in req().items() if k != "expect_sha256"}, jid())
 
 
 def test_path_input_and_out_fields_are_never_used():
@@ -151,6 +157,7 @@ def test_only_literal_true_is_success(raw):
 
 @pytest.mark.parametrize("mut", [
     {"output_sha256": "B" * 64}, {"output_sha256": "b" * 63}, {"output_sha256": None}, {"cert_sha256": "z" * 64}, {"cert_sha256": None},
+    {"input_sha256": None}, {"input_sha256": "E" * 64}, {"input_sha256": "e" * 63}, {"input_sha256": 5},
     {"output_size": 0}, {"output_size": -5}, {"output_size": True}, {"output_size": "1234"}, {"signer_count": 2}, {"signer_count": 0}, {"signer_count": None},
     {"signer_count": True}, {"verify": {"v2": True}}, {"verify": {"v2": True, "v3": 1}}, {"verify": {"v2": False, "v3": True}}, {"verify": []}, {"verify": None},
 ])
@@ -566,7 +573,7 @@ def residue(sp):
 
 def test_submit_and_wait_success(sp, tmp_path):
     with FakeDaemon(tmp_path / "signspool") as d:
-        r = S.submit_and_wait(sp, 7, 8, timeout=60, poll=0.01)
+        r = S.submit_and_wait(sp, 7, 8, expect_sha256=EXP, timeout=60, poll=0.01)
     assert r["ok"] is True and r["output_sha256"] == "b" * 64 and len(d.claimed) == 1 and d.claimed[0].startswith("g7-8-")
     assert residue(sp) == {}
 
@@ -574,14 +581,14 @@ def test_submit_and_wait_success(sp, tmp_path):
 def test_submit_and_wait_fails_fast_without_a_heartbeat(sp):
     t0 = time.monotonic()
     with pytest.raises(SignerUnavailable) as ei:
-        S.submit_and_wait(sp, 1, 1, timeout=60, poll=0.01)
+        S.submit_and_wait(sp, 1, 1, expect_sha256=EXP, timeout=60, poll=0.01)
     assert time.monotonic() - t0 < 1 and "tidak aktif" in ei.value.message and residue(sp) == {}
 
 
 def test_submit_and_wait_fails_fast_on_a_stale_heartbeat(sp):
     atomic_write_json(sp.heartbeat_file, sp.tmp, {"ts": time.time() - 25, "pid": 1, "state": "idle", "job": None, "keystore": KS_OK})
     with pytest.raises(SignerUnavailable):
-        S.submit_and_wait(sp, 1, 1, timeout=60, poll=0.01)
+        S.submit_and_wait(sp, 1, 1, expect_sha256=EXP, timeout=60, poll=0.01)
     assert residue(sp) == {}
 
 
@@ -590,21 +597,21 @@ def test_submit_and_wait_fails_fast_on_a_stale_heartbeat(sp):
 def test_submit_and_wait_fails_fast_when_the_keystore_is_not_ok(sp, tmp_path, state, detail):
     with FakeDaemon(tmp_path / "signspool", mode="ignore", ks={"state": state, "detail": detail, "cert_sha256": None}):
         with pytest.raises(SignerUnavailable) as ei:
-            S.submit_and_wait(sp, 1, 1, timeout=60, poll=0.01)
+            S.submit_and_wait(sp, 1, 1, expect_sha256=EXP, timeout=60, poll=0.01)
     assert state in ei.value.message and detail in ei.value.message and residue(sp) == {}
 
 
 def test_submit_and_wait_rejects_invalid_ids_as_unavailable(sp, tmp_path):
     with FakeDaemon(tmp_path / "signspool", mode="ignore"):
         with pytest.raises(SignerUnavailable) as ei:
-            S.submit_and_wait(sp, "../x", 1, timeout=60, poll=0.01)
+            S.submit_and_wait(sp, "../x", 1, expect_sha256=EXP, timeout=60, poll=0.01)
     assert "tidak valid" in ei.value.message
 
 
 def test_request_not_picked_up_is_withdrawn(sp, tmp_path):
     with FakeDaemon(tmp_path / "signspool", mode="ignore"):
         with pytest.raises(SignerUnavailable) as ei:
-            S.submit_and_wait(sp, 1, 1, timeout=60, pickup_timeout=0.3, poll=0.01)
+            S.submit_and_wait(sp, 1, 1, expect_sha256=EXP, timeout=60, pickup_timeout=0.3, poll=0.01)
     assert "tidak mengambil" in ei.value.message and residue(sp) == {}
 
 
@@ -612,7 +619,7 @@ def test_cancel_before_pickup_withdraws_the_request(sp, tmp_path):
     ev = threading.Event()
     ev.set()
     with FakeDaemon(tmp_path / "signspool", mode="ignore"):
-        r = S.submit_and_wait(sp, 1, 1, timeout=60, cancel=ev, poll=0.01)
+        r = S.submit_and_wait(sp, 1, 1, expect_sha256=EXP, timeout=60, cancel=ev, poll=0.01)
     assert (r["ok"], r["error_code"], r["error_text"]) == (False, "cancelled", "dibatalkan sebelum berjalan") and residue(sp) == {}
 
 
@@ -621,7 +628,7 @@ def test_cancel_while_running_returns_the_daemons_answer(sp, tmp_path):
     threading.Timer(0.3, ev.set).start()
     with FakeDaemon(tmp_path / "signspool", mode="hold_until_cancel") as d:
         t0 = time.monotonic()
-        r = S.submit_and_wait(sp, 1, 1, timeout=60, cancel=ev, poll=0.01)
+        r = S.submit_and_wait(sp, 1, 1, expect_sha256=EXP, timeout=60, cancel=ev, poll=0.01)
     assert r["error_code"] == "cancelled" and time.monotonic() - t0 < 4 and len(d.claimed) == 1 and residue(sp) == {}
 
 
@@ -640,7 +647,7 @@ def test_expired_job_asks_for_cancel_then_gives_up(sp, tmp_path, monkeypatch):
     with Deaf(tmp_path / "signspool") as d:
         t0 = time.monotonic()
         with pytest.raises(SignerUnavailable) as ei:
-            S.submit_and_wait(sp, 1, 1, timeout=1, grace=0.2, poll=0.01)
+            S.submit_and_wait(sp, 1, 1, expect_sha256=EXP, timeout=1, grace=0.2, poll=0.01)
     assert "tidak menjawab" in ei.value.message and time.monotonic() - t0 < 5 and len(d.claimed) == 1 and residue(sp) == {}
     assert asked == d.claimed                   # meminta batal, lalu menyerah; forget() membersihkan berkasnya
 
@@ -649,7 +656,7 @@ def test_daemon_that_stops_beating_mid_job_is_detected(sp, tmp_path, monkeypatch
     monkeypatch.setattr(S, "HEARTBEAT_STALE_AFTER", 0.3)
     with FakeDaemon(tmp_path / "signspool", mode="hold_deaf"):
         with pytest.raises(SignerUnavailable) as ei:
-            S.submit_and_wait(sp, 1, 1, timeout=60, poll=0.01)
+            S.submit_and_wait(sp, 1, 1, expect_sha256=EXP, timeout=60, poll=0.01)
     assert "berhenti merespons" in ei.value.message and residue(sp) == {}
 
 
@@ -660,5 +667,5 @@ def test_hostile_result_for_a_job_is_never_trusted(sp, tmp_path):
             self.spool.finish(job_id, {**GOOD, "ok": "true", "output_name": "../../x"})
 
     with Liar(tmp_path / "signspool"):
-        r = S.submit_and_wait(sp, 1, 1, timeout=60, poll=0.01)
+        r = S.submit_and_wait(sp, 1, 1, expect_sha256=EXP, timeout=60, poll=0.01)
     assert r["ok"] is False and r["output_name"] == "signed.apk"

@@ -62,7 +62,8 @@ def test_dockerfile_pins_build_tools_by_sha256_and_verifies_before_extraction():
 
 
 def test_dockerfile_runs_as_uid_10001_and_embeds_no_key_material():
-    """Tahap 2a (sadar): `/data/builds` dan `/data/signspool` (HANYA mkdir/chown) dan `CMD ["signer-daemon"]` diizinkan; VOLUME dan material kunci tetap dilarang."""
+    """Tahap 2a (sadar): `/data/builds` dan `/data/signspool` (HANYA mkdir/chown) dan `CMD ["signer-daemon"]` diizinkan; VOLUME dan material kunci tetap dilarang.
+    Tahap 2b (sadar): `/data/signwork` (ruang kerja privat, penutupan R3/R10) ikut di `mkdir`."""
     ins = _instructions(DOCKERFILE)
     users = [i for i in ins if i.startswith("USER ")]
     assert users and users[-1] == "USER 10001:10001"
@@ -72,8 +73,9 @@ def test_dockerfile_runs_as_uid_10001_and_embeds_no_key_material():
     install = [i for i in ins if "apt-get install" in i]
     assert install and not any(re.search(r"\b(apksigner|zipalign)\b", i.split("apt-get install", 1)[1].split(";", 1)[0]) for i in install)
     assert "VOLUME" not in DOCKERFILE, "titik mount dibuat dengan mkdir; tanpa instruksi VOLUME"
-    assert [i for i in ins if "/data" in i] == ["RUN mkdir -p /data/builds /data/signspool && chown -R 10001:10001 /data"]
-    assert ins.index("RUN mkdir -p /data/builds /data/signspool && chown -R 10001:10001 /data") > next(n for n, i in enumerate(ins) if i.startswith("RUN groupadd"))
+    mkdir = "RUN mkdir -p /data/builds /data/signspool /data/signwork && chown -R 10001:10001 /data"
+    assert [i for i in ins if "/data" in i] == [mkdir]
+    assert ins.index(mkdir) > next(n for n, i in enumerate(ins) if i.startswith("RUN groupadd"))
     assert "COPY signer/signer-daemon signer/signer-selftest /usr/local/bin/" in ins
     assert "RUN chmod 0755 /usr/local/bin/signer-daemon /usr/local/bin/signer-selftest" in ins
     assert ins[-1] == 'CMD ["signer-daemon"]' and "--toolchain-only" not in DOCKERFILE
@@ -120,8 +122,8 @@ def test_signer_service_is_isolated_secretless_and_profiled():
     for forbidden in ("secrets:", "networks:", "ports:", "depends_on", "docker.sock", "privileged", "cap_add", "edge", "backend", "keystore",
                       "<<: *hardening", 'restart: "no"'):
         assert forbidden not in block, forbidden
-    # Tepat dua volume dan tiga env; tmpfs hanya /tmp tanpa exec.
-    assert _list_items(block, "volumes") == ["builds:/data/builds", "signspool:/data/signspool"]
+    # Tepat tiga volume (2b sadar: + signwork, ruang kerja privat yang HANYA signer pasang) dan tiga env; tmpfs hanya /tmp tanpa exec.
+    assert _list_items(block, "volumes") == ["builds:/data/builds", "signspool:/data/signspool", "signwork:/data/signwork"]
     assert _list_items(block, "tmpfs") == ["/tmp:rw,size=256m,nosuid"]
     assert _list_items(block, "security_opt") == ["no-new-privileges:true"]
     env = re.search(r"(?m)^    environment:\n((?:      \w+: .*\n?)+)", block).group(1)
@@ -162,20 +164,26 @@ def _service_mounts() -> dict[str, list[str]]:
 
 
 def test_builds_and_signspool_are_mounted_only_where_intended():
+    """Diubah SADAR (Tahap 2b): `builds` kini dipasang runner (menulis hasil `apktool b`) dan web (hapus/sajikan) selain worker dan signer; `signspool` TETAP hanya
+    worker + signer; `signwork` (ruang kerja privat penutup R3/R10) HANYA signer. Matriks lengkap yang ketat ada di test_build_compose.py."""
     mounts = _service_mounts()
     assert {"caddy", "web", "worker", "redis", "runner", "bench", "egress", "signer"} <= set(mounts)
     holders_builds = {n for n, v in mounts.items() if any(x.startswith("builds:") for x in v)}
     holders_spool = {n for n, v in mounts.items() if any(x.startswith("signspool:") for x in v)}
-    assert holders_builds == {"worker", "signer"}
+    holders_work = {n for n, v in mounts.items() if any(x.startswith("signwork:") for x in v)}
+    assert holders_builds == {"web", "worker", "runner", "signer"}
     assert holders_spool == {"worker", "signer"}
+    assert holders_work == {"signer"}
     assert "builds:/data/builds" in mounts["worker"] and "signspool:/data/signspool" in mounts["worker"]
-    for name in ("runner", "bench", "egress", "caddy", "web", "redis"):
-        assert not re.search(r"builds|signspool", "\n".join(mounts[name])), name
-        assert not re.search(r"/data/builds|signspool", _strip_comments(compose_block(name))), name
+    for name in ("bench", "egress", "caddy", "redis"):
+        assert not re.search(r"builds|signspool|signwork", "\n".join(mounts[name])), name
+        assert not re.search(r"/data/builds|signspool|signwork", _strip_comments(compose_block(name))), name
+    for name in ("web", "runner"):                       # boleh `builds`, TIDAK boleh signspool/signwork
+        assert not re.search(r"signspool|signwork", _strip_comments(compose_block(name))), name
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     vols = compose.split("\nvolumes:\n", 1)[1].split("\nsecrets:\n", 1)[0]
     assert set(re.findall(r"(?m)^  ([A-Za-z0-9_]+):", vols)) == {
-        "uploads", "work", "files", "db", "spool", "bench", "benchspool", "builds", "signspool", "redisdata", "caddy_data", "caddy_config"}
+        "uploads", "work", "files", "db", "spool", "bench", "benchspool", "builds", "signspool", "signwork", "redisdata", "caddy_data", "caddy_config"}
 
 
 def test_worker_block_stays_free_of_keystore_and_signer_words():
@@ -187,9 +195,12 @@ def test_worker_block_stays_free_of_keystore_and_signer_words():
 
 
 def test_other_dockerfiles_do_not_know_signspool():
+    """Diubah SADAR (2b): Dockerfile web dan runner kini memuat `/data/builds` (titik mount; mkdir + chown 10001). Larangan signspool/signwork untuk web/runner dan
+    larangan signspool/signwork/builds untuk bench dan egress DIPERTAHANKAN."""
     for name in ("web", "runner", "bench", "egress"):
         text = (ROOT / "services" / name / "Dockerfile").read_text(encoding="utf-8")
-        assert "signspool" not in text and "/data/builds" not in text, name
+        assert "signspool" not in text and "signwork" not in text, name
+        assert ("/data/builds" in text) == (name in ("web", "runner")), name
 
 
 def test_signer_hardening_survives_in_the_base_compose():
@@ -409,15 +420,18 @@ def test_selftest_secrets_dir_check_accepts_only_the_two_keystore_files_or_nothi
     assert not st.check_secrets_dir(str(f))[0]
 
 
-def test_selftest_data_dir_check_requires_exactly_builds_and_signspool_writable(tmp_path, monkeypatch):
+def test_selftest_data_dir_check_requires_exactly_builds_signspool_and_signwork_writable(tmp_path, monkeypatch):
     st = _selftest()
     assert not st.check_data_dir(str(tmp_path / "tidak-ada"))[0]
     data = tmp_path / "data"
     data.mkdir()
     (data / "builds").mkdir()
     ok, detail = st.check_data_dir(str(data))
-    assert not ok and "signspool" in detail
+    assert not ok and "signspool" in detail and "signwork" in detail
     (data / "signspool").mkdir()
+    ok, detail = st.check_data_dir(str(data))
+    assert not ok and "signwork" in detail, "signwork wajib ada (2b sadar)"
+    (data / "signwork").mkdir()
     removed: list[str] = []
     real_remove = os.remove
     monkeypatch.setattr(st.os, "remove", lambda p, *a, **k: (removed.append(str(p)), real_remove(p, *a, **k))[1])
@@ -425,8 +439,8 @@ def test_selftest_data_dir_check_requires_exactly_builds_and_signspool_writable(
     monkeypatch.undo()
     assert ok and "builds" in detail
     # Bukti tulis-hapus NYATA (juga sebagai root, yang mengabaikan izin): satu berkas `.selftest-<acak>` per akar volume.
-    assert sorted(Path(r).parent.name for r in removed) == ["builds", "signspool"] and all(re.fullmatch(r".selftest-[0-9a-f]{12}", Path(r).name) for r in removed)
-    assert sorted(p.name for p in (data / "builds").iterdir()) == [] and sorted(p.name for p in (data / "signspool").iterdir()) == [], "berkas uji harus dihapus"
+    assert sorted(Path(r).parent.name for r in removed) == ["builds", "signspool", "signwork"] and all(re.fullmatch(r".selftest-[0-9a-f]{12}", Path(r).name) for r in removed)
+    assert all(sorted(p.name for p in (data / name).iterdir()) == [] for name in ("builds", "signspool", "signwork")), "berkas uji harus dihapus"
     (data / "spool").mkdir()
     ok, detail = st.check_data_dir(str(data))
     assert not ok and "spool" in detail

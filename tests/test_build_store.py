@@ -467,6 +467,17 @@ def test_create_validates_diff_summary(conn):
     assert row(conn, ok)["diff_summary"] == "{}"
 
 
+def test_create_rejects_summary_nested_too_deep_without_recursion_error(conn):
+    """NB-1 Tahap 1: json.dumps atas struktur 100.000 tingkat melempar RecursionError (bukan ValueError) dan dulu lolos sebagai 500."""
+    aid = make_done_analysis(conn)
+    deep: dict = {}
+    for _ in range(100_000):
+        deep = {"a": deep}
+    with pytest.raises(store.BuildInputError):
+        store.create_build(conn, aid, requested_by="user", source_kind="apk", diff_sha256=DIFF, diff_summary=deep)
+    assert conn.execute("SELECT COUNT(*) FROM build WHERE analysis_id = ?", (aid,)).fetchone()[0] == 0
+
+
 # ================================================================ 8. teks bebas
 def test_note_is_cleaned_and_truncated(conn):
     aid = make_done_analysis(conn)
@@ -787,10 +798,11 @@ def test_audit_records_each_action_without_content(conn):
     assert SECRET not in everything, "audit tidak boleh memuat note, diff_summary, error_text, atau alasan"
     for _a, d in rows:
         assert set(d) <= {"build_id", "analysis_id", "requested_by", "source_kind", "diff_sha256", "statement_version", "statement_sha256",
-                          "error_code", "from_status", "by", "output_sha256", "output_size", "output_format", "cert_sha256"}
+                          "error_code", "from_status", "by", "output_sha256", "output_size", "output_format", "cert_sha256", "via"}
         assert d["build_id"] > 0 and d["analysis_id"] == aid
     approved = dict(rows)["build_approved"]
-    assert approved["diff_sha256"] == DIFF and approved["statement_version"] == 1
+    assert approved["diff_sha256"] == DIFF and approved["statement_version"] == 1 and approved["via"] == "ui"     # FEAT E: saluran persetujuan tercatat (bawaan ui)
+    assert all("via" not in d for a, d in rows if a != "build_approved"), "kunci `via` hanya milik persetujuan"
 
 
 def test_cancel_audit_distinguishes_request_and_executor(conn):
@@ -954,8 +966,9 @@ def test_every_build_env_read_by_store_is_forwarded_by_compose():
 def test_compose_gains_no_volume_or_secret_and_stays_clean_for_signing_guard():
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     vols = set(re.findall(r"^  ([A-Za-z0-9_]+):", compose.split("\nvolumes:\n", 1)[1].split("\nsecrets:\n", 1)[0], re.M))
-    # Tahap 2a menambah TEPAT dua volume sadar: builds (artefak) dan signspool (antrean worker -> signer). Secret dasar tetap hanya admin_password_hash.
-    assert vols == {"uploads", "work", "files", "db", "spool", "bench", "benchspool", "redisdata", "caddy_data", "caddy_config", "builds", "signspool"}
+    # Tahap 2a menambah dua volume sadar: builds (artefak) dan signspool (antrean worker -> signer); Tahap 2b menambah SATU lagi, sadar: signwork (ruang kerja privat
+    # signer, penutup R3/R10; hanya signer yang memasangnya). Secret dasar tetap hanya admin_password_hash.
+    assert vols == {"uploads", "work", "files", "db", "spool", "bench", "benchspool", "redisdata", "caddy_data", "caddy_config", "builds", "signspool", "signwork"}
     secrets = set(re.findall(r"^  ([A-Za-z0-9_]+):", compose.split("\nsecrets:\n", 1)[1], re.M))
     assert secrets == {"admin_password_hash"}
     # Jaga test_signer_toolchain: web/worker tidak boleh menyebut keystore/signer (komentar sudah dibuang oleh _block).

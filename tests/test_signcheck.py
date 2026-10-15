@@ -23,7 +23,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
-
+from conftest import within_call
 from rvcore import signspool
 from rvcore.paths import Layout
 
@@ -70,7 +70,7 @@ def call(sc, layout, capsys, *argv, stdin: bytes | None = None):
 
 
 def success_result(**over):
-    res = {"ok": True, "error_code": None, "error_text": "", "output_name": "signed.apk", "output_size": 4321, "output_sha256": SHA, "cert_sha256": OWNER,
+    res = {"ok": True, "error_code": None, "error_text": "", "output_name": "signed.apk", "output_size": 4321, "output_sha256": SHA, "input_sha256": SHA, "cert_sha256": OWNER,
            "verify": {"v1": False, "v2": True, "v3": True}, "signer_count": 1, "elapsed": 1.5}
     res.update(over)
     return res
@@ -217,12 +217,13 @@ def test_status_stale_heartbeat_is_hidup_0_but_still_exit_0(sc, layout, capsys):
 
 
 def test_status_hangs_on_nothing_when_heartbeat_is_a_fifo(sc, layout, capsys):
+    """Warisan 2a (non-blocking): tes FIFO TANPA batas waktu akan ikut menggantung bila kodenya regresi; kini dibungkus `within_call`."""
     spool = signspool.make_spool(layout.signspool)
     spool.ensure_dirs()
     os.mkfifo(spool.heartbeat_file)
     started = time.monotonic()
-    rc, out = call(sc, layout, capsys, "status")
-    assert rc == 0 and kv_lines(out)["hidup"] == "0" and time.monotonic() - started < 2
+    (rc, out), exc = within_call(5, call, sc, layout, capsys, "status")
+    assert exc is None and rc == 0 and kv_lines(out)["hidup"] == "0" and time.monotonic() - started < 2
 
 
 # ================================================================================ put / ls / df / clean
@@ -334,6 +335,86 @@ def test_clean_never_follows_a_symlinked_build_folder(sc, layout, capsys, tmp_pa
     layout.builds_dir(AID).symlink_to(victim)
     assert call(sc, layout, capsys, "clean", AID) == (0, "dibersihkan=1\n")
     assert (victim / "penting").exists() and not layout.builds_dir(AID).exists()
+
+
+# ================================================================================ A-03: rantai-dirfd (runner kini menulis akar `builds`)
+def _plant_symlinked_aid(layout, tmp_path, name="korban"):
+    """`builds/<AID>` ditukar jadi symlink ke direktori berisi penanda (yang dilakukan runner terkompromi)."""
+    victim = tmp_path / name
+    (victim / "1").mkdir(parents=True)
+    (victim / "1" / "unsigned.apk").write_bytes(b"jangan disentuh")
+    (victim / "penting").write_text("x")
+    layout.builds_dir(AID).symlink_to(victim)
+    return victim
+
+
+def test_clean_aid_bid_with_a_symlinked_aid_refuses_and_leaves_the_target_intact(sc, layout, capsys, tmp_path):
+    victim = _plant_symlinked_aid(layout, tmp_path)
+    rc, out = call(sc, layout, capsys, "clean", AID, 1)
+    assert rc == 2 and out.startswith("GALAT: ") and "bukan direktori biasa" in out
+    assert (victim / "1" / "unsigned.apk").read_bytes() == b"jangan disentuh" and (victim / "penting").exists()
+    assert layout.builds_dir(AID).is_symlink(), "symlinknya tidak dihapus oleh `clean AID BID`; `clean AID` yang meng-unlink-nya"
+
+
+@pytest.mark.parametrize("cmd", [("put", 1), ("put-garbage", 1), ("put-symlink", 1), ("ls", 1)])
+def test_writers_never_follow_a_symlinked_aid(sc, layout, capsys, tmp_path, diag, cmd):
+    victim = _plant_symlinked_aid(layout, tmp_path)
+    before = sorted(p.name for p in (victim / "1").iterdir())
+    rc, out = call(sc, layout, capsys, cmd[0], AID, cmd[1], stdin=b"isi")
+    assert (rc == 0 and cmd[0] == "ls" and out == "") or (rc == 2 and out.startswith("GALAT: "))
+    assert sorted(p.name for p in (victim / "1").iterdir()) == before and (victim / "1" / "unsigned.apk").read_bytes() == b"jangan disentuh"
+
+
+def test_writers_never_follow_a_symlinked_bid(sc, layout, capsys, tmp_path):
+    victim = tmp_path / "korban-bid"
+    victim.mkdir()
+    (victim / "penting").write_text("x")
+    layout.builds_dir(AID).mkdir(parents=True)
+    layout.build_dir(AID, 1).symlink_to(victim)
+    rc, out = call(sc, layout, capsys, "put", AID, 1, stdin=b"isi")
+    assert rc == 2 and out.startswith("GALAT: ") and [p.name for p in victim.iterdir()] == ["penting"]
+
+
+def test_signcheck_has_no_path_based_mutation_of_builds():
+    """Penjaga struktural A-03: tidak ada `safe_rmtree`/`shutil.rmtree`/`Path.mkdir`/`.rename`/`os.replace` berbasis jalur pada `builds` di signcheck.py."""
+    import ast
+
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    assert not names & {"safe_rmtree", "rmtree", "mkdir", "makedirs", "rename"}, names & {"safe_rmtree", "rmtree", "mkdir", "makedirs", "rename"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "replace" and getattr(node.func.value, "id", "") == "os":
+            assert {k.arg for k in node.keywords} >= {"src_dir_fd", "dst_dir_fd"}, "os.replace harus relatif dir_fd"
+
+
+# ================================================================================ expect_sha256 (A-02, sisi klien) dan FIFO ber-batas waktu
+def test_sign_sends_the_sha256_of_the_unsigned_apk_it_read_through_the_nofollow_chain(sc, layout, capsys, daemon):
+    bdir = layout.build_dir(AID, 1)
+    bdir.mkdir(parents=True)
+    (bdir / "unsigned.apk").write_bytes(b"isi apk")
+    assert call(sc, layout, capsys, "sign", AID, 1)[0] == 0
+    assert daemon.seen[0]["expect_sha256"] == hashlib.sha256(b"isi apk").hexdigest()
+    assert call(sc, layout, capsys, "sign", AID, 1, "--expect-sha256", "ab" * 32)[0] == 0
+    assert daemon.seen[1]["expect_sha256"] == "ab" * 32
+
+
+@pytest.mark.parametrize("kind", ["missing", "symlink", "fifo", "dir"])
+def test_sign_sends_a_zero_hash_for_a_missing_or_unsafe_input_and_never_hangs(sc, layout, capsys, daemon, tmp_path, kind):
+    bdir = layout.build_dir(AID, 1)
+    bdir.mkdir(parents=True)
+    apk = bdir / "unsigned.apk"
+    target = tmp_path / "t.apk"
+    target.write_bytes(b"rahasia")
+    {"missing": lambda: None, "symlink": lambda: apk.symlink_to(target), "fifo": lambda: os.mkfifo(apk), "dir": lambda: apk.mkdir()}[kind]()
+    (rc, out), exc = within_call(5, call, sc, layout, capsys, "sign", AID, 1)
+    assert exc is None and rc == 0
+    assert daemon.seen[0]["expect_sha256"] == "0" * 64, "signer sendiri yang menjawab input_missing/input_unsafe"
+
+
+def test_sign_rejects_a_malformed_expect_sha256_before_contacting_the_signer(sc, layout, capsys, daemon):
+    for bad in ("zz", "AB" * 32, "ab" * 31):
+        assert call(sc, layout, capsys, "sign", AID, 1, "--expect-sha256", bad)[0] == 64
+    assert not daemon.seen
 
 
 # ================================================================================ diagnostik: put-garbage / put-symlink
@@ -592,6 +673,7 @@ def real_daemon(tmp_path):
     owner = hashlib.sha256(der).hexdigest()
     data = tmp_path / "data"
     lay = Layout(data)
+    lay.builds.mkdir(parents=True)                         # volume `builds` ada (titik mount di image); signcheck tidak membuat akar volume
     boot = f"""
 import importlib.machinery, importlib.util, sys
 from pathlib import Path

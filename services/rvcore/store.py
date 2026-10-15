@@ -17,6 +17,7 @@ import unicodedata
 from typing import Any
 
 from .db import tx
+from .fsutil import scrub_paths
 
 # --- status analisis
 QUEUED, RUNNING, DONE, FAILED, CANCELLED = "queued", "running", "done", "failed", "cancelled"
@@ -590,7 +591,7 @@ def reset_for_retry(conn: sqlite3.Connection, analysis_id: int, only_stage: str 
     if only_stage is not None:
         if only_stage != "analyzing":
             raise ValueError("hanya tahap 'analyzing' yang bisa diulang sendiri")
-        with tx(conn):
+        with tx(conn):        # NB-2 (A-09): cabang ini TIDAK menghapus apktool/, jadi tetap boleh walau ada build aktif
             cur = conn.execute(
                 "UPDATE analysis SET status = ?, attempt = attempt + 1, cancel_requested = 0, "
                 "  error_code = NULL, error = NULL, started_at = NULL, finished_at = NULL, "
@@ -610,6 +611,10 @@ def reset_for_retry(conn: sqlite3.Connection, analysis_id: int, only_stage: str 
             conn.execute("DELETE FROM analysis_log WHERE analysis_id = ? AND (stage = ? OR stage IS NULL)", (analysis_id, only_stage))
             return True
     with tx(conn):
+        # NB-2: reset PENUH menghapus work/<id> (baseline yang diikat hash diff build) -> ditolak selama ada build aktif (awaiting_approval..signing).
+        # Diperiksa di transaksi yang sama dengan pembaruan analisis (BEGIN IMMEDIATE), jadi tak berlomba dengan create_build.
+        if active_build(conn, analysis_id) is not None:
+            return False
         cur = conn.execute(
             "UPDATE analysis SET status = ?, attempt = attempt + 1, cancel_requested = 0, "
             "  error_code = NULL, error = NULL, tool_versions = NULL, started_at = NULL, "
@@ -631,12 +636,17 @@ def reset_for_retry(conn: sqlite3.Connection, analysis_id: int, only_stage: str 
 
 
 def delete_apk(conn: sqlite3.Connection, apk_id: int) -> list[int] | None:
-    """Hapus apk beserta analisisnya. None bila masih ada analisis aktif. Mengembalikan id analisis terhapus."""
+    """Hapus apk beserta analisisnya. None bila masih ada analisis aktif ATAU build aktif (NB-2: CASCADE akan menghapus baris build selagi runner
+    mungkin bekerja). Mengembalikan id analisis terhapus."""
     with tx(conn):
         active = conn.execute(
             "SELECT 1 FROM analysis WHERE apk_id = ? AND status IN (?, ?) LIMIT 1", (apk_id, QUEUED, RUNNING)
         ).fetchone()
         if active:
+            return None
+        marks = ", ".join("?" for _ in BUILD_ACTIVE)
+        if conn.execute(f"SELECT 1 FROM build b JOIN analysis an ON an.id = b.analysis_id WHERE an.apk_id = ? AND b.status IN ({marks}) LIMIT 1",
+                        (apk_id, *BUILD_ACTIVE)).fetchone():
             return None
         ids = [r[0] for r in conn.execute("SELECT id FROM analysis WHERE apk_id = ?", (apk_id,))]
         conn.execute("DELETE FROM apk WHERE id = ?", (apk_id,))  # CASCADE ke analysis, tahap, log, artefak
@@ -793,11 +803,7 @@ _REQUESTED_BY_RE = re.compile(r"(user|ai:[0-9]{1,18})")
 _HEX64_RE = re.compile(r"[0-9a-f]{64}")
 _OUTPUT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}")
 _ERROR_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,39}")
-# Path internal (kontainer) yang tidak boleh sampai ke layar: /data/work/12/..., /tmp/x, /opt/...
-_INTERNAL_PATH_RE = re.compile(
-    r"(?<![\w<])/(?:data|tmp|opt|app|run|home|work|out|in|w|usr|var|etc|proc|root|mnt|srv|lib|bin|sbin|dev|sys)(?![\w-])"
-    r"(?:/[^\s'\"`]*)?"
-)
+# Path internal (kontainer) yang tidak boleh sampai ke layar disaring oleh fsutil.scrub_paths (absolut DAN relatif volume; NB-3).
 # Pengendali arah tulisan (bisa memalsukan tampilan teks di layar persetujuan) dibuang bersama karakter kontrol.
 _BIDI_CHARS = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 
@@ -869,7 +875,7 @@ def _clean_text(value: Any, limit: int, *, multiline: bool = False, scrub: bool 
         text = re.sub(r"\n{3,}", "\n\n", text)
     text = text.strip()
     if scrub:
-        text = _INTERNAL_PATH_RE.sub("<path>", text)
+        text = scrub_paths(text)
     return text[:limit].rstrip()
 
 
@@ -935,7 +941,7 @@ def create_build(conn: sqlite3.Connection, analysis_id: int, *, requested_by: st
         raise BuildInputError("Ringkasan diff harus berupa objek.")
     try:
         summary = json.dumps(diff_summary, sort_keys=True, ensure_ascii=False)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):      # struktur sangat dalam: json.dumps melempar RecursionError (NB-1)
         raise BuildInputError("Ringkasan diff tidak bisa diserialisasi.") from None
     if len(summary) > BUILD_SUMMARY_MAX:      # JSON terpotong = rusak, jadi ditolak, bukan dipotong
         raise BuildInputError(f"Ringkasan diff terlalu besar (maksimum {BUILD_SUMMARY_MAX} karakter).")
@@ -1017,13 +1023,19 @@ def is_build_cancel_requested(conn: sqlite3.Connection, build_id: int) -> bool:
 
 
 # ------------------------------------------------------------------ persetujuan (SATU-SATUNYA jalan ke 'approved')
+BUILD_APPROVAL_CHANNELS = ("ui", "cli")      # saluran persetujuan yang dicatat di audit (daftar tetap; bukan teks bebas)
+
+
 def approve_build(conn: sqlite3.Connection, build_id: int, *, diff_sha256: str, statement_sha256: str,
-                  statement_version: int) -> None:
+                  statement_version: int, via: str = "ui") -> None:
     """awaiting_approval -> approved, HANYA bila diff_sha256 sama persis dengan yang tercatat saat diajukan.
 
     Hash diff ikut di klausa WHERE CAS (tanpa celah cek-lalu-ubah). statement_* = pernyataan wewenang yang ditampilkan; harus
     persis salah satu versi yang dikenal (UI tidak bisa menyetujui dengan teks yang tidak pernah ditampilkan).
+    via: saluran persetujuan untuk audit, salah satu BUILD_APPROVAL_CHANNELS ('ui' bawaan; 'cli' = pemilik lewat `app.buildctl`).
     """
+    if type(via) is not str or via not in BUILD_APPROVAL_CHANNELS:
+        raise BuildInputError("Saluran persetujuan tidak dikenal.")
     _require_id("build_id", build_id)
     _require_hex64("diff_sha256", diff_sha256)
     _require_hex64("statement_sha256", statement_sha256)
@@ -1043,7 +1055,7 @@ def approve_build(conn: sqlite3.Connection, build_id: int, *, diff_sha256: str, 
                           approval_statement_version=statement_version):
             raise _state_error(conn, build_id, "disetujui")
         _audit_build(conn, "build_approved", row, diff_sha256=diff_sha256, statement_version=statement_version,
-                     statement_sha256=statement_sha256)
+                     statement_sha256=statement_sha256, via=via)
 
 
 def reject_build(conn: sqlite3.Connection, build_id: int, reason: str = "") -> None:

@@ -12,10 +12,16 @@ Berjalan di VPS sendiri lewat Docker Compose.
 > Lihat [roadmap](docs/prd/08-roadmap.md).
 >
 > **Fitur build APK (PRD 09 Bagian B) — fondasi + daemon penanda tangan (Tahap 2a):** tabel `build` + state machine persetujuan manual (migrasi v5), keystore penanda
-> tangan yang dibuat `make init`, toolchain `signer`, dan kini **`signer-daemon`** yang menandatangani APK dengan keystore pemilik (`make signer-verify`). **Belum ada** tahap `build`, antarmuka, maupun tool AI:
-> aplikasi belum bisa membangun APK sendiri. Keystore dipasang ke layanan `signer` saja (read-only) dan berkasnya kini mode 644 di folder `secrets/` 700 (keputusan sadar, lihat
+> tangan yang dibuat `make init`, toolchain `signer`, dan kini **`signer-daemon`** yang menandatangani APK dengan keystore pemilik (`make signer-verify`). Pada 2a **belum ada** tahap `build`, antarmuka, maupun tool AI (2b di bawah menambahkan pipeline dan CLI-nya). Keystore dipasang ke layanan `signer` saja (read-only) dan berkasnya kini mode 644 di folder `secrets/` 700 (keputusan sadar, lihat
 > [docs/deploy.md](docs/deploy.md#signer-daemon--akses-kunci-tahap-2a)). Cadangkan `secrets/signing_keystore.*` setelah `make init`
 > ([docs/deploy.md](docs/deploy.md#keystore-penanda-tangan-tahap-1)). Uji Docker/cgroup untuk Tahap 2a menunggu VPS (daftar V0–V12 di deploy.md).
+>
+> **Build APK Tahap 2b (pipeline `bench → runner → signer`):** worker `run_build` (runner `apktool b` → signer → verifikasi → artefak bernama sistem → retensi `BUILD_KEEP`), CLI pemilik
+> `docker compose exec -T web python -m app.buildctl` (analyze/init/shell/diff/request/approve/status/wait/cancel/artifact-info/delete), persetujuan manual terikat hash diff
+> (HANYA lewat CLI; tidak ada rute web, tool AI, atau unduhan), `runner` memasang `bench` read-only, signer bekerja di volume privat `signwork` (penutupan R3/R10 di kode). Env baru
+> `TIMEOUT_BUILD`/`TIMEOUT_SIGN`. **FR-9.24 (badging) dan FR-9.41 ditunda ke Tahap 5** — menunggu konfirmasi pemilik (PRD 09); prasyarat Tahap 5: unduh = salin-lalu-hash-lalu-bandingkan.
+> **BELUM DIUJI:** semuanya di Docker/Compose nyata, cgroup, dan RQ/Redis nyata (sandbox memakai `fakeredis`; Docker di sandbox rusak, jadi compose hanya dibuktikan lewat tes yang mem-parse YAML).
+> Bukti satu-perintah di VPS: `make verify-build` (BELUM DIUJI di Docker). Detail, tabel mount, dan gejala VPS: [docs/deploy.md](docs/deploy.md#build-apk-tahap-2b-pipeline-bench--runner--signer-status-terbukti-di-sandbox-belum-diuji-di-docker).
 
 ## Mulai cepat
 ```bash
@@ -27,7 +33,7 @@ make doctor      # periksa kesehatan
 Panduan lengkap untuk VPS: [docs/deploy.md](docs/deploy.md).
 
 ## Perintah
-`make help` menampilkan semuanya: `init`, `keystore` (buat keystore bila belum ada; tidak pernah menimpa), `keystore-info` (sidik jari, tanpa kata sandi), `keystore-access` (pastikan kunci terbaca kontainer signer: `secrets/` 700, berkas 644; hanya `chmod`), `password`, `up`, `down`, `restart`, `logs`, `ps`, `update`, `runner-selftest`, `signer-selftest`, `signer-verify` (bukti end-to-end penandatanganan dengan keystore pemilik; `BIG_MB=1000` menambah APK besar), `tools-check` (tabel versi alat build), `bench-selftest`, `net-check` (shell AI dan jaringannya, lihat `.env.example`), `doctor`, `test`.
+`make help` menampilkan semuanya: `init`, `keystore` (buat keystore bila belum ada; tidak pernah menimpa), `keystore-info` (sidik jari, tanpa kata sandi), `keystore-access` (pastikan kunci terbaca kontainer signer: `secrets/` 700, berkas 644; hanya `chmod`), `password`, `up`, `down`, `restart`, `logs`, `ps`, `update`, `runner-selftest`, `signer-selftest`, `signer-verify` (bukti end-to-end penandatanganan dengan keystore pemilik; `BIG_MB=1000` menambah APK besar), `verify-build` (bukti end-to-end pipeline build 2b: satu tabel OK/GAGAL, membersihkan analisis ujinya sendiri), `tools-check` (tabel versi alat build), `bench-selftest`, `net-check` (shell AI dan jaringannya, lihat `.env.example`), `doctor`, `test`.
 
 Tes (tanpa Docker): `pip install -r services/web/requirements.txt -r tests/requirements.txt` lalu `make test`. CI menjalankannya di setiap PR.
 

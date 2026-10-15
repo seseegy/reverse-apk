@@ -103,13 +103,13 @@ Jenis ditentukan dari **isi arsip**, bukan ekstensi (seperti lampiran di 07). Ek
 | FR-9.21 | Keystore: **satu per instalasi**, dibuat oleh `make init`, tidak pernah masuk repo, `web`, `worker`, atau runner. Ini kunci uji, **bukan** kunci rilis, dan tidak boleh dipakai di tempat lain | P1 |
 | FR-9.22 | Skema tanda tangan: v2 + v3 (target SDK modern mewajibkan, dan `resources.arsc` harus tak terkompresi serta rata 4 byte; `zipalign` dijalankan **sebelum** `apksigner`) | P1 |
 | FR-9.23 | Setiap APK hasil memuat berkas jejak `assets/reverse-apk-modified.txt` berisi SHA-256 APK asal, nomor build, dan waktu, agar asal-usulnya jelas. Berkas ini ditambahkan sistem, bukan AI | P1 |
-| FR-9.24 | Verifikasi akhir wajib sebelum status `done`: `apksigner verify` lulus, `aapt2 dump badging` terbaca, paket dan versi sesuai harapan, dan SHA-256 hasil dicatat | P1 |
+| FR-9.24 | Verifikasi akhir wajib sebelum status `done`: `apksigner verify` lulus, `aapt2 dump badging` terbaca, paket dan versi sesuai harapan, dan SHA-256 hasil dicatat | P1 — **DITUNDA ke Tahap 5** (badging dan paket/versi); `apksigner verify`, sertifikat, `zipalign`, dan SHA-256 tetap dikerjakan di 2b (lihat Status Tahap 2b) |
 | FR-9.25 | Unduhan hanya lewat sesi login (CSRF + header unduhan seperti di 07), `Content-Type: application/vnd.android.package-archive`, `Content-Disposition: attachment`, `nosniff` | P1 |
 | FR-9.26 | Audit log: `build_requested`, `build_approved`, `build_rejected`, `build_done`, `build_failed`, `build_download`, masing-masing dengan `analysis_id`, nomor build, SHA-256 diff, dan SHA-256 hasil | P1 |
 | FR-9.27 | Build dapat dibatalkan (seperti job lain), dan hasil sementara dibersihkan oleh *housekeeping* runner | P1 |
-| FR-9.28 | Batas: maks. N build per analisis yang disimpan (usul 5), kuota disk build ikut `MIN_FREE_GB`/`MAX_OUTPUT_MB` | P1 |
+| FR-9.28 | Batas: maks. N build per analisis yang disimpan (10 bawaan, `BUILD_KEEP`, klem 1–100), kuota disk build ikut `MIN_FREE_GB`/`MAX_OUTPUT_MB` | P1 |
 | FR-9.40 | **Layar persetujuan harus tahan perubahan yang sangat banyak** (pemilik: jenis perubahan "apa saja, sangat banyak"): diff dikelompokkan per berkas dengan jumlah baris tambah/hapus, dapat dicari dan disaring (smali / resource / manifest / aset biner), berkas terbesar dan paling banyak berubah di atas, dan setiap berkas dapat dibuka penuh. Persetujuan terikat pada **SHA-256 diff**: bila ruang kerja berubah lagi setelah diajukan, persetujuan lama tidak berlaku | P1 |
-| FR-9.41 | Verifikasi (FR-9.24) membaca `targetSdkVersion`/`minSdkVersion` dan menampilkan peringatan jelas bila APK **tidak akan terpasang di Android 14+** (target SDK di bawah 23 ditolak oleh sistem terlepas dari tanda tangan). Tidak memblokir unduhan | P1 |
+| FR-9.41 | Verifikasi (FR-9.24) membaca `targetSdkVersion`/`minSdkVersion` dan menampilkan peringatan jelas bila APK **tidak akan terpasang di Android 14+** (target SDK di bawah 23 ditolak oleh sistem terlepas dari tanda tangan). Tidak memblokir unduhan | P1 — **DITUNDA ke Tahap 5** bersama FR-9.24 (lihat Status Tahap 2b) |
 | FR-9.42 | Ruang kerja punya **titik simpan** (*snapshot*) yang dibuat sistem sebelum tiap permintaan build dan dapat dipulihkan ("Kembali ke titik simpan N"), karena perubahan banyak dan bertahap oleh AI mudah salah arah | P2 |
 
 ### Hal yang **tidak** dijanjikan (harus tampil di UI dan README)
@@ -389,6 +389,18 @@ Rekomendasi: daftar host spesifik; `*` hanya untuk API milik sendiri atau yang A
 2. Isi `AI_SHELL_NET_ALLOW` di `.env` (mulai dengan satu host), `make restart`, lalu `make bench-selftest` lagi: bagian proxy harus semua `[OK ]`.
 3. `make net-check URL=https://host-anda/jalur` membuktikan jalur penuh (HTTP 200 dari kontainer yang terkurung).
 4. Baru nyalakan `AI_SHELL_ENABLED=1`. Kirim keluaran bila ada `[GAGAL]`.
+
+## Status Tahap 2b: pipeline build dari bench sampai artefak bertanda tangan
+
+Tahap 2b menyambung `bench` (ruang kerja + diff kanonik `treediff`) → persetujuan manual terikat hash diff (CLI `python -m app.buildctl`) → worker `run_build` → `runner` (`apktool b`, snapshot + hash ulang) → `signer` (kerja privat di `signwork`, `expect_sha256`) → verifikasi → artefak bernama sistem `…-modified-<id>.apk` → retensi `BUILD_KEEP`. Tidak ada rute web, tool AI, atau unduhan untuk menyetujui/menandatangani/mengunduh. Rincian operasional: `docs/deploy.md` "Build APK Tahap 2b"; catatan audit: `audit.md` 10.18.
+
+**Keputusan tercatat Tahap 2b (menunggu konfirmasi pemilik).**
+- **FR-9.23 DIKERJAKAN** di 2b (berkas jejak ditambahkan sistem).
+- **FR-9.24 SEBAGIAN**: `apksigner verify`, sertifikat = keystore pemilik, `zipalign -c`, dan SHA-256 dicatat; `aapt2 dump badging` serta pemeriksaan paket/versi **DITUNDA ke Tahap 5**. **FR-9.41** (peringatan target SDK < 23) **DITUNDA ke Tahap 5** karena bergantung pada badging itu. Ini menyimpang dari teks FR-9.24 ("wajib sebelum `done`") dan dari catatan "Tahap 2b" di Status Tahap 2a; penyimpangan ini keputusan desain yang MENUNGGU konfirmasi pemilik. Opsi bagi pemilik: (a) kerjakan `aapt2 dump badging` terhadap `signed.apk` di 2b (ditaruh di worker setelah pemeriksaan hasil signer; aapt2 hash-dipin ada di image runner, bukan signer), atau (b) tunda ke Tahap 5 seperti sekarang. Pekerjaan 2b tidak menunggu jawaban.
+- **FR-9.28**: nilai bawaan 10 (menggantikan usulan awal 5), `BUILD_KEEP` klem 1–100.
+- **Prasyarat Tahap 5 (unduh)**: runner yang terkompromi dapat mengubah `signed.apk` SETELAH diterbitkan (uid sama, `builds` rw); perubahan itu tidak membawa tanda tangan pemilik yang sah dan terdeteksi oleh hash di DB, tetapi 2b tidak mencegahnya. Karena itu rute unduh Tahap 5 WAJIB **salin-lalu-hash-lalu-bandingkan**: salin ke tempat yang tak bisa ditulis runner, hitung hash dari salinan, bandingkan dengan hash di DB, baru sajikan salinan itu. Opsi pencegah yang lebih kuat (volume `artifacts` terpisah yang tak dipasang di runner) dicatat sebagai peningkatan bila risiko ini tidak dapat diterima.
+
+**Belum terbukti:** semua yang butuh Docker/cgroup/RQ nyata di VPS (daftar di `docs/deploy.md`); di sandbox Redis = `fakeredis`.
 
 ## Pertanyaan terbuka
 - [DIPUTUSKAN] Isolasi antar analisis di `bench`: **Landlock (opsi 2)**, berdasarkan `scripts/bench-probe.sh` di VPS (lihat Status PR A). [OPEN] diuji ulang dengan pengaturan kontainer `bench` yang sebenarnya.

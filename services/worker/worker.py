@@ -1,4 +1,4 @@
-"""Worker RQ: menjalankan antrean `jobs`, mengorkestrasi pipeline, dan mengirim heartbeat ke Redis.
+"""Worker RQ: menjalankan antrean `jobs`, mengorkestrasi pipeline analisis dan build, dan mengirim heartbeat ke Redis.
 
 Alat berat (jadx, apktool) sengaja TIDAK ada di image ini; mereka berjalan di service `runner`
 yang terisolasi (tanpa jaringan). Worker hanya menitipkan job lewat spool berkas (rvcore/spool.py).
@@ -18,13 +18,14 @@ from urllib.parse import quote
 import redis
 from rq import Queue, Worker
 
-from rvcore import store
+from rvcore import signspool, store
 from rvcore.db import connect, migrate
 from rvcore.paths import Layout
 from rvcore.spool import Spool
 
 HEARTBEAT_KEY = "worker:heartbeat"
 RUNNER_HEARTBEAT_KEY = "runner:heartbeat"
+SIGNER_HEARTBEAT_KEY = "signer:heartbeat"
 HEARTBEAT_EVERY = 10  # detik
 HEARTBEAT_TTL = 30  # detik; web menganggap worker mati bila lebih lama dari ini
 RUNNER_FRESH_WITHIN = 30  # detik; heartbeat runner yang lebih tua dari ini tidak diteruskan
@@ -46,7 +47,9 @@ def redis_url() -> str:
 
 def heartbeat_loop(conn: redis.Redis, stop: threading.Event) -> None:
     payload_base = {"host": socket.gethostname(), "pid": os.getpid()}
-    spool = Spool(Layout(os.environ.get("DATA_DIR", "/data")).spool)
+    layout = Layout(os.environ.get("DATA_DIR", "/data"))
+    spool = Spool(layout.spool)
+    sign_spool = signspool.make_spool(layout.signspool)
     while not stop.is_set():
         try:
             conn.set(HEARTBEAT_KEY, json.dumps({**payload_base, "ts": time.time()}), ex=HEARTBEAT_TTL)
@@ -55,6 +58,12 @@ def heartbeat_loop(conn: redis.Redis, stop: threading.Event) -> None:
             beat = spool.read_heartbeat()
             if beat is not None and age is not None and age <= RUNNER_FRESH_WITHIN:
                 conn.set(RUNNER_HEARTBEAT_KEY, json.dumps(beat), ex=HEARTBEAT_TTL)
+            # Signer juga tanpa jaringan dan hanya berbagi volume `signspool`: detaknya diteruskan HANYA bila hidup (web membacanya dengan validasi ketat).
+            signer = signspool.signer_status(sign_spool)
+            if signer["hidup"]:
+                ks = signer["keystore"]
+                conn.set(SIGNER_HEARTBEAT_KEY, json.dumps({"ts": time.time() - signer["umur"], "state": signer["state"],
+                                                           "keystore_state": ks["state"], "cert_sha256": ks["cert_sha256"]}), ex=HEARTBEAT_TTL)
         except redis.RedisError as exc:
             log.warning("heartbeat gagal: %s", type(exc).__name__)
         except Exception:  # noqa: BLE001 - heartbeat tidak boleh mematikan worker
@@ -103,6 +112,7 @@ def main() -> None:
         raise SystemExit("Redis tidak terjangkau")
 
     # Pemulihan setelah restart (NFR-2.3): job 'running' yang terputus ditandai gagal, job yatim dikirim ulang.
+    import builds
     import pipeline
 
     layout = Layout(os.environ.get("DATA_DIR", "/data"))
@@ -110,9 +120,15 @@ def main() -> None:
     interrupted = pipeline.reconcile()
     if interrupted:
         log.warning("analisis terputus oleh restart, ditandai gagal: %s", interrupted)
+    recovered = builds.reconcile(layout)
+    if recovered:
+        log.warning("build terputus oleh restart, ditandai gagal: %s", recovered)
     requeued = requeue_orphans(conn)
     if requeued:
         log.info("analisis antre tanpa job di Redis, dikirim ulang: %s", requeued)
+    requeued_builds = builds.requeue_orphans(conn)
+    if requeued_builds:
+        log.info("build antre tanpa job di Redis, dikirim ulang: %s", requeued_builds)
 
     stop = threading.Event()
     threading.Thread(target=heartbeat_loop, args=(conn, stop), daemon=True).start()

@@ -461,3 +461,308 @@ def test_real_check_keystore_with_a_real_pkcs12_owner_key_and_a_trusted_cert(st,
     st.check_keystore(str(trusted))
     out = capsys.readouterr().out
     assert st.failed and "trustedCertEntry" in out and pw not in out
+
+
+# ================================================================================ --check-apk (Tahap 2b, FEAT G)
+# Alat PALSU (skrip sh di PATH); yang diuji adalah logika selftest: validasi argumen, pembukaan berkas lewat rantai-dirfd (tanpa symlink/FIFO), keluaran kunci=nilai yang
+# stabil, deteksi berkas yang ditukar saat alat berjalan, dan jalannya sebagai uid 10001 pada pohon berizin ketat. Alat NYATA (apksigner/zipalign) hanya di VPS/e2e.
+CHECK_KEYS = ["signers", "v2", "v3", "cert", "zipalign", "sha", "size"]
+CERT_A = hashlib.sha256(b"cert-a").hexdigest()
+CERT_B = hashlib.sha256(b"cert-b").hexdigest()
+
+FAKE_APKSIGNER = """#!/bin/sh
+echo "apksigner $*" >> "$FAKE_LOG"
+cat "$FAKE_VERIFY_OUT"
+[ -n "$FAKE_SLEEP" ] && sleep "$FAKE_SLEEP"
+exit "${FAKE_VERIFY_RC:-0}"
+"""
+FAKE_ZIPALIGN = """#!/bin/sh
+echo "zipalign $*" >> "$FAKE_LOG"
+for a; do last=$a; done
+[ -n "$FAKE_SWAP" ] && mv "$FAKE_SWAP" "$last"
+exit "${FAKE_ZIPALIGN_RC:-0}"
+"""
+
+
+def verify_out(digests=(CERT_A,), v1=False, v2=True, v3=True, signers=None) -> str:
+    lines = ["Verifies", f"Verified using v1 scheme (JAR signing): {str(v1).lower()}", f"Verified using v2 scheme (APK Signature Scheme v2): {str(v2).lower()}",
+             f"Verified using v3 scheme (APK Signature Scheme v3): {str(v3).lower()}", f"Number of signers: {len(digests) if signers is None else signers}"]
+    for i, dig in enumerate(digests, 1):
+        lines += [f"Signer #{i} certificate DN: CN=reverse-apk", f"Signer #{i} certificate SHA-256 digest: {dig.upper()}", f"Signer #{i} public key SHA-256 digest: {CERT_B}"]
+    return "\n".join(lines) + "\n"
+
+
+class CheckRig:
+    def __init__(self, tmp_path, monkeypatch, st):
+        self.st = st
+        self.root = tmp_path
+        self.bin = tmp_path / "bin"
+        self.bin.mkdir()
+        for name, body in (("apksigner", FAKE_APKSIGNER), ("zipalign", FAKE_ZIPALIGN)):
+            (self.bin / name).write_text(body)
+            (self.bin / name).chmod(0o755)
+        self.builds = tmp_path / "data" / "builds"
+        self.dir = self.builds / "5" / "9"
+        self.dir.mkdir(parents=True)
+        self.name = "app-modified-9.apk"
+        self.data = b"PK\x03\x04" + b"isi-apk-uji" * 50
+        (self.dir / self.name).write_bytes(self.data)
+        self.log = tmp_path / "tools.log"
+        self.out = tmp_path / "verify.out"
+        self.out.write_text(verify_out())
+        for k, v in (("PATH", f"{self.bin}{os.pathsep}{os.environ['PATH']}"), ("FAKE_LOG", str(self.log)), ("FAKE_VERIFY_OUT", str(self.out))):
+            monkeypatch.setenv(k, v)
+        for k in ("FAKE_VERIFY_RC", "FAKE_ZIPALIGN_RC", "FAKE_SWAP", "FAKE_SLEEP"):
+            monkeypatch.delenv(k, raising=False)
+        self.mp = monkeypatch
+
+    def run(self, aid="5", bid="9", name=None, capsys=None):
+        rc = self.st.run_check_apk([aid, bid, self.name if name is None else name], builds_root=str(self.builds))
+        out = capsys.readouterr() if capsys else None
+        return rc, out
+
+    def tools_called(self) -> list[str]:
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+
+@pytest.fixture
+def ck(tmp_path, monkeypatch, st):
+    return CheckRig(tmp_path, monkeypatch, st)
+
+
+def kvs(text: str) -> dict[str, str]:
+    return dict(ln.split("=", 1) for ln in text.splitlines() if "=" in ln)
+
+
+def test_check_apk_happy_path_prints_exactly_the_documented_keys_in_order(ck, capsys):
+    rc, cap = ck.run(capsys=capsys)
+    assert rc == 0, cap.out + cap.err
+    lines = cap.out.strip().splitlines()
+    assert [ln.split("=", 1)[0] for ln in lines] == CHECK_KEYS
+    got = kvs(cap.out)
+    assert got == {"signers": "1", "v2": "1", "v3": "1", "cert": CERT_A, "zipalign": "ok", "sha": hashlib.sha256(ck.data).hexdigest(), "size": str(len(ck.data))}
+    assert cap.err == ""
+
+
+def test_check_apk_runs_the_same_tool_commands_as_the_daemon(ck, capsys):
+    ck.run(capsys=capsys)
+    path = str(ck.dir / ck.name)
+    assert ck.tools_called() == [f"zipalign -c -P 16 4 {path}", f"apksigner verify --verbose --print-certs {path}"]
+
+
+def test_check_apk_reports_multiple_signers_without_judging_them(ck, capsys):
+    ck.out.write_text(verify_out(digests=(CERT_B, CERT_A)))
+    rc, cap = ck.run(capsys=capsys)
+    got = kvs(cap.out)
+    assert rc == 0 and got["signers"] == "2" and got["cert"] == ",".join(sorted([CERT_A, CERT_B]))
+
+
+def test_check_apk_reports_missing_schemes_as_zero(ck, capsys):
+    ck.out.write_text(verify_out(v2=False, v3=False, v1=True))
+    rc, cap = ck.run(capsys=capsys)
+    got = kvs(cap.out)
+    assert rc == 0 and got["v2"] == "0" and got["v3"] == "0"
+
+
+@pytest.mark.parametrize("bad", ["", "0", "-1", "+1", " 1", "1 ", "1.0", "01x", "1000000000", "99999999999999999999", "\u0661", "true", "١٢"])
+def test_check_apk_rejects_non_integer_or_out_of_range_ids(ck, capsys, bad):
+    for aid, bid in ((bad, "9"), ("5", bad)):
+        rc, cap = ck.run(aid=aid, bid=bid, capsys=capsys)
+        assert rc == 64, (aid, bid)
+        assert cap.out == "" and cap.err.startswith("GALAT:")
+    assert ck.tools_called() == []
+
+
+@pytest.mark.parametrize("bad", ["", "../x.apk", ".tersembunyi.apk", "-rf", "a/b.apk", "a b.apk", "a" * 121, "é.apk", "x.apk\n", "x\x00.apk", "..", "."])
+def test_check_apk_rejects_names_that_fail_the_output_name_regex(ck, capsys, bad):
+    rc, cap = ck.run(name=bad, capsys=capsys)
+    assert rc == 64
+    assert cap.out == ""
+    assert ck.tools_called() == []
+
+
+def test_check_apk_name_regex_is_the_same_as_the_stores(st):
+    from rvcore import store
+    assert st.OUTPUT_NAME_RE.pattern == store._OUTPUT_NAME_RE.pattern
+
+
+@pytest.mark.parametrize("args", [[], ["5"], ["5", "9"], ["5", "9", "a.apk", "extra"]])
+def test_check_apk_needs_exactly_three_arguments(st, capsys, args):
+    rc = st.main(["--check-apk", *args])
+    assert rc == 64
+    assert capsys.readouterr().out == ""
+
+
+def test_check_apk_cannot_be_combined_with_the_other_modes(st, capsys):
+    assert st.main(["--check-apk", "5", "9", "a.apk", "--watch"]) == 64
+    assert st.main(["--leak-scan", "--check-apk", "5", "9", "a.apk"]) == 64
+
+
+def test_check_apk_is_dispatched_by_main_and_skips_the_container_checks(ck, capsys, st):
+    ck.mp.setattr(st, "DATA_DIR", str(ck.root / "data"))
+    rc = st.main(["--check-apk", "5", "9", ck.name])
+    assert rc == 0
+    assert "ringkasan" not in capsys.readouterr().out
+
+
+def test_check_apk_missing_file_is_a_stable_failure_without_running_tools(ck, capsys):
+    rc, cap = ck.run(name="tidak-ada.apk", capsys=capsys)
+    assert rc == 3 and kvs(cap.out)["kode"] == "berkas_tidak_ada"
+    assert ck.tools_called() == []
+
+
+def test_check_apk_missing_folder_is_a_stable_failure(ck, capsys):
+    rc, cap = ck.run(aid="6", capsys=capsys)
+    assert rc == 3 and kvs(cap.out)["kode"] == "berkas_tidak_ada"
+
+
+def test_check_apk_never_follows_a_symlinked_name(ck, capsys):
+    (ck.dir / "asli.apk").write_bytes(ck.data)
+    (ck.dir / "tautan.apk").symlink_to("asli.apk")
+    rc, cap = ck.run(name="tautan.apk", capsys=capsys)
+    assert rc == 3 and kvs(cap.out)["kode"] == "berkas_tidak_ada"
+    assert ck.tools_called() == []
+
+
+def test_check_apk_never_follows_a_symlinked_build_folder(ck, capsys):
+    other = ck.root / "lain"
+    other.mkdir()
+    (other / ck.name).write_bytes(ck.data)
+    (ck.builds / "5" / "8").symlink_to(other)
+    rc, cap = ck.run(bid="8", capsys=capsys)
+    assert rc == 3 and kvs(cap.out)["kode"] == "berkas_tidak_ada"
+    assert ck.tools_called() == []
+
+
+def test_check_apk_never_follows_a_symlinked_analysis_folder(ck, capsys):
+    other = ck.root / "lain2"
+    (other / "9").mkdir(parents=True)
+    (other / "9" / ck.name).write_bytes(ck.data)
+    (ck.builds / "7").symlink_to(other)
+    rc, cap = ck.run(aid="7", capsys=capsys)
+    assert rc == 3 and kvs(cap.out)["kode"] == "berkas_tidak_ada"
+
+
+def test_check_apk_fifo_does_not_hang_and_is_refused(ck, capsys):
+    os.mkfifo(ck.dir / "fifo.apk")
+    from conftest import within_call
+    (rc, cap), exc = within_call(10, ck.run, name="fifo.apk", capsys=capsys)
+    assert exc is None and rc == 3 and kvs(cap.out)["kode"] == "berkas_tidak_ada"
+
+
+@pytest.mark.parametrize("kind", ["dir", "empty"])
+def test_check_apk_refuses_directories_and_empty_files(ck, capsys, kind):
+    if kind == "dir":
+        (ck.dir / "folder.apk").mkdir()
+    else:
+        (ck.dir / "folder.apk").write_bytes(b"")
+    rc, cap = ck.run(name="folder.apk", capsys=capsys)
+    assert rc == 3 and kvs(cap.out)["kode"] == "berkas_tidak_ada"
+    assert ck.tools_called() == []
+
+
+def test_check_apk_failed_signature_check_is_exit_3_with_the_keys_still_printed(ck, capsys):
+    ck.mp.setenv("FAKE_VERIFY_RC", "1")
+    ck.out.write_text("DOES NOT VERIFY\n")
+    rc, cap = ck.run(capsys=capsys)
+    got = kvs(cap.out)
+    assert rc == 3 and got["kode"] == "verify_gagal"
+    assert got["v2"] == "0" and got["v3"] == "0" and got["signers"] == "-" and got["cert"] == "-"
+    assert got["zipalign"] == "ok" and got["sha"] == hashlib.sha256(ck.data).hexdigest()
+
+
+def test_check_apk_failed_alignment_check_is_exit_3(ck, capsys):
+    ck.mp.setenv("FAKE_ZIPALIGN_RC", "1")
+    rc, cap = ck.run(capsys=capsys)
+    got = kvs(cap.out)
+    assert rc == 3 and got["zipalign"] == "gagal" and got["kode"] == "zipalign_gagal"
+
+
+def test_check_apk_unparseable_tool_output_is_not_a_pass(ck, capsys):
+    ck.out.write_text("keluaran tak dikenal\n")
+    rc, cap = ck.run(capsys=capsys)
+    got = kvs(cap.out)
+    assert got["v2"] == "0" and got["v3"] == "0" and got["signers"] == "-" and got["cert"] == "-"
+
+
+def test_check_apk_detects_a_file_swapped_while_the_tools_ran(ck, capsys):
+    (ck.dir / "pengganti.tmp").write_bytes(b"PK\x03\x04" + b"palsu" * 10)
+    ck.mp.setenv("FAKE_SWAP", str(ck.dir / "pengganti.tmp"))
+    rc, cap = ck.run(capsys=capsys)
+    assert rc == 3 and kvs(cap.out)["kode"] == "berubah"
+
+
+def test_check_apk_tool_timeout_is_a_stable_failure(ck, capsys):
+    ck.mp.setattr(ck.st, "CHECK_TIMEOUT", 1)
+    ck.mp.setenv("FAKE_SLEEP", "30")
+    started = time.monotonic()
+    rc, cap = ck.run(capsys=capsys)
+    assert time.monotonic() - started < 20
+    assert rc == 3 and kvs(cap.out)["kode"] == "alat_waktu_habis"
+
+
+def test_check_apk_output_has_no_control_characters_and_no_secrets(ck, capsys):
+    ck.out.write_text(verify_out() + "\x1b[31mmerah\x1b[0m\n")
+    rc, cap = ck.run(capsys=capsys)
+    assert all(ch.isprintable() or ch == "\n" for ch in cap.out)
+    assert PASSWORD not in cap.out
+
+
+def test_check_apk_hashes_in_chunks_without_loading_the_whole_file(ck, capsys):
+    big = ck.dir / "besar-modified-9.apk"
+    with open(big, "wb") as fh:
+        fh.truncate(5 * 1024 * 1024)
+        fh.seek(0)
+        fh.write(b"PK\x03\x04")
+    rc, cap = ck.run(name="besar-modified-9.apk", capsys=capsys)
+    assert rc == 0
+    assert kvs(cap.out)["size"] == str(5 * 1024 * 1024)
+    assert kvs(cap.out)["sha"] == hashlib.sha256(big.read_bytes()).hexdigest()
+
+
+def test_check_apk_unexpected_errors_become_kode_internal_without_a_traceback(ck, capsys):
+    def boom(argv):
+        raise RuntimeError("meledak")
+    ck.mp.setattr(ck.st, "_run_tool", boom)
+    rc, cap = ck.run(capsys=capsys)
+    assert rc == 3 and kvs(cap.out)["kode"] == "internal" and "meledak" not in cap.out
+    assert "Traceback" not in cap.out + cap.err
+
+
+@pytest.mark.skipif(not __import__("conftest").CAN_DROP, reason="butuh root + setpriv (uid 10001)")
+def test_check_apk_as_uid_10001_on_strict_modes_and_a_file_owned_by_another_uid(tmp_path):
+    from conftest import ROOT as R, open_to_10001, as_user
+    import tempfile, shutil as sh
+    shared = open_to_10001(Path(tempfile.mkdtemp(prefix="rv-chk-")))
+    try:
+        os.chown(shared, 10001, 10001)
+        bin_ = shared / "bin"
+        bin_.mkdir()
+        for name, body in (("apksigner", FAKE_APKSIGNER), ("zipalign", FAKE_ZIPALIGN)):
+            (bin_ / name).write_text(body)
+            (bin_ / name).chmod(0o755)
+        (shared / "verify.out").write_text(verify_out())
+        d = shared / "builds" / "5" / "9"
+        d.mkdir(parents=True)
+        for p in (shared / "builds", shared / "builds" / "5", d):
+            os.chown(p, 10001, 10001)
+            os.chmod(p, 0o700)
+        mine, theirs = d / "app-modified-9.apk", d / "milik-lain.apk"
+        mine.write_bytes(b"PK\x03\x04" + b"x" * 100)
+        theirs.write_bytes(b"PK\x03\x04" + b"y" * 100)
+        os.chown(mine, 10001, 10001)
+        os.chmod(mine, 0o600)
+        os.chmod(theirs, 0o600)                                   # milik root, mode 600: uid 10001 tidak boleh membukanya
+        driver = ("import importlib.machinery as m, importlib.util as u, sys\n"
+                  f"l = m.SourceFileLoader('st', {str(R / 'services/signer/signer-selftest')!r}); s = u.spec_from_loader('st', l); mod = u.module_from_spec(s); l.exec_module(mod)\n"
+                  f"sys.exit(mod.run_check_apk([sys.argv[1], sys.argv[2], sys.argv[3]], builds_root={str(shared / 'builds')!r}))\n")
+        env = {"PYTHONPATH": str(R / "services"), "PATH": f"{bin_}:/usr/bin:/bin", "FAKE_LOG": str(shared / "t.log"), "FAKE_VERIFY_OUT": str(shared / "verify.out"),
+               "HOME": "/tmp"}
+        ok = subprocess.run(as_user(env, "-c", driver, "5", "9", "app-modified-9.apk"), capture_output=True, text=True, timeout=60, cwd=str(shared))
+        assert ok.returncode == 0, (ok.stdout, ok.stderr)
+        assert kvs(ok.stdout)["signers"] == "1"
+        bad = subprocess.run(as_user(env, "-c", driver, "5", "9", "milik-lain.apk"), capture_output=True, text=True, timeout=60, cwd=str(shared))
+        assert bad.returncode == 3 and kvs(bad.stdout)["kode"] == "tidak_terbaca", (bad.stdout, bad.stderr)
+        assert "Traceback" not in bad.stderr
+    finally:
+        sh.rmtree(shared, ignore_errors=True)

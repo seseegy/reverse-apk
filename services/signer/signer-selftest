@@ -7,7 +7,7 @@ Dijalankan lewat `make signer-selftest`, yang memakai opsi isolasi yang sama den
   - rantai buat keystore SEMENTARA -> zipalign -> apksigner sign -> apksigner verify lulus (v2 dan v3);
   - berkas yang belum ditandatangani dan yang dirusak setelah ditandatangani DITOLAK;
   - kontainer terisolasi (bukan root, rootfs read-only, tanpa jaringan), tidak membawa keystore LAIN/rahasia di image, dan isi /run/secrets serta /data
-    hanya yang sah (dua berkas keystore bila dipasang; volume builds dan signspool yang dapat ditulis uid 10001).
+    hanya yang sah (dua berkas keystore bila dipasang; volume builds, signspool, dan signwork yang dapat ditulis uid 10001).
 
 Opsi `--toolchain-only` melewati HANYA bagian isolasi kontainer (untuk membuktikan jalur fungsional di luar Docker,
 mis. di mesin pengembangan). Makefile/Dockerfile/compose tidak pernah memakainya.
@@ -23,15 +23,27 @@ Dua mode terpisah yang HANYA dipanggil `make signer-verify` (bukan bagian `make 
                      Berhenti oleh SEC habis, EOF pada stdin, atau berkas /tmp/selftest-watch.stop. Kunci (urutan tetap, sekali di akhir): samples,
                      argv_apksigner, argv_zipalign, argv_keytool, bocor, anon_peak_mib, oom_kill, memory_peak. Kode 0 bila pemotret selesai.
 Pola yang dicari = ISI berkas sandi (/run/secrets/signing_keystore_pass); isinya TIDAK pernah dicetak.
+
+Satu mode lagi, HANYA dipanggil `make verify-build` (Tahap 2b, langkah 7):
+  --check-apk <analysis_id> <build_id> <nama>
+                     verifikasi independen artefak build: `/data/builds/<aid>/<bid>/<nama>` dibuka lewat rantai-dirfd (tanpa symlink, FIFO tidak menggantung),
+                     lalu `zipalign -c` dan `apksigner verify --verbose --print-certs` + sha256/ukuran (satu lintasan). Keluaran (urutan tetap, `kunci=nilai`):
+                     signers, v2, v3, cert (digest sertifikat huruf kecil, dipisah koma bila lebih dari satu), zipalign (ok|gagal), sha, size. Selftest hanya
+                     MELAPORKAN; keputusan (cert == keystore pemilik, sha == DB) ada di skrip pemanggil. Kode keluar 0 semua terukur dan alat lulus; 3 galat/penolakan
+                     (`kode=<stabil>` + `alasan=`: berkas_tidak_ada, tidak_terbaca, berubah, verify_gagal, zipalign_gagal, alat_waktu_habis, alat_gagal, internal);
+                     64 salah pakai. Id = bilangan bulat 1..999999999; nama harus lolos regex nama keluaran store (`^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$`).
 """
 
+import errno
 import glob
+import hashlib
 import os
 import re
 import secrets
 import select
 import shutil
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -39,6 +51,8 @@ import tempfile
 import time
 import zipfile
 
+from rvcore.fsutil import open_dir_chain
+from rvcore.paths import MAX_PROTO_ID
 from rvcore.signkeys import ALIAS, ToolResult, inspect_key_file, owner_fingerprint, read_small
 
 failed = False
@@ -53,7 +67,7 @@ PRUNE = ("/proc", "/sys", "/dev", "/tmp", "/run/secrets", "/data")
 SECRETS_DIR = "/run/secrets"
 SECRETS_NAMES = ("signing_keystore", "signing_keystore_pass")
 DATA_DIR = "/data"
-DATA_NAMES = ("builds", "signspool")
+DATA_NAMES = ("builds", "signspool", "signwork")
 WRAPPER_FLAGS = ("--enable-native-access=ALL-UNNAMED", "-Xmx256m", "-XX:MaxDirectMemorySize=64m")
 SECRET_ENV = ("API_KEY", "SECRET", "PASSWORD", "TOKEN", "REDIS", "KEYSTORE", "STOREPASS")
 KS_NAME, PASS_NAME = SECRETS_NAMES
@@ -206,9 +220,9 @@ def check_secrets_dir(path: str = SECRETS_DIR) -> tuple[bool, str]:
 
 
 def check_data_dir(path: str = DATA_DIR) -> tuple[bool, str]:
-    """`/data` hanya berisi `builds` dan `signspool`; akar keduanya dapat ditulis uid ini (tulis-hapus berkas `.selftest-<acak>`)."""
+    """`/data` hanya berisi `builds`, `signspool`, dan `signwork`; akar ketiganya dapat ditulis uid ini (tulis-hapus berkas `.selftest-<acak>`)."""
     if not os.path.isdir(path):
-        return False, f"{path} tidak ada (volume builds/signspool tidak terpasang?)"
+        return False, f"{path} tidak ada (volume builds/signspool/signwork tidak terpasang?)"
     names = sorted(os.listdir(path))
     if names != sorted(DATA_NAMES):
         return False, "isi " + path + " tidak sesuai: " + (", ".join(names) or "(kosong)") + "; seharusnya " + ", ".join(sorted(DATA_NAMES))
@@ -220,7 +234,7 @@ def check_data_dir(path: str = DATA_DIR) -> tuple[bool, str]:
             os.remove(probe)
         except OSError as exc:
             return False, f"{os.path.join(path, name)} tidak dapat ditulis oleh uid {os.geteuid()}: {exc.strerror or exc}"
-    return True, "builds dan signspool; akar keduanya dapat ditulis uid " + str(os.geteuid())
+    return True, "builds, signspool, dan signwork; akar ketiganya dapat ditulis uid " + str(os.geteuid())
 
 
 def _key_home() -> str:
@@ -428,6 +442,138 @@ def watch_verdict(result: dict[str, object]) -> tuple[str, str]:
     return "OK", f"{result['samples']} sampel, argv apksigner teramati {result['argv_apksigner']} kali, tanpa kata sandi"
 
 
+# ---------------------------------------------------------------- --check-apk (Tahap 2b, FEAT G): verifikasi independen artefak build
+OUTPUT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}")        # sama dengan rvcore.store._OUTPUT_NAME_RE (dijaga tes)
+CHECK_TIMEOUT = 600
+CHECK_CHUNK = MIB
+CHECK_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY    # NONBLOCK: FIFO tidak menggantung
+CHECK_KEYS = ("signers", "v2", "v3", "cert", "zipalign", "sha", "size")
+_CHECK_SCHEME_RE = re.compile(r"^Verified using v(1|2|3) scheme \(.*\): (true|false)\s*$", re.M)
+_CHECK_SIGNERS_RE = re.compile(r"^Number of signers: (\d+)\s*$", re.M)
+_CHECK_DIGEST_RE = re.compile(r"^(?:Signer #\d+|V\d(?:\.\d)?)[^\n]*?certificate SHA-256 digest: ([0-9a-fA-F]{64})\s*$", re.M)   # bukan 'public key SHA-256'
+
+
+class CheckUsage(Exception):
+    pass
+
+
+class CheckFail(Exception):
+    def __init__(self, kode: str, alasan: str) -> None:
+        super().__init__(alasan)
+        self.kode, self.alasan = kode, alasan
+
+
+def _check_id(label: str, text: str) -> str:
+    if not (text.isascii() and text.isdigit()) or len(text) > 9 or not 1 <= int(text) <= MAX_PROTO_ID:
+        raise CheckUsage(f"{label} harus bilangan bulat 1..{MAX_PROTO_ID}")
+    return str(int(text))
+
+
+def _check_line(text: object) -> str:
+    return "".join(ch if ch.isprintable() else " " for ch in str(text)).strip()[:300]
+
+
+def _open_apk(builds_root: str, aid: str, bid: str, name: str) -> tuple[int, int]:
+    """(fd folder build, fd berkas) lewat rantai O_NOFOLLOW; berkas harus biasa dan tidak kosong. Pemanggil menutup keduanya."""
+    try:
+        dfd = open_dir_chain(builds_root, aid, bid)
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR):
+            raise CheckFail("berkas_tidak_ada", f"folder build {aid}/{bid} tidak ada atau bukan direktori biasa") from None
+        raise CheckFail("tidak_terbaca", f"folder build tidak bisa dibuka ({errno.errorcode.get(exc.errno or 0, 'galat')})") from None
+    try:
+        fd = os.open(name, CHECK_OPEN_FLAGS, dir_fd=dfd)
+    except OSError as exc:
+        os.close(dfd)
+        if exc.errno in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR, errno.EISDIR, errno.ENXIO):
+            raise CheckFail("berkas_tidak_ada", f"{name} tidak ada atau bukan berkas biasa") from None
+        raise CheckFail("tidak_terbaca", f"{name} tidak bisa dibuka ({errno.errorcode.get(exc.errno or 0, 'galat')})") from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size <= 0:
+            raise CheckFail("berkas_tidak_ada", f"{name} bukan berkas biasa yang berisi")
+    except BaseException:
+        os.close(fd)
+        os.close(dfd)
+        raise
+    return dfd, fd
+
+
+def _hash_fd(fd: int) -> tuple[str, int]:
+    digest, total = hashlib.sha256(), 0
+    while True:
+        chunk = os.read(fd, CHECK_CHUNK)
+        if not chunk:
+            return digest.hexdigest(), total
+        digest.update(chunk)
+        total += len(chunk)
+
+
+def _run_tool(argv: list[str]) -> tuple[int, str]:
+    try:
+        proc = subprocess.run(argv, capture_output=True, timeout=CHECK_TIMEOUT, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        raise CheckFail("alat_waktu_habis", f"{argv[0]} melewati {CHECK_TIMEOUT} dtk") from None
+    except OSError as exc:
+        raise CheckFail("alat_gagal", f"{argv[0]} tidak dapat dijalankan ({errno.errorcode.get(exc.errno or 0, 'galat')})") from None
+    return proc.returncode, (proc.stdout + proc.stderr).decode("utf-8", errors="replace")
+
+
+def run_check_apk(argv: list[str], *, builds_root: str | None = None) -> int:
+    """Lihat docstring modul. `builds_root` hanya untuk tes (bawaan `<DATA_DIR>/builds`)."""
+    try:
+        if len(argv) != 3:
+            raise CheckUsage("pemakaian: signer-selftest --check-apk <analysis_id> <build_id> <nama>")
+        aid, bid, name = _check_id("analysis_id", argv[0]), _check_id("build_id", argv[1]), argv[2]
+        if not OUTPUT_NAME_RE.fullmatch(name):
+            raise CheckUsage("nama berkas harus lolos ^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")
+    except CheckUsage as exc:
+        print(f"GALAT: {exc}", file=sys.stderr)
+        return 64
+    root = builds_root if builds_root is not None else os.path.join(DATA_DIR, "builds")
+    path = os.path.join(root, aid, bid, name)
+    dfd = fd = -1
+    result: dict[str, str] = {}
+    failure: CheckFail | None = None
+    try:
+        dfd, fd = _open_apk(root, aid, bid, name)
+        before = os.fstat(fd)
+        sha, size = _hash_fd(fd)
+        a_rc, _ = _run_tool(["zipalign", "-c", "-P", "16", "4", path])
+        v_rc, v_text = _run_tool(["apksigner", "verify", "--verbose", "--print-certs", path])
+        try:
+            now = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+        except OSError:
+            raise CheckFail("berubah", "berkas hilang/berganti selama pemeriksaan") from None
+        if (now.st_ino, now.st_dev, now.st_size) != (before.st_ino, before.st_dev, before.st_size) or size != before.st_size:
+            raise CheckFail("berubah", "berkas berganti atau berubah ukuran selama pemeriksaan")
+        schemes = {m.group(1): m.group(2) == "true" for m in _CHECK_SCHEME_RE.finditer(v_text)}
+        count = _CHECK_SIGNERS_RE.search(v_text)
+        digests = sorted({m.group(1).lower() for m in _CHECK_DIGEST_RE.finditer(v_text)})
+        result = {"signers": count.group(1) if count else "-", "v2": "1" if schemes.get("2") else "0", "v3": "1" if schemes.get("3") else "0",
+                  "cert": ",".join(digests) or "-", "zipalign": "ok" if a_rc == 0 else "gagal", "sha": sha, "size": str(size)}
+        if a_rc != 0:
+            failure = CheckFail("zipalign_gagal", f"zipalign -c kode {a_rc}")
+        elif v_rc != 0:
+            failure = CheckFail("verify_gagal", f"apksigner verify kode {v_rc}")
+    except CheckFail as exc:
+        failure = exc
+    except Exception as exc:  # noqa: BLE001 - mode ini tidak boleh menumpahkan traceback; jenis galat saja
+        failure = CheckFail("internal", type(exc).__name__)
+    finally:
+        for h in (fd, dfd):
+            if h >= 0:
+                os.close(h)
+    for key in CHECK_KEYS:
+        if key in result:
+            print(f"{key}={_check_line(result[key])}")
+    if failure is not None:
+        print(f"kode={failure.kode}")
+        print(f"alasan={_check_line(failure.alasan)}")
+        return 3
+    return 0
+
+
 def run_leak_scan(proc_root: str | None = None, pw_path: str | None = None) -> int:
     pattern = load_pattern(pw_path)
     if pattern is None:
@@ -498,7 +644,7 @@ def check_isolation() -> None:
     ok, detail = check_secrets_dir()
     report(ok, "/run/secrets hanya berisi tepat {signing_keystore, signing_keystore_pass} bila dipasang, atau tidak ada/kosong", detail)
     ok, detail = check_data_dir()
-    report(ok, "/data hanya berisi builds dan signspool, akar keduanya dapat ditulis uid 10001", detail)
+    report(ok, "/data hanya berisi builds, signspool, dan signwork, akar ketiganya dapat ditulis uid 10001", detail)
 
 
 def check_toolchain() -> None:
@@ -577,6 +723,13 @@ def main(argv: list[str] | None = None) -> int:
     printed.clear()
     args = sys.argv[1:] if argv is None else argv
     toolchain_only = "--toolchain-only" in args
+
+    if "--check-apk" in args:
+        at = args.index("--check-apk")
+        if any(a in args for a in ("--leak-scan", "--watch", "--toolchain-only")):
+            print("GALAT: --check-apk tidak boleh dipakai bersama mode lain", file=sys.stderr)
+            return 64
+        return run_check_apk(args[at + 1:])
 
     if "--leak-scan" in args or "--watch" in args:
         if "--leak-scan" in args and "--watch" in args:

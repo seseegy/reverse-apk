@@ -129,9 +129,19 @@ def test_compose_bench_service_is_isolated_and_secretless():
     for forbidden in ("AI_API_KEY", "SECRET_KEY", "REDIS", "PASSWORD", "/data/db", "/data/files", "/data/spool", "secrets:", "docker.sock", "privileged"):
         assert forbidden not in block, forbidden
     assert "work:/data/work:ro" in block and "uploads:/data/uploads:ro" in block
-    for other in ("runner", "worker"):
-        part = compose.split(f"\n  {other}:\n", 1)[1].split("\n  # ", 1)[0].split("\nnetworks:\n", 1)[0]
-        assert "benchspool" not in part and "bench:" not in part.split("volumes:", 1)[-1] if "volumes:" in part else True
+    # Diubah SADAR (Tahap 2b): runner kini memasang `bench` (sumber snapshot build) tetapi HANYA `:ro`, tanpa `benchspool` (antrean shell AI) dan tanpa `builds`/`signspool` di bench.
+    # Worker tetap tidak melihat bench sama sekali. Alasan: runner membangun APK dari `bench/<id>/project` hasil kerja AI; ia tidak boleh mengubah pekerjaan AI (ro) dan
+    # tidak boleh menjangkau antrean perintah shell. Matriks mount lengkap yang ketat: test_build_compose.py.
+    def volumes_of(name):
+        part = compose.split(f"\n  {name}:\n", 1)[1].split("\n  # ", 1)[0].split("\nnetworks:\n", 1)[0]
+        part = "\n".join(ln for ln in part.splitlines() if not ln.lstrip().startswith("#"))
+        return re.findall(r"(?m)^      - ([\w]+):(/data/[\w/]+)(:ro)?\s*$", part.split("\n    volumes:\n", 1)[1].split("\n    depends_on:", 1)[0]) if "\n    volumes:\n" in part else []
+
+    runner = {name: ro for name, _path, ro in volumes_of("runner")}
+    assert runner.get("bench") == ":ro", "runner memasang bench HANYA read-only"
+    assert "benchspool" not in runner and "builds" in runner
+    assert not any(name == "bench" or name == "benchspool" for name, _p, _r in volumes_of("worker")), "worker tidak melihat bench"
+    assert not any(name == "builds" for name, _p, _r in volumes_of("bench")), "bench TANPA builds"
 
 
 def test_schema_is_strict_and_has_no_analysis_or_path_parameter():

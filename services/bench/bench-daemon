@@ -8,6 +8,8 @@ Kontainer ini TIDAK punya rahasia: bukan kunci AI, bukan DB, bukan Redis, bukan 
 Kepercayaan: request datang dari `web` lewat volume `benchspool`, dan web menjalankan AI yang bisa dibujuk isi APK. Maka:
   * daemon hanya menerima `analysis_id` (angka), `sha256` (heksa 64), `command` (teks) dan `timeout` (angka); path dihitung SENDIRI (policy.py);
   * setiap perintah dikurung Landlock di PROSES ANAK, GAGAL TERTUTUP (lihat landlock.py / confined_exec.py);
+  * op `init` (salin baseline work/<id>/apktool -> bench/<id>/project, hanya bila belum ada kecuali `force`) dan `diff` (diff kanonik project/ vs baseline) hanya
+    membawa `analysis_id` (int) dan bool/angka; keduanya dikerjakan daemon sendiri lewat bench/workspace.py + rvcore/treediff.py (tanpa mengikuti symlink);
   * daemon `non-dumpable` supaya perintah AI tidak bisa menyuntik kode ke proses daemon yang tidak dikurung.
 
 Satu perintah pada satu waktu. Setelah BENCH_IDLE_EXIT detik tanpa pekerjaan, daemon keluar dan Docker memulai kontainer segar (ruang kerja ada di volume).
@@ -23,8 +25,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from bench import executor, landlock, policy
+from bench import executor, landlock, policy, workspace
 from rvcore import shellspool as SP
+from rvcore.paths import MAX_PROTO_ID
 from rvcore.fsutil import safe_rmtree
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -92,8 +95,42 @@ def validate_run(job: dict[str, Any]) -> tuple[int, str, int, str | None]:
     return aid, command, min(timeout, LIMITS.max_timeout), sha
 
 
+def validate_op(job: dict[str, Any]) -> tuple[int, bool, int]:
+    """Periksa request `init`/`diff` -> (analysis_id, force, timeout). Melempar ValueError dengan pesan aman. Hanya angka dan bool yang dibaca; bidang lain
+    (path, command, sha256, ...) DIABAIKAN. `force` wajib bool murni pada `init` (string "true" atau 1 ditolak) dan tidak ada pada `diff`."""
+    aid = job.get("analysis_id")
+    if type(aid) is not int or not 1 <= aid <= MAX_PROTO_ID:
+        raise ValueError("analysis_id tidak valid")
+    timeout = job.get("timeout")
+    if type(timeout) is not int or timeout < 1:
+        raise ValueError("timeout tidak valid")
+    force = False
+    if job.get("op") == SP.OP_INIT:
+        force = job.get("force")
+        if type(force) is not bool:
+            raise ValueError("force harus bool")
+    return aid, force, min(timeout, SP.OP_MAX_TIMEOUT)
+
+
+def run_op(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
+    """`init`/`diff`: tidak dikurung Landlock (daemon sendiri membaca baseline `work` dan menulis `bench/<id>/project` lewat treediff yang tidak mengikuti symlink)."""
+    try:
+        aid, force, timeout = validate_op(job)
+    except ValueError as exc:
+        return {"status": SP.STATUS_REFUSED, "message": f"permintaan ditolak: {exc}"}
+    op = job["op"]
+    say(f"[{job_id}] mulai {op} analisis={aid}" + (" force" if force else ""))
+    cancel, beat = (lambda: SPOOL.cancel_requested(job_id)), (lambda: SPOOL.write_heartbeat("busy", job_id))
+    beat()
+    if op == SP.OP_INIT:
+        return workspace.op_init(DIRS, LIMITS.workspace_bytes, aid, force, timeout=timeout, cancel=cancel, heartbeat=beat)
+    return workspace.op_diff(DIRS, aid, timeout=timeout, cancel=cancel, heartbeat=beat)
+
+
 def run_job(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
     op = job.get("op")
+    if op in (SP.OP_INIT, SP.OP_DIFF):
+        return run_op(job_id, job)
     if op != SP.OP_RUN:
         return {"status": SP.STATUS_REFUSED, "message": "operasi tidak dikenal"}
     try:

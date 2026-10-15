@@ -453,7 +453,8 @@ step18() {
   leak="$($COMPOSE --profile build exec -T signer signer-selftest --leak-scan 2>/dev/null </dev/null 7>&- | tr -d '\r')"; lrc=$?
   ldiag="$(lv diperiksa "$leak")"; lbocor="$(lv bocor "$leak")"
   $COMPOSE --profile build logs --no-color signer >"$T/signer.log" 2>&1 </dev/null 7>&-
-  grep -F -q -e "$pw" "$T/signer.log" "$T/outputs.log" && logs_hit=1
+  # Sandi TIDAK boleh muncul di argv `grep` (terlihat di /proc/<pid>/cmdline dan `ps` host): pola dibaca dari berkas (substitusi proses; printf builtin).
+  grep -F -q -f <(printf '%s\n' "$pw") "$T/signer.log" "$T/outputs.log" && logs_hit=1
   pw=""
   [ "$bocor" -gt 0 ] && fail="$fail pemotret melihat sandi di $bocor sampel;"
   if [ "$lrc" -eq 1 ] || { is_num "$lbocor" && [ "$lbocor" -gt 0 ]; }; then fail="$fail --leak-scan: bocor=${lbocor:-?};"; fi

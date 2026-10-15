@@ -8,6 +8,8 @@
     /data/files/<analysis_id>/ai/     berkas buatan AI (py, js, md, ...); hanya web yang menulis di sini
     /data/builds/<analysis_id>/<build_id>/   artefak build (Tahap 2: hasil bertanda tangan). Path HANYA dihitung dari id bilangan bulat positif
     /data/signspool/                  antrean berkas worker -> signer (lihat signspool.py; volume terpisah dari spool runner)
+    /data/signwork/<job_id>/          ruang kerja PRIVAT signer (salinan unsigned.apk, aligned, signed); HANYA signer yang memasangnya (tutup R3/R10)
+    /data/bench/<analysis_id>/project/   pohon yang diubah AI/pemilik lewat shell bench; runner memasangnya READ-ONLY dan menyalinnya sebagai snapshot saat build
     /data/db/app.sqlite               basis data (SQLite, mode WAL)
     /data/spool/                      antrean berkas worker -> runner (lihat spool.py)
 
@@ -21,12 +23,22 @@ import re
 from pathlib import Path
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+# Id terbesar yang muat di id job spool (pola `\d{1,9}` di spool.py dan shellspool.py): id lebih besar akan dibuang diam-diam oleh `claim_next`.
+# Validator protokol baru menolak lebih awal dengan pesan jelas, regex id job TIDAK diubah.
+MAX_PROTO_ID = 999_999_999
 
 
 def _positive_id(name: str, value: object) -> int:
     """Hanya bilangan bulat positif murni. Menolak bool, str (mis. '../x'), float, bytes, None: id jadi segmen path."""
     if type(value) is not int or value <= 0:
         raise ValueError(f"{name} harus bilangan bulat positif")
+    return value
+
+
+def check_proto_id(name: str, value: object) -> int:
+    """Id untuk protokol spool: `int` murni (bukan bool/str/float), 1..MAX_PROTO_ID. Selain itu ValueError."""
+    if type(value) is not int or not 1 <= value <= MAX_PROTO_ID:
+        raise ValueError(f"{name} harus bilangan bulat 1..{MAX_PROTO_ID}")
     return value
 
 
@@ -48,6 +60,11 @@ class Layout:
         self.builds = root / "builds"
         # Antrean worker -> signer (protokol signspool). Volume terpisah dari `spool`: Spool.claim_next mengklaim apa saja di requests/.
         self.signspool = root / "signspool"
+        # Ruang kerja privat signer (Tahap 2b, penutupan R3/R10): signer menyalin unsigned.apk dari SATU fd ke sini lalu align/sign/verify di sini.
+        # Hanya signer yang memasang volume ini, jadi runner (yang menulis `builds`) tidak bisa menukar apa pun saat alat penanda tangan berjalan.
+        self.signwork = root / "signwork"
+        # Ruang kerja shell bench per analisis. Runner memasangnya READ-ONLY (sumber snapshot build); web hanya menghapus.
+        self.bench = root / "bench"
 
     def upload_path(self, sha256: str) -> Path:
         if not SHA256_RE.match(sha256):
@@ -67,3 +84,11 @@ class Layout:
 
     def build_dir(self, analysis_id: int, build_id: int) -> Path:
         return self.builds / str(_positive_id("analysis_id", analysis_id)) / str(_positive_id("build_id", build_id))
+
+    def project_dir(self, analysis_id: int) -> Path:
+        """Pohon yang dibangun: bench/<aid>/project. Id dibatasi sama dengan protokol spool (1..MAX_PROTO_ID)."""
+        return self.bench / str(check_proto_id("analysis_id", analysis_id)) / "project"
+
+    def base_tree(self, analysis_id: int) -> Path:
+        """Pohon dasar hasil `apktool d`: work/<aid>/apktool."""
+        return self.work / str(check_proto_id("analysis_id", analysis_id)) / "apktool"

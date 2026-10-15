@@ -187,6 +187,10 @@ def plan_decompile(layout: Layout, conn: sqlite3.Connection, analysis_id: int) -
     if row["status"] in store.ACTIVE:
         plan.skipped.append((f"analisis #{analysis_id}", "masih antre/berjalan; tunggu selesai atau batalkan dulu"))
         return plan
+    if store.active_build(conn, analysis_id) is not None:
+        # NB-2 (A-09 b): hash diff build yang menunggu/berjalan terikat pada baseline work/<id>/apktool; menghapusnya membuat build gagal atau persetujuan basi.
+        plan.skipped.append((f"analisis #{analysis_id}", "ada build aktif; batalkan atau tunggu selesai dulu"))
+        return plan
     for name in DECOMPILE_DIRS:
         path = resolve_under(layout.work, str(int(analysis_id)), name)
         if path is None or not path.is_dir() or path.is_symlink():

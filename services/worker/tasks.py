@@ -18,6 +18,13 @@ def run_analysis(analysis_id: int, only_stage: str | None = None) -> None:
     _run(int(analysis_id), only_stage)
 
 
+def run_build(build_id: int) -> None:
+    """Jalankan satu build APK (diantrekan web/worker dengan nama bertitik ini). Argumen TIDAK dikoersi: builds.run_build menolak yang bukan `int` murni."""
+    from builds import run_build as _run  # impor lambat, seperti run_analysis
+
+    _run(build_id)
+
+
 def selftest() -> dict:
     """Tugas uji: membuktikan web → Redis → worker → hasil kembali ke web berfungsi."""
     job = get_current_job()

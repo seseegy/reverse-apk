@@ -291,5 +291,44 @@ try:
 except OSError as exc:
     report(False, f"isi {exec_dir} hanya aapt2 (sha256 cocok pin)", f"{type(exc).__name__}: {exc}")
 
+# 7. Mount tahap build (Tahap 2b). Runner membaca pekerjaan AI di `bench` dan menulis hasil build di `builds`; SEMUA yang lain di /data dilarang:
+#    `bench` HARUS read-only (dibuktikan dari opsi mount DAN percobaan tulis -> EROFS), `builds` dapat ditulis uid 10001, dan /data tidak memuat
+#    benchspool/signspool/signwork/files/db (antrean shell AI, antrean/ruang kerja penanda tangan, lampiran, basis data).
+data_dir = os.environ.get("DATA_DIR", "/data")
+FORBIDDEN_VOLUMES = ("benchspool", "signspool", "signwork", "files", "db")
+bench_dir, builds_dir = os.path.join(data_dir, "bench"), os.path.join(data_dir, "builds")
+bench_opts = None
+with open("/proc/self/mountinfo") as fh:
+    for line in fh:
+        parts = line.split()
+        if len(parts) > 5 and parts[4] == bench_dir:
+            bench_opts = parts[5].split(",")
+write_denied = False
+try:
+    with open(os.path.join(bench_dir, f".selftest-{os.getpid()}"), "w"):
+        pass
+    os.remove(os.path.join(bench_dir, f".selftest-{os.getpid()}"))
+except OSError as exc:
+    write_denied = exc.errno in (30, 13)       # EROFS (benar) atau EACCES; selain itu (mis. direktori tak ada) bukan bukti
+report(bench_opts is not None and "ro" in bench_opts and write_denied, "bench dipasang READ-ONLY (runner tidak boleh mengubah pekerjaan AI)",
+       "mount " + bench_dir + ": " + (",".join(bench_opts) if bench_opts else "bukan mount sendiri") + "; tulis ditolak" if write_denied else
+       "mount " + bench_dir + ": " + (",".join(bench_opts) if bench_opts else "bukan mount sendiri") + "; tulis TIDAK ditolak")
+try:
+    probe = os.path.join(builds_dir, f".selftest-{os.getpid()}")
+    with open(probe, "w"):
+        pass
+    os.remove(probe)
+    report(True, "builds dapat ditulis uid " + str(os.geteuid()), builds_dir)
+except OSError as exc:
+    report(False, "builds dapat ditulis uid " + str(os.geteuid()), f"{type(exc).__name__}: {exc.strerror or exc} (volume baru mewarisi izin dari image: mkdir + chown 10001 di Dockerfile)")
+try:
+    present = sorted(os.listdir(data_dir))
+except OSError as exc:
+    present = []
+    print(f"    (tidak bisa membaca {data_dir}: {type(exc).__name__}: {exc})")
+extra = [n for n in present if n in FORBIDDEN_VOLUMES]
+report(not extra and {"bench", "builds", "work", "spool", "uploads"} <= set(present), "/data runner tanpa benchspool, signspool, signwork, files, db",
+       "isi /data: " + ", ".join(present) + ("; TERLARANG: " + ", ".join(extra) if extra else ""))
+
 shutil.rmtree(work, ignore_errors=True)
 sys.exit(1 if failed else 0)
