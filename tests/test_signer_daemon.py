@@ -896,6 +896,27 @@ def test_fake_bad_requests_are_answered_without_running_tools(rig):
     assert rig.calls() == []                                                     # ditolak sebelum alat apa pun dijalankan
 
 
+def test_fake_unlink_after_directory_swap_never_follows_the_new_symlink(rig, tmp_path, monkeypatch):
+    """Semua unlink memakai dir_fd folder build yang SUDAH dibuka: folder diganti symlink di tengah job (antara zipalign dan sign) tidak boleh membuat
+    signer menghapus berkas di tujuan symlink (mutasi M35: unlink berbasis jalur string)."""
+    d = rig.d
+    victim = tmp_path / "korban"
+    victim.mkdir()
+    canary = victim / ".sign-aligned.tmp"
+    canary.write_text("jangan dihapus")
+    original = d.build_sign_cmd
+
+    def swap(src, dst):
+        rig.bdir.rename(rig.bdir.parent / "asli")
+        rig.bdir.symlink_to(victim)
+        return original(src, dst)
+
+    monkeypatch.setattr(d, "build_sign_cmd", swap)
+    _, res = rig.run()
+    assert canary.exists() and canary.read_text() == "jangan dihapus", res
+    assert not (rig.bdir.parent / "asli" / ".sign-aligned.tmp").exists()               # yang dihapus adalah berkas di folder ASLI (lewat dir_fd)
+
+
 def test_fake_request_path_fields_are_ignored(rig, tmp_path):
     job = signspool.build_sign_request(1, 2, 60)
     job.update(path="/etc/passwd", input="/etc/shadow", out="/tmp/x")
