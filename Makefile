@@ -2,7 +2,19 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 COMPOSE ?= docker compose
 
-.PHONY: help init keystore keystore-info password up down restart logs ps update runner-selftest signer-selftest tools-check bench-selftest net-check ai-check env-check doctor test
+# Keystore penanda tangan ada? (scripts/keystore.sh present: senyap, tanpa efek samping, tanpa Docker; kosong bila belum ada, mis. di CI.)
+# Dievaluasi saat Makefile DIBACA: jalankan `make init` dan `make up` sebagai dua perintah (bukan `make init up`), supaya `up` melihat keystore yang baru dibuat.
+KEYSTORE_PRESENT := $(shell ./scripts/keystore.sh present >/dev/null 2>&1 && echo 1)
+ifeq ($(KEYSTORE_PRESENT),1)
+# Hanya bila KEDUA berkas ada: muat berkas tambahan (kunci HANYA ke signer) dan aktifkan profil `build` agar signer ikut `up`/`down`/`restart`.
+export COMPOSE_FILE := docker-compose.yml:docker-compose.keystore.yml
+export COMPOSE_PROFILES := build
+# Bind-mount berkas mengunci INODE: berkas kunci yang diganti (mv/rsync/cp --remove-destination) tidak terlihat kontainer lama, dan isi berkas rahasia tidak
+# masuk hash konfigurasi Compose. Label stempel (inode-ukuran-mtime) berubah -> `up -d` membuat ulang signer. Bukan rahasia.
+export KEYSTORE_STAMP := $(shell stat -c '%i-%s-%Y' secrets/signing_keystore.p12 secrets/signing_keystore_pass 2>/dev/null | tr '\n' ':')
+endif
+
+.PHONY: help init keystore keystore-info keystore-access password up down restart logs ps update runner-selftest signer-selftest signer-verify tools-check bench-selftest net-check ai-check env-check doctor test
 
 help: ## Tampilkan daftar perintah
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[32m%-16s\033[0m %s\n", $$1, $$2}'
@@ -15,6 +27,9 @@ keystore: ## Buat keystore penanda tangan (secrets/signing_keystore.p12) bila be
 
 keystore-info: ## Cetak sidik jari SHA-256, DN, masa berlaku, algoritma keystore (tanpa kata sandi)
 	@./scripts/keystore.sh info
+
+keystore-access: ## Pastikan kunci terbaca kontainer signer (secrets/ mode 700, kedua berkas keystore mode 644); hanya chmod, isi tidak berubah
+	@./scripts/keystore.sh access
 
 password: ## Atur password admin (disimpan sebagai hash argon2id)
 	@test -f .env || { echo "Jalankan 'make init' dulu."; exit 1; }
@@ -29,13 +44,15 @@ password: ## Atur password admin (disimpan sebagai hash argon2id)
 
 up: ## Build dan jalankan semua layanan
 	@test -s secrets/admin_password_hash || { echo "Password admin belum diatur. Jalankan 'make password'."; exit 1; }
+	@./scripts/keystore.sh access --auto || true
 	$(COMPOSE) up -d --build
 
-down: ## Hentikan semua layanan (data tetap tersimpan)
-	$(COMPOSE) down
+down: ## Hentikan semua layanan (data tetap tersimpan; signer ikut turun walau keystore sudah dipindah)
+	COMPOSE_PROFILES=build $(COMPOSE) down
 
 restart: ## Terapkan perubahan .env/compose dan restart (membuat ulang container yang berubah)
 	@# `docker compose restart` TIDAK membaca ulang .env: container tetap memakai nilai lama. `up -d` membuat ulang yang berubah.
+	@./scripts/keystore.sh access --auto || true
 	$(COMPOSE) up -d
 	@./scripts/envcheck.sh || true
 
@@ -56,6 +73,9 @@ runner-selftest: ## Uji runner: alat benar-benar bisa bekerja + bukti isolasi (j
 signer-selftest: ## Uji signer: zipalign + apksigner (keystore sementara -> sign -> verify, tes negatif) + bukti isolasi dari dalam kontainer (profil `build`, tidak ikut `make up`)
 	$(COMPOSE) --profile build build signer
 	$(COMPOSE) --profile build run --rm --no-deps signer signer-selftest
+
+signer-verify: ## Bukti end-to-end signer: APK uji ditandatangani dengan keystore pemilik lewat spool + verifikasi independen + negatif + kebocoran sandi (BIG_MB=1000 menambah uji APK besar & memori)
+	@COMPOSE="$(COMPOSE)" ./scripts/signer-verify.sh
 
 tools-check: ## Tabel versi semua alat build (java, apktool, jadx, keytool, zipalign, apksigner) dari image runner & signer, dibandingkan dengan pin
 	@COMPOSE="$(COMPOSE)" ./scripts/tools-check.sh

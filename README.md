@@ -11,22 +11,23 @@ Berjalan di VPS sendiri lewat Docker Compose.
 > (pohon + penampil + pencarian ≤ 500 ms). Ringkasan AI (M3) menyusul.
 > Lihat [roadmap](docs/prd/08-roadmap.md).
 >
-> **Fitur build APK (PRD 09 Bagian B) — fondasi saja:** tabel `build` + state machine persetujuan manual (migrasi v5), keystore penanda
-> tangan yang dibuat `make init`, dan toolchain `signer`. **Belum ada** daemon build/tanda tangan, antarmuka, maupun tool AI: aplikasi
-> belum bisa membangun APK. Keystore belum dipasang ke layanan mana pun. Cadangkan `secrets/signing_keystore.*` setelah `make init`
-> ([docs/deploy.md](docs/deploy.md#keystore-penanda-tangan-tahap-1)).
+> **Fitur build APK (PRD 09 Bagian B) — fondasi + daemon penanda tangan (Tahap 2a):** tabel `build` + state machine persetujuan manual (migrasi v5), keystore penanda
+> tangan yang dibuat `make init`, toolchain `signer`, dan kini **`signer-daemon`** yang menandatangani APK dengan keystore pemilik (`make signer-verify`). **Belum ada** tahap `build`, antarmuka, maupun tool AI:
+> aplikasi belum bisa membangun APK sendiri. Keystore dipasang ke layanan `signer` saja (read-only) dan berkasnya kini mode 644 di folder `secrets/` 700 (keputusan sadar, lihat
+> [docs/deploy.md](docs/deploy.md#signer-daemon--akses-kunci-tahap-2a)). Cadangkan `secrets/signing_keystore.*` setelah `make init`
+> ([docs/deploy.md](docs/deploy.md#keystore-penanda-tangan-tahap-1)). Uji Docker/cgroup untuk Tahap 2a menunggu VPS (daftar V0–V12 di deploy.md).
 
 ## Mulai cepat
 ```bash
 make init        # buat .env + rahasia acak + keystore penanda tangan (CADANGKAN secrets/signing_keystore.*)
 make password    # atur password admin
-make up          # build & jalankan
+make up          # build & jalankan (jalankan `make init` dan `make up` sebagai dua perintah)
 make doctor      # periksa kesehatan
 ```
 Panduan lengkap untuk VPS: [docs/deploy.md](docs/deploy.md).
 
 ## Perintah
-`make help` menampilkan semuanya: `init`, `keystore` (buat keystore bila belum ada; tidak pernah menimpa), `keystore-info` (sidik jari, tanpa kata sandi), `password`, `up`, `down`, `restart`, `logs`, `ps`, `update`, `runner-selftest`, `signer-selftest`, `tools-check` (tabel versi alat build), `bench-selftest`, `net-check` (shell AI dan jaringannya, lihat `.env.example`), `doctor`, `test`.
+`make help` menampilkan semuanya: `init`, `keystore` (buat keystore bila belum ada; tidak pernah menimpa), `keystore-info` (sidik jari, tanpa kata sandi), `keystore-access` (pastikan kunci terbaca kontainer signer: `secrets/` 700, berkas 644; hanya `chmod`), `password`, `up`, `down`, `restart`, `logs`, `ps`, `update`, `runner-selftest`, `signer-selftest`, `signer-verify` (bukti end-to-end penandatanganan dengan keystore pemilik; `BIG_MB=1000` menambah APK besar), `tools-check` (tabel versi alat build), `bench-selftest`, `net-check` (shell AI dan jaringannya, lihat `.env.example`), `doctor`, `test`.
 
 Tes (tanpa Docker): `pip install -r services/web/requirements.txt -r tests/requirements.txt` lalu `make test`. CI menjalankannya di setiap PR.
 
@@ -40,13 +41,15 @@ deploy/Caddyfile          HTTPS otomatis + reverse proxy (batas body upload hany
 services/web              FastAPI + Jinja (login, dashboard, upload, detail analisis, SSE)
 services/worker           Worker RQ: orkestrasi pipeline, ringkasan manifest, pemulihan setelah restart
 services/runner           jadx + apktool; TANPA jaringan, read-only, non-root; menerima job lewat spool berkas
-services/signer           zipalign + apksigner (Build-Tools dipin SHA-256); HANYA toolchain + selftest, profil Compose `build` (belum ada daemon; keystore belum dipasang ke image ini)
+services/signer           zipalign + apksigner (Build-Tools dipin SHA-256) + `signer-daemon` (Tahap 2a; menandatangani lewat antrean `signspool`); profil Compose `build`, aktif bila keystore ada
 services/runner/analyzer  Analisis statis (indeks FTS5, deteksi secret/kripto/jaringan, sertifikat) — berjalan di runner
 services/rvcore           Kode bersama (skema SQLite, protokol spool, utilitas berkas); hanya stdlib
 design-system/            Token & aturan visual (UI/UX Pro Max)
 docs/prd/                 Dokumen kebutuhan produk per bagian
 scripts/init.sh           Penyiapan .env, secrets/, dan keystore penanda tangan
-scripts/keystore.sh       Membuat/menampilkan keystore (keytool di image signer; tidak pernah menimpa)
+scripts/keystore.sh       Membuat/menampilkan keystore (keytool di image signer; tidak pernah menimpa); `access`/`check` memastikan kunci terbaca signer
+scripts/signer-verify.sh  `make signer-verify`: bukti end-to-end penandatanganan (tabel OK/GAGAL yang bisa ditempel)
+docker-compose.keystore.yml  Berkas tambahan: memasang keystore HANYA ke `signer` (dimuat Makefile bila keystore ada)
 ```
 
 ## Alat & versi terkunci
@@ -65,7 +68,7 @@ apktool, jadx, dan Build-Tools (zipalign + apksigner) dipin dengan SHA-256 di Do
 - Login: argon2id, sesi bertanda tangan (cookie `__Host-`, HttpOnly, SameSite=Strict), CSRF, pembatas percobaan per IP.
 - Header CSP ketat, tanpa skrip/gaya inline, font di-host sendiri (tanpa permintaan ke pihak ketiga).
 - Image `runner` memverifikasi SHA-256 jadx dan apktool saat build; APK tidak pernah dieksekusi.
-- Image `signer` memverifikasi SHA-256 Android Build-Tools saat build. Pada tahap ini: tanpa jaringan, tanpa keystore di image/layanan (keystore hanya berkas di `secrets/` host, belum dipasang), tanpa volume, dan mati secara bawaan (profil `build`).
+- Image `signer` memverifikasi SHA-256 Android Build-Tools saat build. Tanpa jaringan, rootfs read-only, uid 10001, tmpfs `/tmp` `noexec`. Sejak Tahap 2a keystore dipasang ke `signer` SAJA (read-only, lewat `docker-compose.keystore.yml`; tidak ada di image maupun layanan lain); berkasnya mode 644 di folder `secrets/` mode 700 — kerahasiaan bertumpu pada folder (jangan `chmod 755 secrets`). Kata sandi tidak pernah di argv/env/log/hasil. Volume `builds` dan `signspool` dipasang; profil `build` diaktifkan Makefile hanya bila keystore ada.
 - Hanya runner yang mem-parsing APK. Runner **tanpa jaringan, tanpa Redis/DB, tanpa Docker socket**; APK dimount read-only.
   Timeout, pembatalan, dan batas ukuran keluaran dipaksakan dengan mematikan seluruh process group tool.
 - Upload: streaming ke disk (tidak ke RAM), validasi struktur ZIP tanpa dekompresi (rasio, jumlah entri, path traversal,

@@ -1,0 +1,857 @@
+#!/usr/bin/env python3
+"""Daemon signer: menandatangani APK hasil build dengan keystore PEMILIK (zipalign -> apksigner sign -> apksigner verify). TANPA JARINGAN.
+
+Isolasi (ditegakkan oleh docker-compose.yml): network_mode none, non-root (uid 10001), rootfs read-only, cap_drop ALL, no-new-privileges, batas
+memori/CPU/PID. Kunci hanya ada di /run/secrets (dibaca-saja); kata sandi TIDAK PERNAH ada di argv, env, stdin, log, maupun hasil: alat membaca
+berkasnya sendiri (`--ks-pass file:`) dan daemon hanya memeriksa bentuknya.
+
+Urutan satu job (lihat plan.md 5.3; menimpa design.md 5.2 sesuai ADENDUM):
+  claim -> validasi ketat -> status kunci -> buka unsigned.apk aman (dir_fd + O_NOFOLLOW|O_NONBLOCK) -> BERSIHKAN SISA -> cek disk
+  -> zipalign (+ -c) -> apksigner sign -> apksigner verify (sertifikat HARUS == keystore pemilik) -> hash + os.replace atomik ke signed.apk
+  -> pembersihan -> Spool.finish (3 percobaan; pembersihan SEBELUM finish agar disk penuh tidak membuat hasil hilang).
+`signed.apk` tidak pernah ada selain hasil yang lulus verifikasi dan pembandingan sertifikat.
+
+Daya tahan: tiap alat berjalan di process group sendiri; tenggat, pembatalan, SIGTERM, dan batas keluaran mematikan SELURUH grup. Detak jantung
+(signer.hb) ditulis tiap 5 detik, juga saat keytool/alat berjalan lama. Tidak ada recycle: tak ada keadaan per-job yang tersisa.
+
+Pola proses disalin dari runner-daemon (bukan diimpor, agar runner tidak tersentuh). Protokol berkas: lihat rvcore/signspool.py.
+"""
+
+from __future__ import annotations
+
+import errno
+import hashlib
+import os
+import re
+import signal
+import stat
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Any, Callable, NamedTuple
+
+from rvcore.fsutil import safe_rmtree
+from rvcore.paths import Layout
+from rvcore.signkeys import ALIAS, OPEN_FLAGS, inspect_key_file, owner_fingerprint
+from rvcore.signkeys import ToolResult as KeyToolResult
+from rvcore.signspool import ERROR_TEXT, JOB_ID_RE, TEXT_MAX, make_spool, signer_status, validate_request
+
+MIB = 1024 * 1024
+
+
+def _int_env(name: str, default: int, lo: int, hi: int) -> int:
+    """Bilangan bulat dari env, dijepit ke [lo, hi]; kosong atau tak valid -> `default`."""
+    raw = os.environ.get(name, "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(lo, min(hi, value))
+
+
+DATA_DIR = os.environ.get("DATA_DIR", "/data")
+LAYOUT = Layout(DATA_DIR)
+SPOOL = make_spool(LAYOUT.signspool)
+SECRETS_DIR = Path(os.environ.get("SIGNER_SECRETS_DIR", "/run/secrets"))
+KS_NAME = "signing_keystore"
+PASS_NAME = "signing_keystore_pass"
+
+SIGN_TIMEOUT = _int_env("SIGN_TIMEOUT", 900, 30, 3600)
+SIGN_MAX_MB = _int_env("SIGN_MAX_MB", 1100, 1, 4096)
+
+RESERVE = 1024 * MIB           # cadangan disk: volume builds satu filesystem dengan db/uploads/work
+SIG_SLACK = 16 * MIB           # blok tanda tangan + sisa pembulatan
+HEARTBEAT_EVERY = 5.0
+HEALTH_MAX_AGE = 20.0
+TICK = 0.5
+KEY_RECHECK = 10.0
+KEYTOOL_TIMEOUT = 30.0
+TERM_GRACE = 5.0
+MAX_TOOL_OUTPUT = 8 * MIB
+HEAD_KEEP, TAIL_KEEP, ERR_KEEP = 8 * 1024, 56 * 1024, 8 * 1024
+HOUSEKEEP_EVERY = 300.0
+STALE_FILE_SECONDS = 3600
+FINISH_ATTEMPTS = 3
+FINISH_RETRY_DELAY = 1.0
+HASH_CHECK_EVERY = 64 * MIB
+TOOL_PATH = os.environ.get("PATH") or "/usr/local/bin:/usr/bin:/bin"
+TOOL_HOME_ROOT = Path("/tmp/home")
+CLOCK: Callable[[], float] = time.monotonic     # disuntik tes untuk pelambatan detak jantung
+STOP = threading.Event()
+
+UNSIGNED, SIGNED = "unsigned.apk", "signed.apk"
+TMP_ALIGNED, TMP_SIGNED = ".sign-aligned.tmp", ".sign-signed.tmp"
+_KEY_STATES = ("stale", "unreadable", "missing", "invalid")      # urutan keparahan saat dua berkas bermasalah
+_ERROR_LINE = re.compile(r"(?i)(exception|error|fatal|failed|cannot|unable)")
+_SCHEME_RE = re.compile(r"^Verified using v(1|2|3) scheme \(.*\): (true|false)\s*$", re.M)
+_SIGNERS_RE = re.compile(r"^Number of signers: (\d+)\s*$", re.M)
+# Hanya baris penanda tangan ("Signer #1 …" / "V3.0 Signer: …") dengan 'certificate SHA-256 digest:'; 'public key SHA-256 digest' BUKAN sertifikat.
+_DIGEST_RE = re.compile(r"^(?:Signer #\d+|V\d(?:\.\d)?)[^\n]*?certificate SHA-256 digest: ([0-9a-fA-F]{64})\s*$", re.M)
+
+
+def say(msg: str) -> None:
+    print(time.strftime("%Y-%m-%dT%H:%M:%S"), msg, flush=True)
+
+
+class JobError(Exception):
+    """Kegagalan terduga satu job: `code` (salah satu ERROR_CODES) dan `text` (satu kalimat Indonesia, sudah disaring)."""
+
+    def __init__(self, code: str, text: str) -> None:
+        super().__init__(f"{code}: {text}")
+        self.code = code
+        self.text = text
+
+
+# ------------------------------------------------------------------ fungsi murni
+
+
+def env_minimal(home: Any) -> dict[str, str]:
+    """Environment alat: HANYA PATH, HOME, LANG. os.environ daemon tidak diteruskan (tak ada rahasia/JAVA_TOOL_OPTIONS yang ikut)."""
+    return {"PATH": TOOL_PATH, "HOME": str(home), "LANG": "C.UTF-8"}
+
+
+def scrub(text: Any, extra: tuple[str, ...] | list[str] = ()) -> str:
+    """Teks aman untuk log/hasil: buang karakter kontrol, samarkan jalur rahasia/build dan isi `extra`, potong 300 karakter."""
+    clean = "".join(" " if ch in "\t\r\n" else ch for ch in str(text) if ch in "\t\r\n" or ch.isprintable())
+    for secret in extra:
+        if secret:
+            clean = clean.replace(secret, "<rahasia>")
+    clean = re.sub(re.escape(str(SECRETS_DIR)) + r"(?:/\S*)?", "<rahasia>", clean)
+    clean = re.sub(re.escape(str(LAYOUT.root)) + r"(?:/\S*)?", "<build>", clean)
+    return clean.strip()[:TEXT_MAX]
+
+
+def last_error_line(text: str) -> str | None:
+    """Satu baris galat terakhir (tanpa bingkai stack trace '\tat …' / '… N more')."""
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if line and not line.startswith(("at ", "...")) and _ERROR_LINE.search(line):
+            return line
+    return None
+
+
+def map_tool_error(code: str, rc: int | None, text: str, extra: tuple[str, ...] | list[str] = ()) -> tuple[str, str]:
+    """(error_code, error_text) untuk alat yang selesai dengan rc != 0 (BUKAN dibunuh oleh kita). `code` = kode bawaan tahap itu.
+
+    Stack trace JVM tidak diteruskan: hanya teks tetap, atau SATU baris galat terakhir yang sudah disaring."""
+    if "keystore password was incorrect" in text or "does not contain a key" in text:
+        return "keystore_invalid", ERROR_TEXT["keystore_invalid"]
+    if "No space left on device" in text:
+        return "no_space", ERROR_TEXT["no_space"]
+    if "OutOfMemoryError: Direct buffer memory" in text:
+        return code, "memori langsung JVM habis; lihat docs/deploy.md (batas -XX:MaxDirectMemorySize)"
+    if "OutOfMemoryError: Java heap space" in text:
+        return code, "memori heap JVM habis (-Xmx256m); lihat docs/deploy.md"
+    if rc in (137, -9):
+        return code, "alat dimatikan (kemungkinan kehabisan memori 512m; lihat docs/deploy.md)"
+    if "MinSdkVersionException" in text or "malformed binary resource" in text:
+        return code, "APK tidak valid (AndroidManifest.xml tidak terbaca)"
+    if re.search(r"Unable to open .* as zip archive", text):
+        return code, "bukan berkas ZIP/APK yang valid"
+    line = last_error_line(text)
+    return code, scrub(line, extra) if line else ERROR_TEXT[code]
+
+
+def check_disk(free: int, size: int) -> tuple[bool, int]:
+    """(cukup, dibutuhkan). Puncak = unsigned (sudah ada) + aligned + signed ~ 2x ukuran baru + blok tanda tangan + cadangan."""
+    need = 2 * size + SIG_SLACK + RESERVE
+    return free >= need, need
+
+
+def _open_dir(name: str, dir_fd: int | None = None) -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    return os.open(name, flags) if dir_fd is None else os.open(name, flags, dir_fd=dir_fd)
+
+
+def open_build_dir(analysis_id: int, build_id: int) -> int:
+    """fd folder build lewat rantai builds -> <aid> -> <bid> (O_DIRECTORY|O_NOFOLLOW, dir_fd). Id non-int ditolak Layout (ValueError).
+    SEMUA operasi berkas signer sesudahnya memakai dir_fd ini, jadi symlink yang diselipkan di komponen perantara tidak diikuti."""
+    target = LAYOUT.build_dir(analysis_id, build_id)
+    chain = [str(LAYOUT.builds), target.parent.name, target.name]
+    fd = -1
+    try:
+        for name in chain:
+            nxt = _open_dir(name, None if fd < 0 else fd)
+            if fd >= 0:
+                os.close(fd)
+            fd = nxt
+        return fd
+    except OSError as exc:
+        if fd >= 0:
+            os.close(fd)
+        if exc.errno == errno.ENOENT:
+            raise JobError("input_missing", f"folder build {analysis_id}/{build_id} tidak ditemukan") from exc
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise JobError("input_unsafe", "folder build bukan direktori biasa (symlink atau jenis lain) sehingga ditolak") from exc
+        raise JobError("internal", f"folder build tidak bisa dibuka ({errno.errorcode.get(exc.errno or 0, 'galat')})") from exc
+
+
+def open_input(bfd: int, name: str, max_bytes: int) -> tuple[int, int]:
+    """Buka masukan tak tepercaya relatif ke `bfd` -> (fd, ukuran). Tidak pernah menggantung pada FIFO (OPEN_FLAGS memuat O_NONBLOCK)."""
+    try:
+        fd = os.open(name, OPEN_FLAGS, dir_fd=bfd)
+    except FileNotFoundError as exc:
+        raise JobError("input_missing", f"{name} tidak ditemukan untuk build ini") from exc
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENXIO, errno.EISDIR, errno.ENOTDIR):
+            raise JobError("input_unsafe", f"{name} bukan berkas biasa (symlink atau jenis lain) sehingga ditolak") from exc
+        raise JobError("internal", f"{name} tidak bisa dibuka ({errno.errorcode.get(exc.errno or 0, 'galat')})") from exc
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise JobError("input_unsafe", f"{name} bukan berkas biasa sehingga ditolak")
+        if st.st_nlink != 1:
+            raise JobError("input_unsafe", f"{name} punya tautan keras lain (nlink={st.st_nlink}) sehingga ditolak")
+        if st.st_size <= 0:
+            raise JobError("input_unsafe", f"{name} kosong (0 byte)")
+        if st.st_size > max_bytes:
+            raise JobError("input_too_large", f"{name} berukuran {st.st_size / MIB:.1f} MiB, melebihi batas {max_bytes // MIB} MiB (SIGN_MAX_MB)")
+        return fd, st.st_size
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _is_leftover(name: str) -> bool:
+    return name == SIGNED or name.startswith(".sign-") or name.endswith(".idsig")
+
+
+def sweep_leftovers(bfd: int, *, signed: bool = True) -> list[str]:
+    """Hapus signed.apk (bila `signed`), setiap .sign-* dan *.idsig di folder build (unlink dir_fd: tidak mengikuti symlink). IDEMPOTEN.
+    Mengembalikan nama yang TIDAK bisa dihapus (mis. direktori); OSError dari listdir naik ke pemanggil."""
+    stuck: list[str] = []
+    for name in os.listdir(bfd):
+        if not _is_leftover(name) or (name == SIGNED and not signed):
+            continue
+        try:
+            os.unlink(name, dir_fd=bfd)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            stuck.append(name)
+    return stuck
+
+
+def cleanup_job_files(bfd: int | None, home: Any = None) -> bool:
+    """Pembersihan IDEMPOTEN yang tidak pernah melempar: sisa .sign-*/*.idsig di folder build + HOME job. True bila bersih.
+    signed.apk SENGAJA tidak disentuh (itu hasil job yang sukses); hanya sweep_leftovers() awal job dan pemulihan yatim yang membuangnya."""
+    clean = True
+    if bfd is not None:
+        try:
+            clean = not sweep_leftovers(bfd, signed=False)
+        except OSError:
+            clean = False
+    if home is not None:
+        try:
+            safe_rmtree(home)
+        except OSError:
+            clean = False
+    return clean
+
+
+def build_zipalign_cmd(src: Any, dst: Any) -> list[str]:
+    return ["zipalign", "-P", "16", "-f", "4", str(src), str(dst)]
+
+
+def build_zipalign_check_cmd(path: Any) -> list[str]:
+    return ["zipalign", "-c", "-P", "16", "4", str(path)]
+
+
+def build_sign_cmd(src: Any, dst: Any) -> list[str]:
+    """apksigner sign. TANPA --key-pass, --min-sdk-version, --v1-signing-enabled, pass:/env:/stdin: kata sandi hanya lewat JALUR berkas."""
+    return ["apksigner", "sign", "--ks", str(SECRETS_DIR / KS_NAME), "--ks-type", "PKCS12", "--ks-key-alias", ALIAS,
+            "--ks-pass", f"file:{SECRETS_DIR / PASS_NAME}",
+            "--v2-signing-enabled", "true", "--v3-signing-enabled", "true", "--v4-signing-enabled", "false",
+            "--out", str(dst), str(src)]
+
+
+def build_verify_cmd(path: Any) -> list[str]:
+    return ["apksigner", "verify", "--verbose", "--print-certs", str(path)]
+
+
+def redact_argv(argv: list[str]) -> list[str]:
+    """Argumen untuk log: jalur keystore/sandi diganti placeholder, jalur build disamarkan."""
+    shown = []
+    for arg in argv:
+        if arg == str(SECRETS_DIR / KS_NAME):
+            arg = "<ks>"
+        elif arg == f"file:{SECRETS_DIR / PASS_NAME}":
+            arg = "file:<pw>"
+        shown.append(scrub(arg))
+    return shown
+
+
+class Verify(NamedTuple):
+    rc: int | None
+    v1: bool
+    v2: bool
+    v3: bool
+    signer_count: int | None
+    digests: tuple[str, ...]
+
+
+def parse_verify(rc: int | None, text: str) -> Verify:
+    """Parse keluaran `apksigner verify --verbose --print-certs` (berjangkar; keluaran tak dikenal -> semua false/kosong)."""
+    schemes = {m.group(1): m.group(2) == "true" for m in _SCHEME_RE.finditer(text)}
+    count = _SIGNERS_RE.search(text)
+    digests = tuple(m.group(1).lower() for m in _DIGEST_RE.finditer(text))
+    return Verify(rc, schemes.get("1", False), schemes.get("2", False), schemes.get("3", False), int(count.group(1)) if count else None, digests)
+
+
+def evaluate_verify(verify: Verify, owner_sha: str) -> tuple[bool, str | None, str]:
+    """(ok, error_code, error_text). Lulus bila rc==0, v2 dan v3 true, tepat satu penanda tangan, dan SEMUA digest sertifikat == sidik jari pemilik.
+    Digest berbeda -> cert_mismatch; selain itu verify_failed. v1 informatif."""
+    if verify.rc != 0 or not (verify.v2 and verify.v3) or not verify.digests:
+        return False, "verify_failed", ERROR_TEXT["verify_failed"]
+    owner = owner_sha.lower()
+    if set(verify.digests) != {owner}:
+        got = ", ".join(sorted({d[:12] for d in verify.digests if d != owner}))
+        return False, "cert_mismatch", f"sertifikat penanda tangan ({got}…) tidak sama dengan keystore pemilik ({owner[:12]}…); hasil dibuang"
+    if verify.signer_count != 1:
+        return False, "verify_failed", f"jumlah penanda tangan {verify.signer_count}, seharusnya 1"
+    return True, None, ""
+
+
+def sha256_fd(fd: int, on_tick: Callable[[], None] | None = None) -> tuple[str, int]:
+    """(sha256 heks, byte terbaca) dari fd yang sudah divalidasi; `on_tick` dipanggil tiap 64 MiB (detak jantung/pembatalan)."""
+    digest = hashlib.sha256()
+    total = since = 0
+    while True:
+        chunk = os.read(fd, MIB)
+        if not chunk:
+            return digest.hexdigest(), total
+        digest.update(chunk)
+        total += len(chunk)
+        since += len(chunk)
+        if on_tick is not None and since >= HASH_CHECK_EVERY:
+            since = 0
+            on_tick()
+
+
+# ------------------------------------------------------------------ eksekusi alat (disalin dari runner-daemon + batas keluaran)
+
+
+def kill_group(proc: subprocess.Popen) -> None:
+    """SIGTERM ke seluruh process group, lalu SIGKILL bila belum berhenti."""
+    for sig, wait in ((signal.SIGTERM, TERM_GRACE), (signal.SIGKILL, 5.0)):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            pass
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                return
+            time.sleep(0.05)
+
+
+def sweep_group(proc: subprocess.Popen) -> None:
+    """Pastikan tak ada anak yang tertinggal setelah proses utama selesai."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+class ToolResult(NamedTuple):
+    rc: int | None          # kode keluar proses (None bila tidak pernah berjalan)
+    out_bytes: bytes        # stdout (+stderr bila 'merge'): kepala 8 KiB + ekor 56 KiB
+    err_text: str           # stderr terpisah (mode 'separate', maks 8 KiB) atau pesan galat spawn
+    status: str             # done | timeout | cancelled | interrupted | output_limit | spawn_failed
+
+    def text(self) -> str:
+        return self.out_bytes.decode("utf-8", errors="replace")
+
+
+class _Bounded:
+    """Penampung keluaran terbatas: kepala + ekor; hitung total byte. Dikuras terus supaya alat tidak macet pada pipa penuh."""
+
+    def __init__(self, head: int, tail: int) -> None:
+        self.head_max, self.tail_max = head, tail
+        self.head = bytearray()
+        self.tail = bytearray()
+        self.total = 0
+
+    def feed(self, data: bytes) -> None:
+        self.total += len(data)
+        if len(self.head) < self.head_max:
+            take = self.head_max - len(self.head)
+            self.head += data[:take]
+            data = data[take:]
+        if data and self.tail_max:
+            self.tail += data
+            if len(self.tail) > self.tail_max:
+                del self.tail[:len(self.tail) - self.tail_max]
+
+    def value(self) -> bytes:
+        if self.total > self.head_max + self.tail_max:
+            return bytes(self.head) + b"\n[...dipotong...]\n" + bytes(self.tail)
+        return bytes(self.head) + bytes(self.tail)
+
+
+def _pump(fd: int, sink: _Bounded, over: threading.Event | None) -> None:
+    try:
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                return
+            sink.feed(chunk)
+            if over is not None and sink.total > MAX_TOOL_OUTPUT:
+                over.set()
+    except OSError:
+        return
+
+
+def run_tool(argv: list[str], *, deadline: float, home: Any, on_tick: Callable[[], None], cancel_check: Callable[[], bool] | None = None,
+             stderr: str = "merge") -> ToolResult:
+    """Jalankan SATU alat (zipalign, apksigner, keytool) di process group sendiri. `deadline` = time.monotonic() absolut.
+    Tiap 0,5 dtk: on_tick(), lalu STOP -> 'interrupted', cancel_check -> 'cancelled', tenggat -> 'timeout'; keluaran > 8 MiB -> 'output_limit'.
+    Pada status selain 'done' seluruh grup sudah dimatikan."""
+    home = Path(home)
+    separate = stderr == "separate"
+    try:
+        os.makedirs(home, mode=0o700, exist_ok=True)
+        proc = subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE if separate else subprocess.STDOUT,
+            start_new_session=True, close_fds=True, cwd=home, env=env_minimal(home),
+        )
+    except OSError as exc:
+        return ToolResult(None, b"", f"{argv[0]} tidak dapat dijalankan ({errno.errorcode.get(exc.errno or 0, 'galat')})", "spawn_failed")
+    over = threading.Event()
+    out_sink, err_sink = _Bounded(HEAD_KEEP, TAIL_KEEP), _Bounded(ERR_KEEP, 0)
+    readers = [threading.Thread(target=_pump, args=(proc.stdout.fileno(), out_sink, over), daemon=True)]
+    if separate:
+        readers.append(threading.Thread(target=_pump, args=(proc.stderr.fileno(), err_sink, None), daemon=True))
+    for reader in readers:
+        reader.start()
+    status = "done"
+    try:
+        while True:
+            try:
+                proc.wait(timeout=TICK)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            on_tick()
+            if STOP.is_set():
+                status = "interrupted"
+            elif cancel_check is not None and cancel_check():
+                status = "cancelled"
+            elif time.monotonic() > deadline:
+                status = "timeout"
+            elif over.is_set():
+                status = "output_limit"
+            if status != "done":
+                kill_group(proc)
+                break
+        proc.wait()
+        sweep_group(proc)
+        for reader in readers:
+            reader.join(timeout=5)
+    finally:
+        if proc.poll() is None:
+            kill_group(proc)
+            sweep_group(proc)
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None and not any(r.is_alive() for r in readers):
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
+    if status == "done" and over.is_set():
+        status = "output_limit"
+    return ToolResult(proc.returncode, out_sink.value(), err_sink.value().decode("utf-8", errors="replace"), status)
+
+
+# ------------------------------------------------------------------ detak jantung (tahan galat)
+
+HB: dict[str, Any] = {"state": "idle", "job": None, "last": None, "sig": None}
+_WARNED: set[tuple[str, int]] = set()
+
+
+def _io_failed(func: str, exc: OSError) -> None:
+    """WARN SEKALI per (fungsi, errno), bukan tiap tick."""
+    key = (func, exc.errno or 0)
+    if key not in _WARNED:
+        _WARNED.add(key)
+        say(f"WARN {func} gagal ({errno.errorcode.get(exc.errno or 0, 'OSError')}); daemon tetap berjalan")
+
+
+def _io_ok(func: str) -> None:
+    gone = {k for k in _WARNED if k[0] == func}
+    if gone:
+        _WARNED.difference_update(gone)
+        say(f"INFO {func} pulih")
+
+
+class KeyInfo(NamedTuple):
+    state: str              # ok | missing | unreadable | invalid | stale
+    detail: str
+    cert_sha256: str | None
+
+
+KEY_STATE: dict[str, Any] = {"cache": None, "last": KeyInfo("invalid", "kunci belum diperiksa", None)}
+
+
+def write_hb(state: str, job: str | None = None) -> None:
+    """Tulis signer.hb sekarang (OSError ditelan: klien melihat signer usang, daemon tidak mati)."""
+    key: KeyInfo = KEY_STATE["last"]
+    HB.update(state=state, job=job, last=CLOCK(), sig=(state, job, key.state, key.cert_sha256))
+    try:
+        SPOOL.write_signer_heartbeat(state, job, {"state": key.state, "detail": key.detail, "cert_sha256": key.cert_sha256})
+    except OSError as exc:
+        _io_failed("write_signer_heartbeat", exc)
+    else:
+        _io_ok("write_signer_heartbeat")
+
+
+def on_tick() -> None:
+    """Dipanggil tiap 0,5 dtk; MENULIS hanya bila >= 5 dtk sejak tulis terakhir atau keadaan/job/kunci berubah (fsync mahal)."""
+    key: KeyInfo = KEY_STATE["last"]
+    changed = HB["sig"] != (HB["state"], HB["job"], key.state, key.cert_sha256)
+    if changed or HB["last"] is None or CLOCK() - HB["last"] >= HEARTBEAT_EVERY:
+        write_hb(HB["state"], HB["job"])
+
+
+# ------------------------------------------------------------------ status kunci pemilik
+
+
+def _signature(path: Path) -> tuple[int, ...] | None:
+    try:
+        fd = os.open(path, OPEN_FLAGS)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def key_status() -> KeyInfo:
+    """Keadaan keystore pemilik; dipanggil saat start, sebelum tiap job, dan tiap <= 10 dtk saat idle. Tidak pernah melempar.
+
+    Berkas diperiksa SETIAP kali (stale tak pernah dari cache). keytool hanya dijalankan bila tanda tangan (dev, ino, size, mtime_ns, ctime_ns) kedua
+    berkas berubah; hanya hasil DEFINITIF yang di-cache (ok / invalid karena sandi atau alias). Hasil sementara (tenggat, EIO) tidak."""
+    p12, pw = SECRETS_DIR / KS_NAME, SECRETS_DIR / PASS_NAME
+    checks = [inspect_key_file(p12, kind="p12"), inspect_key_file(pw, kind="pass")]
+    bad = [c for c in checks if c.state != "ok"]
+    if bad:
+        worst = min(bad, key=lambda c: _KEY_STATES.index(c.state) if c.state in _KEY_STATES else len(_KEY_STATES))
+        info = KeyInfo(worst.state, worst.detail, None)
+        KEY_STATE["last"] = info
+        return info
+    sig = (_signature(p12), _signature(pw))
+    cache = KEY_STATE["cache"]
+    if None not in sig and cache is not None and cache[0] == sig:
+        KEY_STATE["last"] = cache[1]
+        return cache[1]
+    seen: dict[str, str] = {}
+
+    def run(argv: list[str], *, deadline: float, home: Any, stderr: str) -> KeyToolResult:
+        res = run_tool(argv, deadline=deadline, home=home, on_tick=on_tick, stderr=stderr)
+        seen["status"] = res.status
+        return KeyToolResult(res.rc if res.status == "done" else None, res.out_bytes, res.err_text)
+
+    state, value = owner_fingerprint(p12, pw, run, home=str(TOOL_HOME_ROOT / "_key"), timeout=KEYTOOL_TIMEOUT)
+    if state == "transient":
+        if STOP.is_set() or seen.get("status") == "interrupted":
+            return KEY_STATE["last"]          # dihentikan di tengah keytool: bukan 'invalid' palsu, cache tak tersentuh
+        if seen.get("status") == "timeout":
+            value = f"keytool tidak menjawab dalam {KEYTOOL_TIMEOUT:g} dtk (keystore di filesystem yang macet atau kehabisan memori?)"
+        info = KeyInfo("invalid", value, None)           # sementara: TIDAK di-cache, dicoba lagi pada pemeriksaan berikut
+        KEY_STATE["last"] = info
+        return info
+    info = KeyInfo("ok", "", value) if state == "ok" else KeyInfo("invalid", value, None)
+    if None not in sig:
+        KEY_STATE["cache"] = (sig, info)
+    KEY_STATE["last"] = info
+    return info
+
+
+# ------------------------------------------------------------------ satu job
+
+
+def _result(ok: bool, started: float, *, code: str | None = None, text: str = "", size: int = 0, sha: str | None = None, cert: str | None = None,
+            verify: Verify | None = None) -> dict[str, Any]:
+    return {
+        "ok": ok, "error_code": code, "error_text": text[:TEXT_MAX], "output_name": SIGNED, "output_size": size, "output_sha256": sha,
+        "cert_sha256": cert, "verify": {"v1": verify.v1 if verify else None, "v2": bool(verify and verify.v2), "v3": bool(verify and verify.v3)},
+        "signer_count": verify.signer_count if verify else None, "elapsed": round(time.monotonic() - started, 2),
+    }
+
+
+class _Job:
+    def __init__(self, job_id: str) -> None:
+        self.id = job_id
+        self.aid = self.bid = 0
+        self.bfd: int | None = None
+        self.home: Path | None = None
+        self.size = 0
+        self.last_cmd = ""
+
+
+def _step(job: _Job, argv: list[str], deadline: float, code: str, timeout_s: int) -> ToolResult:
+    """Satu alat dalam job; status non-'done' dan rc != 0 menjadi JobError dengan kode/teks yang sesuai."""
+    assert job.home is not None
+    if STOP.is_set():
+        raise JobError("aborted", "signer dihentikan saat job berjalan")
+    job.last_cmd = " ".join(redact_argv(argv))
+    res = run_tool(argv, deadline=deadline, home=job.home, on_tick=on_tick, cancel_check=lambda: SPOOL.cancel_requested(job.id))
+    if res.status == "interrupted":
+        raise JobError("aborted", "signer dihentikan saat job berjalan")
+    if res.status == "cancelled":
+        raise JobError("cancelled", ERROR_TEXT["cancelled"])
+    if res.status == "timeout":
+        raise JobError("timeout", f"melebihi batas waktu {timeout_s} detik")
+    if res.status == "output_limit":
+        raise JobError("output_limit", ERROR_TEXT["output_limit"])
+    if res.status == "spawn_failed":
+        raise JobError("internal", scrub(res.err_text))
+    if res.rc != 0:
+        raise JobError(*map_tool_error(code, res.rc, res.text()))
+    return res
+
+
+def _guard(job: _Job) -> None:
+    on_tick()
+    if STOP.is_set():
+        raise JobError("aborted", "signer dihentikan saat job berjalan")
+    if SPOOL.cancel_requested(job.id):
+        raise JobError("cancelled", ERROR_TEXT["cancelled"])
+
+
+def _process(job: _Job, request: dict[str, Any], started: float) -> dict[str, Any]:
+    try:
+        job.aid, job.bid, req_timeout = validate_request(request, job.id)
+    except ValueError as exc:
+        raise JobError("bad_request", f"request tidak valid: {scrub(exc)}") from exc
+    timeout_s = min(req_timeout, SIGN_TIMEOUT)
+    deadline = time.monotonic() + timeout_s
+
+    key = key_status()
+    if key.state != "ok" or not key.cert_sha256:
+        state = key.state if key.state != "ok" else "invalid"
+        raise JobError(f"keystore_{state}", key.detail or ERROR_TEXT[f"keystore_{state}"])
+    owner = key.cert_sha256
+
+    job.bfd = open_build_dir(job.aid, job.bid)
+    fd, job.size = open_input(job.bfd, UNSIGNED, SIGN_MAX_MB * MIB)
+    os.close(fd)
+    job.home = TOOL_HOME_ROOT / job.id
+    os.makedirs(job.home, mode=0o700, exist_ok=True)
+
+    if sweep_leftovers(job.bfd):
+        raise JobError("input_unsafe", "sisa berkas keluaran lama di folder build tidak bisa dihapus")
+    st = os.statvfs(job.bfd)
+    free = st.f_bavail * st.f_frsize
+    enough, need = check_disk(free, job.size)
+    if not enough:
+        raise JobError("no_space", f"butuh {need // MIB} MiB, bebas {free // MIB} MiB (puncak 2x ukuran APK + 16 MiB + cadangan 1 GiB)")
+
+    bdir = LAYOUT.build_dir(job.aid, job.bid)
+    src, aligned, signed_tmp = bdir / UNSIGNED, bdir / TMP_ALIGNED, bdir / TMP_SIGNED
+    _step(job, build_zipalign_cmd(src, aligned), deadline, "align_failed", timeout_s)
+    _step(job, build_zipalign_check_cmd(aligned), deadline, "align_failed", timeout_s)
+    try:
+        _step(job, build_sign_cmd(aligned, signed_tmp), deadline, "sign_failed", timeout_s)
+    finally:
+        try:
+            os.unlink(TMP_ALIGNED, dir_fd=job.bfd)
+        except OSError:
+            pass
+    res = _step(job, build_verify_cmd(signed_tmp), deadline, "verify_failed", timeout_s)
+    verify = parse_verify(res.rc, res.text())
+    ok, code, text = evaluate_verify(verify, owner)
+    if not ok:
+        raise JobError(code or "verify_failed", text)
+
+    fd = os.open(TMP_SIGNED, OPEN_FLAGS, dir_fd=job.bfd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            raise JobError("input_unsafe", f"{TMP_SIGNED} bukan berkas biasa sehingga tidak diterbitkan")
+        sha, size = sha256_fd(fd, lambda: _guard(job))
+    finally:
+        os.close(fd)
+    if size <= 0:
+        raise JobError("verify_failed", "keluaran tanda tangan kosong")
+    os.replace(TMP_SIGNED, SIGNED, src_dir_fd=job.bfd, dst_dir_fd=job.bfd)
+    return _result(True, started, size=size, sha=sha, cert=verify.digests[0], verify=verify)
+
+
+def finish_with_retry(job_id: str, result: dict[str, Any], bfd: int | None = None, home: Any = None) -> bool:
+    """Spool.finish dengan 3 percobaan (jeda 1 dtk, pembersihan ulang tiap gagal). Tetap gagal -> hasil minimal; itupun gagal -> hanya log ERROR
+    (request tetap di running/ dan dijawab 'aborted' saat start berikut). Tidak pernah melempar."""
+    last: BaseException | None = None
+    for attempt in range(FINISH_ATTEMPTS):
+        try:
+            SPOOL.finish(job_id, result)
+            return True
+        except Exception as exc:  # noqa: BLE001 - daemon tidak boleh mati karena satu hasil gagal ditulis
+            last = exc
+            say(f"[{job_id}] WARN finish gagal percobaan {attempt + 1}/{FINISH_ATTEMPTS} ({type(exc).__name__})")
+            cleanup_job_files(bfd, home)
+            if attempt + 1 < FINISH_ATTEMPTS:
+                time.sleep(FINISH_RETRY_DELAY)
+    code = "no_space" if isinstance(last, OSError) and last.errno == errno.ENOSPC else "internal"
+    try:
+        SPOOL.finish(job_id, _result(False, time.monotonic(), code=code, text=ERROR_TEXT[code]))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        say(f"[{job_id}] ERROR hasil tidak bisa ditulis ({type(exc).__name__}); request dibiarkan di running/ (aborted saat start berikut)")
+        return False
+
+
+def run_job(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
+    """Proses satu job SAMPAI hasil terkirim (Spool.finish) dan kembalikan hasilnya. Pembersihan berjalan SEBELUM finish."""
+    started = time.monotonic()
+    job = _Job(job_id)
+    try:
+        try:
+            result = _process(job, request, started)
+        except JobError as exc:
+            result = _result(False, started, code=exc.code, text=exc.text)
+        except OSError as exc:
+            code = "no_space" if exc.errno == errno.ENOSPC else "internal"
+            result = _result(False, started, code=code, text=ERROR_TEXT[code] if code == "no_space" else f"galat I/O signer: {errno.errorcode.get(exc.errno or 0, 'OSError')}")
+        except Exception as exc:  # noqa: BLE001 - satu job buruk tak boleh mematikan daemon
+            say(f"[{job_id}] ERROR galat internal: {type(exc).__name__}")
+            result = _result(False, started, code="internal", text=f"galat internal signer: {type(exc).__name__}")
+        cleanup_job_files(job.bfd, job.home)
+        finish_with_retry(job_id, result, job.bfd, job.home)
+        say(f"[{job_id}] aid={job.aid} bid={job.bid} {'ok' if result['ok'] else result['error_code']} ukuran={result['output_size']} {result['elapsed']}s"
+            + ("" if result["ok"] or not job.last_cmd else f" langkah={job.last_cmd}"))
+        return result
+    finally:
+        cleanup_job_files(job.bfd, job.home)
+        if job.bfd is not None:
+            try:
+                os.close(job.bfd)
+            except OSError:
+                pass
+
+
+# ------------------------------------------------------------------ siklus daemon
+
+
+def abort_orphans() -> None:
+    """Job yang tercatat 'running' tetapi prosesnya hilang dijawab 'aborted'; signed.apk + .sign-* + *.idsig di folder build-nya dihapus."""
+    for job_id in SPOOL.running_job_ids():
+        m = JOB_ID_RE.match(job_id)
+        if m is not None:
+            try:
+                bfd = open_build_dir(int(m.group(1)), int(m.group(2)))
+            except (JobError, ValueError, OSError):
+                bfd = None
+            if bfd is not None:
+                try:
+                    sweep_leftovers(bfd)
+                except OSError as exc:
+                    _io_failed("abort_orphans", exc)
+                os.close(bfd)
+        say(f"[{job_id}] yatim dari proses sebelumnya -> aborted")
+        try:
+            SPOOL.finish(job_id, _result(False, time.monotonic(), code="aborted", text="signer dimulai ulang saat job berjalan"))
+        except OSError as exc:
+            _io_failed("abort_orphans", exc)
+
+
+def housekeeping() -> None:
+    """Buang hasil/flag batal yang tak pernah dikonsumsi (> 1 jam). OSError ditelan dengan WARN sekali."""
+    cutoff = time.time() - STALE_FILE_SECONDS
+    try:
+        for directory in (SPOOL.results, SPOOL.cancel):
+            with os.scandir(directory) as it:
+                for entry in it:
+                    try:
+                        if entry.stat(follow_symlinks=False).st_mtime < cutoff:
+                            os.unlink(entry.path)
+                    except OSError:
+                        pass
+    except OSError as exc:
+        _io_failed("housekeeping", exc)
+    else:
+        _io_ok("housekeeping")
+
+
+def health() -> int:
+    """0 bila signer.hb <= 20 dtk DAN keystore.state == ok; selain itu 1 dengan SATU baris alasan di stdout."""
+    status = signer_status(SPOOL)
+    age = status["umur"]
+    if age is None or age > HEALTH_MAX_AGE:
+        print("signer.hb tidak ada atau usang" + (f" (umur {age:.0f} dtk)" if age is not None else ""))
+        return 1
+    ks = status["keystore"]
+    if ks["state"] != "ok":
+        print(f"keystore {ks['state'] or 'tidak diketahui'}: {ks['detail']}".strip())
+        return 1
+    return 0
+
+
+def _log_key_change(info: KeyInfo, previous: KeyInfo | None) -> None:
+    if previous is None or (previous.state, previous.cert_sha256) != (info.state, info.cert_sha256):
+        say(("INFO keystore ok (sidik jari " + (info.cert_sha256 or "")[:12] + "…)") if info.state == "ok"
+            else f"WARN keystore {info.state}: {scrub(info.detail)}")
+
+
+def main() -> int:
+    if "--health" in sys.argv:
+        return health()
+
+    os.umask(0o022)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: STOP.set())
+
+    TOOL_HOME_ROOT.mkdir(parents=True, exist_ok=True)
+    key_home = TOOL_HOME_ROOT / "_key"
+    key_home.mkdir(parents=True, exist_ok=True)
+    os.chmod(key_home, 0o700)
+    SPOOL.ensure_dirs()
+    abort_orphans()
+    housekeeping()
+    info = key_status()
+    _log_key_change(info, None)
+    HB.update(state="idle", job=None)
+    write_hb("idle")
+    say(f"signer siap (uid={os.getuid()}, batas {SIGN_MAX_MB} MiB, tenggat {SIGN_TIMEOUT}s)")
+
+    last_key = last_house = time.monotonic()
+    while not STOP.is_set():
+        try:
+            claimed = SPOOL.claim_next()
+        except OSError as exc:
+            _io_failed("claim_next", exc)
+            claimed = None
+        if claimed:
+            job_id, request = claimed
+            HB.update(state="busy", job=job_id)
+            write_hb("busy", job_id)
+            run_job(job_id, request)
+            HB.update(state="idle", job=None)
+            write_hb("idle")
+            last_key = time.monotonic()
+            continue
+
+        now = time.monotonic()
+        if now - last_key >= KEY_RECHECK:
+            previous, info = info, key_status()
+            _log_key_change(info, previous)
+            last_key = time.monotonic()
+        on_tick()
+        if now - last_house >= HOUSEKEEP_EVERY:
+            housekeeping()
+            last_house = now
+        STOP.wait(TICK)
+    say("berhenti")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

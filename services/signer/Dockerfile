@@ -1,5 +1,7 @@
-# Image signer: HANYA toolchain tanda tangan APK (zipalign + apksigner dari Android SDK Build-Tools) — PRD 09 Bagian B, paket B-1b.
-# BELUM ada daemon, keystore, volume, maupun rahasia di sini; keystore menunggu keputusan pemilik. Dijalankan TANPA JARINGAN (network_mode: none), non-root, rootfs read-only.
+# Image signer: toolchain tanda tangan APK (zipalign + apksigner dari Android SDK Build-Tools) + `signer-daemon` — PRD 09 Bagian B, paket B-1b/2a.
+# Daemon mengambil job dari volume `signspool` dan menulis `signed.apk` di volume `builds` (titik mount /data/builds dan /data/signspool dibuat di bawah; tanpa instruksi volume di image).
+# Kunci TIDAK ada di image ini dan TIDAK ada ENV rahasia: keystore dipasang hanya lewat docker-compose.keystore.yml (secret di /run/secrets). Pin Build-Tools tidak berubah.
+# Dijalankan TANPA JARINGAN (network_mode: none), non-root, rootfs read-only.
 # Konteks build = ./services (agar paket bersama `rvcore` ikut tersalin); lihat docker-compose.yml (profil `build`).
 FROM python:3.12-slim-trixie
 
@@ -17,7 +19,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # Hanya 3 berkas yang disalin dari zip (zipalign, apksigner.jar, lib64/libc++.so; ≈ 3 MB dari zip 66 MB); zip dibuang di layer yang sama.
 # zipalign memuat libc++.so lewat RUNPATH ($ORIGIN/lib64), jadi keduanya harus berdampingan di /opt/build-tools. apktool TIDAK dipasang di sini
-# (aapt2 sudah dibundel di dalam jar apktool milik runner). Skrip `apksigner` bawaan SDK tidak dipakai; wrapper memanggil jar langsung.
+# (aapt2 sudah dibundel di dalam jar apktool milik runner). Skrip `apksigner` bawaan SDK tidak dipakai; wrapper memanggil jar langsung (dibuat di RUN terpisah di bawah).
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends openjdk-21-jre-headless ca-certificates curl unzip; \
@@ -29,24 +31,29 @@ RUN set -eux; \
     install -m 0644 "/tmp/bt/${BUILD_TOOLS_DIR}/lib/apksigner.jar" /opt/build-tools/apksigner.jar; \
     install -m 0644 "/tmp/bt/${BUILD_TOOLS_DIR}/lib64/libc++.so" /opt/build-tools/lib64/libc++.so; \
     ln -s /opt/build-tools/zipalign /usr/local/bin/zipalign; \
-    printf '#!/bin/sh\nexec java -Xmx256m --enable-native-access=ALL-UNNAMED -Duser.home="$HOME" -Djava.io.tmpdir=/tmp -jar /opt/build-tools/apksigner.jar "$@"\n' > /usr/local/bin/apksigner; \
-    chmod 0755 /usr/local/bin/apksigner; \
     if ldd /opt/build-tools/zipalign | grep -q 'not found'; then echo "zipalign: pustaka tidak ditemukan"; ldd /opt/build-tools/zipalign; exit 1; fi; \
     apt-get purge -y --auto-remove curl unzip; \
     rm -rf /var/lib/apt/lists/* /tmp/*
 
-# uid 10001 seperti runner. Tanpa /data dan tanpa volume: pada tahap ini tidak ada yang disimpan di sini.
+# Wrapper apksigner di RUN TERPISAH (setelah RUN set -eux di atas): mengubah flag JVM tidak membatalkan cache lapisan unduhan Build-Tools (apt + 66 MB).
+# -XX:MaxDirectMemorySize=64m membatasi memori langsung NIO apksigner (APK besar) agar tetap di bawah mem_limit 512m; -Xmx256m membatasi heap.
+RUN printf '#!/bin/sh\nexec java -Xmx256m -XX:MaxDirectMemorySize=64m --enable-native-access=ALL-UNNAMED -Duser.home="$HOME" -Djava.io.tmpdir=/tmp -jar /opt/build-tools/apksigner.jar "$@"\n' > /usr/local/bin/apksigner \
+ && chmod 0755 /usr/local/bin/apksigner
+
+# uid 10001 seperti runner.
 RUN groupadd --system --gid 10001 signer \
  && useradd --uid 10001 --gid signer --no-create-home --shell /usr/sbin/nologin signer
+# Titik mount volume bernama mewarisi pemilik/izin direktori ini saat volume pertama kali dibuat (pola /data/spool): milik 10001.
+RUN mkdir -p /data/builds /data/signspool && chown -R 10001:10001 /data
 
 WORKDIR /app
-# `rvcore` disiapkan untuk signer-daemon berikutnya; BELUM dipakai oleh selftest.
+# `rvcore` = protokol signspool + pustaka kunci yang dipakai signer-daemon.
 COPY rvcore ./rvcore
-COPY signer/signer-selftest /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/signer-selftest
+COPY signer/signer-daemon signer/signer-selftest /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/signer-daemon /usr/local/bin/signer-selftest
 
 ENV PYTHONPATH=/app
 USER 10001:10001
 WORKDIR /tmp
 
-CMD ["signer-selftest"]
+CMD ["signer-daemon"]

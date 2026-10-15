@@ -9,7 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN groupadd --system --gid 10001 app \
  && useradd --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app \
- && mkdir -p /data/uploads /data/work /data/db /data/spool \
+ && mkdir -p /data/uploads /data/work /data/db /data/spool /data/builds /data/signspool \
  && chown -R 10001:10001 /data
 
 WORKDIR /app
@@ -19,7 +19,7 @@ RUN pip install -r requirements.txt
 
 COPY rvcore ./rvcore
 COPY worker/worker.py worker/tasks.py worker/healthcheck.py worker/pipeline.py \
-     worker/logtail.py worker/manifest.py worker/findings_import.py ./
+     worker/logtail.py worker/manifest.py worker/findings_import.py worker/signcheck.py ./
 
 USER 10001:10001
 

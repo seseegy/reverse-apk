@@ -50,12 +50,15 @@ make password    # atur password admin (min 12 karakter; disimpan sebagai hash a
 ```
 Periksa `.env` (opsional): `APP_DOMAIN` sudah `apk.revers3.my.id`, `ADMIN_USERNAME` default `admin`.
 
+**Penting: jalankan `make init` dan `make up` sebagai dua perintah** (bukan `make init up`): Makefile memeriksa ada-tidaknya keystore saat Makefile DIBACA (sebelum perintah apa pun dijalankan), jadi `make up` hanya memasang keystore ke `signer` bila keystore sudah ada SEBELUM `make up` dimulai. Satu perintah gabungan membuat `up` berjalan tanpa melihat keystore yang baru dibuat `init`.
+
 ## 5. Jalankan
 ```bash
 make up          # build image dan jalankan semua layanan
 make doctor      # periksa konfigurasi, status kontainer, dan https://<domain>/healthz
 ```
 Saat pertama kali, Caddy meminta sertifikat dari Let's Encrypt (butuh DNS benar dan port 80 terbuka).
+**Catatan Tahap 2a:** `make up` membangun ulang image `web`, `worker`, `runner`, dan `bench` karena paket bersama `rvcore` berubah (tambahan `signkeys.py`/`signspool.py`, `Layout.signspool`); perilaku keempat layanan itu tidak berubah. Bila keystore ada, `signer` ikut naik (lihat "Signer-daemon & akses kunci (Tahap 2a)").
 Biasanya selesai dalam beberapa detik. Lalu buka **https://apk.revers3.my.id**.
 
 ## 6. Verifikasi
@@ -102,8 +105,8 @@ dijalankan aplikasi. Butuh analisis statis selesai (agar pencarian tersedia). Ek
 Kunci hanya dibaca service `web`; tidak pernah dikirim ke browser, worker, atau runner, dan tidak dicatat di log.
 
 ## Alat build & tanda tangan APK (B-1b)
-Paket ini menyediakan alat di server dan keystore (lihat "Keystore penanda tangan" di bawah); **belum ada** daemon penanda tangan, tahap `build`, maupun UI, dan keystore belum dipasang ke layanan mana pun. Layanan `signer` memakai profil Compose `build`,
-jadi `make up` / `docker compose up` **tidak** menjalankannya dan RAM tidak bertambah sampai fitur build dipakai.
+Paket ini menyediakan alat di server dan keystore (lihat "Keystore penanda tangan" di bawah). **Pembaruan Tahap 2a:** `signer-daemon` kini ada dan keystore dipasang ke layanan `signer` saja (lihat "Signer-daemon & akses kunci (Tahap 2a)"); **belum ada** tahap `build`, UI, maupun tool AI. Layanan `signer` memakai profil Compose `build`: `make up` mengaktifkan profil itu (`COMPOSE_PROFILES=build`) HANYA bila `secrets/signing_keystore.p12` dan `secrets/signing_keystore_pass` sudah ada,
+jadi pada instalasi tanpa keystore `signer` tidak ikut naik dan RAM tidak bertambah; `docker compose up` yang dijalankan tanpa `make` juga tidak menjalankannya.
 
 **Memasang / memperbarui di VPS** (butuh Docker Compose v2 untuk `--profile`):
 ```bash
@@ -123,7 +126,7 @@ Kirim keluaran bila ada `[GAGAL]`.
 | Berkas Build-Tools yang disalin ke image | 2.983.423 byte (zipalign 256.480 + apksigner.jar 1.181.416 + libc++.so 1.545.448), terukur; zip unduhan ±66 MB dibuang di layer yang sama | – |
 | `openjdk-21-jre-headless` | ≈ 199 MB terpasang (amd64, menurut packages.debian.org; bukan diukur di sini) | `docker images` |
 | Image `signer` | image dasar + JRE + ±3 MB | `docker images \| grep signer` |
-| RAM | `mem_limit: 512m` **hanya saat profil `build` dipakai**. Jumlah `mem_limit` layanan lain saat ini 5.952 MB → 6.464 MB bila signer ikut berjalan | `docker stats` |
+| RAM | `mem_limit: 512m` (tidak dinaikkan di Tahap 2a). Sejak Tahap 2a `signer` ikut `make up` bila keystore ada (profil `build` diaktifkan Makefile): jumlah `mem_limit` layanan lain 5.952 MB → 6.464 MB (+512 MB) saat signer berjalan; tanpa keystore tetap 5.952 MB. Puncak pemakaian terukur di sandbox (di LUAR cgroup): lihat "Ukuran terbesar yang teruji" | `docker stats` |
 
 **`/tmp` runner SENGAJA `noexec`; aapt2 sumber ada di `/opt/apktool/aapt2`, salinan yang dijalankan ada di tmpfs khusus `/opt/aapt-exec`.** Docker memasang tmpfs `/tmp` runner dengan `noexec` (juga `nosuid`; `exec` TIDAK boleh ditambahkan: runner memproses APK tak tepercaya).
 Ada dua akar masalah berurutan untuk `apktool b`:
@@ -168,26 +171,26 @@ Build-Tools resmi Google dengan hash terkunci lebih baru dan hasilnya dapat dipe
 **Menaikkan versi:** ubah `ARG` + hash di Dockerfile terkait; untuk Build-Tools hitung SHA-256 sendiri dari unduhan, cocokkan SHA-1-nya dengan `repository2-3.xml` (abaikan paket ber-`<preview>`), lalu perbarui tabel di atas dan di README. Tes akan gagal bila lupa.
 Pemeriksaan stabil terakhir (14 Okt 2026): apktool v3.0.3 dan jadx v1.5.6 sudah rilis stabil terbaru (tidak ada selisih), Build-Tools 37.0.0 stabil terbaru.
 
-**Risiko yang diketahui:** heap `apksigner` dibatasi `-Xmx256m` di wrapper; belum diukur untuk APK ratusan MB (diukur di paket B-1c; batas kontainer 512 MB).
+**Risiko yang diketahui:** heap `apksigner` dibatasi `-Xmx256m` dan memori langsung NIO `-XX:MaxDirectMemorySize=64m` di wrapper (Tahap 2a: `-Xmx256m` saja TIDAK cukup; tanpa batas memori langsung puncak anon JVM pada 1 CPU terukur 406 MiB untuk APK 60.000 entri ≈ 1,0 GB). Kini TERUKUR di sandbox (di luar cgroup, 1 CPU): lihat "Ukuran terbesar yang teruji" di bagian Tahap 2a; di bawah cgroup 512m BELUM DIUJI (V7).
 `--enable-native-access=ALL-UNNAMED` di wrapper mencegah peringatan conscrypt pada JDK baru.
 
 **Pemecahan masalah:** `libc++.so: cannot open shared object file` → `libc++.so` harus berdampingan di `/opt/build-tools/lib64/` (RUNPATH `$ORIGIN/lib64`). Jangan percaya `ldd /usr/local/bin/zipalign`
 (symlink) yang selalu melaporkan `not found`; periksa `ldd /opt/build-tools/zipalign` atau jalankan `zipalign` langsung. `unknown flag: --profile` → Compose terlalu lama (butuh v2).
 
 ### Keystore penanda tangan (Tahap 1)
-`make init` membuat kunci penanda tangan APK sekali saja: `secrets/signing_keystore.p12` (PKCS12, RSA 3072, `SHA256withRSA`, alias `reverse-apk`, berlaku 30 tahun) dan `secrets/signing_keystore_pass` (kata sandi acak 64 heks). `keytool` dijalankan di dalam image `signer` (server **tidak** perlu JDK), tanpa jaringan, rootfs read-only, tanpa capability, sebagai user host. Kata sandi tidak pernah menjadi argumen proses/variabel lingkungan. Skrip **tidak pernah menimpa**: jika kedua berkas sudah ada ia hanya berkata "sudah ada"; jika hanya satu yang ada ia berhenti (kode 2) tanpa mengubah apa pun. Keystore ini belum dipakai layanan mana pun (tidak ada di `docker-compose.yml`).
+`make init` membuat kunci penanda tangan APK sekali saja: `secrets/signing_keystore.p12` (PKCS12, RSA 3072, `SHA256withRSA`, alias `reverse-apk`, berlaku 30 tahun) dan `secrets/signing_keystore_pass` (kata sandi acak 64 heks). `keytool` dijalankan di dalam image `signer` (server **tidak** perlu JDK), tanpa jaringan, rootfs read-only, tanpa capability, sebagai user host. Kata sandi tidak pernah menjadi argumen proses/variabel lingkungan. Skrip **tidak pernah menimpa**: jika kedua berkas sudah ada ia hanya berkata "sudah ada"; jika hanya satu yang ada ia berhenti (kode 2) tanpa mengubah apa pun. **Koreksi Tahap 2a:** keystore kini dipasang ke layanan `signer` (HANYA signer) lewat berkas tambahan `docker-compose.keystore.yml`, tetap tidak ada di `docker-compose.yml` dasar; mode berkas berubah dari 600 menjadi 644 di folder `secrets/` 700 — keputusan sadar, lihat "Signer-daemon & akses kunci (Tahap 2a)".
 
 **Langkah di VPS** (pembaruan dari kode yang sudah berjalan):
 ```bash
 git pull --ff-only
 make init                 # idempoten; membangun image signer bila belum ada (butuh jaringan sekali), lalu membuat keystore bila belum ada
 make keystore-info        # alias, algoritma, masa berlaku, SHA-256 (tanpa kata sandi)
-ls -la secrets/           # harus ada signing_keystore.p12 dan signing_keystore_pass, keduanya -rw------- milik user deploy
+ls -la secrets/           # harus ada signing_keystore.p12 dan signing_keystore_pass, keduanya -rw-r--r-- (644) milik user deploy; folder secrets/ drwx------ (700)
 ```
-Hasil yang diharapkan: `✓ keystore dibuat` (pertama kali) dengan `3072-bit RSA key`, `SHA256withRSA`, `Berlaku ... until ... 2056`; `make init` kedua kali: `✓ keystore sudah ada ... tidak diubah` dan sidik jari SHA-256 yang SAMA di `make keystore-info`. `make doctor` menampilkan `✓ keystore penanda tangan ada (mode 600/600)`.
+Hasil yang diharapkan: `✓ keystore dibuat` (pertama kali) dengan `3072-bit RSA key`, `SHA256withRSA`, `Berlaku ... until ... 2056`; `make init` kedua kali: `✓ keystore sudah ada ... tidak diubah` dan sidik jari SHA-256 yang SAMA di `make keystore-info`. `make doctor` menampilkan `✓ keystore penanda tangan ada (mode 644/644, folder 700); pastikan sudah dicadangkan` (Tahap 1 menampilkan `mode 600/600`; berkas lama mode 600 diperbaiki otomatis oleh `make up`/`make restart`/`make keystore-access`, isinya tidak berubah).
 
 **CADANGKAN SEKARANG** (di luar server, mis. pengelola kata sandi atau penyimpanan terenkripsi): `secrets/signing_keystore.p12` **dan** `secrets/signing_keystore_pass`. Keduanya dibutuhkan bersama; simpan juga sidik jari SHA-256 dari `make keystore-info` untuk memeriksa pemulihan.
-**Apa artinya kehilangan kunci:** tidak ada cara memulihkan. Anda harus membuat kunci BARU (pindahkan berkas yang tersisa ke tempat lain secara manual, lalu `make keystore`). APK yang sudah terpasang di perangkat dengan kunci lama TIDAK bisa diperbarui oleh APK bertanda tangan kunci baru (Android menolak pembaruan dengan tanda tangan berbeda): aplikasi harus dicopot dulu dan data aplikasinya hilang; tanda tangan semua build lama juga tidak lagi cocok dengan yang baru. Sebaliknya, siapa pun yang memegang kedua berkas ini bisa menandatangani APK atas nama kunci ini: jaga mode `600` dan jangan masukkan ke repo/chat/tiket. Kunci ini untuk riset pribadi, bukan kunci rilis.
+**Apa artinya kehilangan kunci:** tidak ada cara memulihkan. Anda harus membuat kunci BARU (pindahkan berkas yang tersisa ke tempat lain secara manual, lalu `make keystore`). APK yang sudah terpasang di perangkat dengan kunci lama TIDAK bisa diperbarui oleh APK bertanda tangan kunci baru (Android menolak pembaruan dengan tanda tangan berbeda): aplikasi harus dicopot dulu dan data aplikasinya hilang; tanda tangan semua build lama juga tidak lagi cocok dengan yang baru. Sebaliknya, siapa pun yang memegang kedua berkas ini bisa menandatangani APK atas nama kunci ini: jaga folder `secrets/` tetap mode `700` (berkas 644 hanya aman di dalamnya; lihat Tahap 2a) dan jangan masukkan ke repo/chat/tiket. Kunci ini untuk riset pribadi, bukan kunci rilis.
 
 **Kemungkinan kegagalan** (pesan dari `scripts/keystore.sh`; tidak ada berkas yang dibuat bila gagal):
 | Gejala | Penyebab / tindakan |
@@ -201,6 +204,62 @@ Hasil yang diharapkan: `✓ keystore dibuat` (pertama kali) dengan `3072-bit RSA
 | `ada sisa direktori kerja keystore` (dari `make doctor`) | proses terputus keras; aman dihapus `secrets/.keystore-work.*` bila tidak ada `make keystore` yang sedang berjalan |
 
 **Jumlah build yang disimpan:** `BUILD_KEEP` di `.env` (bawaan 10 per analisis; opsional, lihat `.env.example`). Belum berefek sampai tahap build ada.
+
+### Signer-daemon & akses kunci (Tahap 2a)
+Tahap 2a menambah **`signer-daemon`** (`services/signer/signer-daemon`): proses di kontainer `signer` yang menerima permintaan lewat antrean berkas `signspool` (volume `signspool`, protokol `rvcore/signspool.py`) dan menandatangani `builds/<analisis>/<build>/unsigned.apk` (jalur dibentuk HANYA dari dua bilangan bulat; isi permintaan tidak pernah menjadi jalur). Alurnya: `zipalign` → `apksigner sign` dengan keystore pemilik (kata sandi lewat `--ks-pass file:`, tidak pernah argv/env/log/hasil) → `apksigner verify` → sertifikat penanda tangan HARUS sama dengan sidik jari keystore pemilik → `signed.apk` (tepat satu penanda tangan, v2 dan v3 benar). Kontainer tetap tanpa jaringan, rootfs read-only, uid 10001, `cap_drop: ALL`, `no-new-privs`, `mem_limit: 512m`, `/tmp` tmpfs `noexec`. **Belum ada** tahap `build` di runner/worker, UI, tool AI, dan persetujuan manual yang memanggil signer (Tahap 2b dan seterusnya).
+
+**Keputusan akses kunci (risiko utama #1): berkas keystore mode 644 di dalam folder `secrets/` mode 700 — sebuah KOMPROMI yang disadari.**
+Compose mengisi secret bentuk `file:` sebagai bind-mount dan **mengabaikan** `uid`/`gid`/`mode` (fakta K1 di bawah), sehingga berkas yang dibuat user host (uid 1000) dengan mode 600 TIDAK bisa dibaca `signer` yang berjalan sebagai uid 10001 (`Permission denied`; terbukti pada peniruan kontainer di sandbox, lihat `audit.md` §10.17). Pilihan **[A]**: `secrets/` tetap 700 dan `signing_keystore.p12` + `signing_keystore_pass` menjadi **644**; kerahasiaan kini bertumpu pada izin FOLDER, bukan berkas (pola yang sama dengan `admin_password_hash`, yang sudah berjalan di VPS). Yang bisa membaca kunci di host: pemilik dan root; kontainer lain tidak memasang berkas itu (hanya `signer`). Bila folder `secrets/` dibuka (`chmod 755 secrets`), kunci 644 terbaca user lain: itu dijaga `make doctor` dan `make signer-verify` (GAGAL keras, kode 11) dan diperbaiki otomatis oleh `make up`/`make restart`/`make keystore-access` (hanya `chmod`, isi berkas tidak berubah).
+Alternatif yang DITOLAK:
+| Alternatif | Mengapa ditolak |
+|---|---|
+| B. volume bernama berisi salinan kunci milik 10001 (helper berhak mengisi) | menambah kontainer root + `CAP_CHOWN`/`DAC_OVERRIDE`, dua salinan kunci yang bisa menyimpang dan tidak ikut cadangan pemilik, harus diulang tiap kunci diganti |
+| C1. secret dari `environment`/`content` (uid/gid/mode berfungsi) | MUSTAHIL: Compose menolak secret jenis itu untuk service `read_only: true`; selain itu kunci masuk `.env`/environment |
+| C2. ACL `setfacl -m u:10001:r` pada berkas 600 | paling sempit, tetapi butuh paket `acl` + filesystem yang mendukung, hilang pada `cp`/cadangan yang membuang xattr, dan tidak bisa dibuktikan di sandbox. **Tidak jadi jalur utama; tetap boleh sebagai opsi manual pemilik** (kode tidak bergantung padanya) |
+| C3. `signer` dijalankan sebagai uid host | volume `builds`/`signspool` dimiliki 10001: signer tak bisa menulis, dan `signed.apk` milik uid lain tak bisa dihapus (pelajaran izin volume yang sama dengan runner) |
+| C4. `sudo chown 10001` pada berkas | `deploy` tak bisa lagi `keystore-info`/mencadangkan tanpa sudo; sudo tidak pasti ada |
+| C5. entrypoint root yang menyalin ke tmpfs lalu menurunkan hak | butuh `SETUID/SETGID/CHOWN` dan tanpa `no-new-privileges`: membatalkan hardening signer |
+
+**Perintah dan alur:**
+| Perintah | Fungsi |
+|---|---|
+| `make keystore-access` | memastikan `secrets/` 700 dan kedua berkas keystore 644 (verbose: tabel sebelum→sesudah + penjelasan kompromi); hanya `chmod`, hanya berkas biasa milik sendiri |
+| `make signer-verify` | bukti end-to-end 20 langkah (tabel `LANGKAH \| STATUS \| KETERANGAN`, kode keluar 0/1/64): APK uji ditandatangani lewat spool, verifikasi independen di kontainer, kasus negatif, kebocoran sandi, memori. `BIG_MB=1000 make signer-verify` menambah APK besar (langkah 17); tempel tabelnya ke chat bila ada GAGAL |
+| `make up` / `make restart` | memanggil `scripts/keystore.sh access --auto` (satu baris bila ada yang diperbaiki; tidak pernah menggagalkan `up`) dan memuat berkas tambahan hanya bila keystore ada |
+Berkas tambahan `docker-compose.keystore.yml` HANYA menambah secret dan label stempel ke `signer` (tes menjaga: tidak ada kunci lain, tidak ada `volumes`/`tmpfs`/`read_only`/`cap_add`/`user`/`network_mode`). Makefile memuatnya lewat `COMPOSE_FILE=docker-compose.yml:docker-compose.keystore.yml` dan `COMPOSE_PROFILES=build` HANYA bila kedua berkas keystore ada. **Memakai `docker compose` langsung (tanpa `make`)** perlu mengekspor keduanya secara manual, dan hanya bila keystore ada: `export COMPOSE_FILE=docker-compose.yml:docker-compose.keystore.yml COMPOSE_PROFILES=build`. Tanpa itu `signer` berjalan TANPA kunci (`/run/secrets` kosong): daemon tetap hidup tetapi **UNHEALTHY dengan alasan** (`docker inspect --format '{{json .State.Health.Log}}' $(docker compose ps -q signer)`) dan menjawab permintaan dengan `keystore_missing`. Berkas tambahan tidak pernah dimuat tanpa keystore karena Compose gagal membuat kontainer yang merujuk berkas secret yang tidak ada.
+**Keadaan kunci basi (`stale`).** Bind-mount berkas mengunci INODE-nya: bila `secrets/signing_keystore.p12` atau `..._pass` DIGANTI (`mv`, `cp --remove-destination`, `rsync`, pemulihan dari cadangan), kontainer lama tetap memegang berkas lama. Dua lapis menanganinya: label `reverse-apk.keystore-stamp` (inode-ukuran-mtime) berubah sehingga `up -d` membuat ulang `signer`, dan daemon mendeteksi `st_nlink == 0` lalu melaporkan `keystore_stale` (UNHEALTHY). **Setelah mengganti atau memulihkan berkas kunci, SELALU jalankan `make restart`.** (`chmod` di tempat tidak membuat kunci basi: daemon memeriksa ulang tiap ≤ 10 dtk dan pulih sendiri.) Pembuatan ulang kontainer lewat label belum terbukti di Compose VPS (V11); cadangannya `docker compose up -d --force-recreate signer`.
+**Disk.** Penandatanganan membutuhkan ruang di volume `builds`: ≈ 2× ukuran APK + 16 MiB + cadangan 1 GiB bebas (3,2 GiB untuk batas 1100 MiB; 3,0 GiB untuk APK 1 GiB; `BIG_MB=1000 make signer-verify` butuh bebas ≥ 3040 MiB, kurang → langkah 17 DILEWATI dengan angka). Sisa berkas job lama dibersihkan SEBELUM pemeriksaan ruang, jadi sisa itu tidak menimbulkan `no_space` palsu. Batas ukuran masukan: `SIGN_MAX_MB` (bawaan 1100) dan tenggat `SIGN_TIMEOUT` (bawaan 900 dtk), keduanya opsional di `.env` (lihat `.env.example`).
+
+**Fakta Compose yang diperiksa (rentang v2.20.0 … v5.6.0; dibaca dari kode sumber, bukan dari `docker compose` di sandbox):**
+- **K1.** Secret bentuk `file:` = bind-mount; `uid`/`gid`/`mode` pada sintaks panjang **diabaikan**. Peringatan `secrets uid, gid and mode are not supported` ada di sebagian versi (v2.23.0 … v5.0.0 yang diperiksa) dan tidak ada di v2.20.0 maupun v5.6.0; perilakunya (diabaikan) sama di semuanya. Karena itu berkas tambahan memakai sintaks pendek.
+- **K3.** Mode/pemilik di dalam kontainer = mode/pemilik berkas host apa adanya (logika bind-mount + peniruan di sandbox; untuk p12 di Docker nyata BELUM TERBUKTI — V8).
+- **K6.** `up`/`run` layanan yang merujuk berkas secret yang hilang gagal membuat kontainer itu (tanpa membuat direktori pengganti); belum terbukti apakah seluruh `up` ikut gagal (V2). Itu sebabnya berkas tambahan tidak pernah dimuat tanpa keystore.
+
+**Risiko yang diketahui (WAJIB dibaca sebelum Tahap 2b):**
+- **R3 — uid yang sama (10001) untuk semua penulis volume `builds`.** Pada 2a hanya worker dan signer yang menulis, jadi tidak ada eskalasi. Dua jenis perlombaan ada bila penulis lain diberi akses: (1) symlink diselipkan sebelum alat membuka jalur; (2) `.sign-signed.tmp` ditukar antara `verify` dan penerbitan sehingga berkas yang tidak terverifikasi terbit sebagai `signed.apk` dengan `ok:true`. **WAJIB ditutup sebelum runner diberi akses tulis ke `builds` di 2b** (kandidat: verifikasi lewat `/proc/self/fd/N` + `os.link` pada inode yang sama, atau subdirektori keluaran yang hanya dapat ditulis signer).
+- **R10 — signer adalah *oracle penandatanganan*** bagi siapa pun yang dapat menulis `builds/` dan `signspool/`: mereka dapat membuat signer menandatangani APK APA PUN dengan kunci pemilik. Itu inheren pada fungsi signer; pembatasan siapa yang boleh meminta ada di lapis worker/web (2b). `signed.apk` bukan bukti bahwa isinya berasal dari tahap `build`.
+- Kerahasiaan kunci kini bertumpu pada folder `secrets/` 700 (di atas); `apksigner`/`zipalign` memproses APK tak tepercaya di kontainer yang memegang kunci uji (bukan kunci rilis), terkurung seperti runner.
+
+**Ukuran terbesar yang teruji: 1.055.300.391 B** (`unsigned.apk` 60.000 entri + `META-INF`; hasil `signed.apk` 1.060.235.748 B), melalui daemon nyata di sandbox, 1 CPU (`taskset -c 0` + `-XX:ActiveProcessorCount=1`), **di luar cgroup**. Puncak `RssAnon` terukur (pemotret `/proc` 20 ms): `apksigner sign` 291,4–294,6 MiB (60.000 entri; 184,8 MiB untuk satu entri 1.048.580.116 B), `apksigner verify` 99,2–103,4 MiB, `zipalign` 24,9 MiB, daemon Python 11,8 MiB; 14 thread JVM; `sign` 16–23 dtk. **Di bawah cgroup `mem_limit: 512m` BELUM DIUJI** (sandbox tidak punya controller memory): angka itu bukan bukti bahwa `signer` muat di 512 MiB; keputusannya ada pada V7.
+
+**BELUM DIUJI (butuh Docker di VPS) — jalankan berurutan; salin keluarannya bila ada yang tidak sesuai.** Urutan: `git pull --ff-only` → `docker compose version` → `docker compose config -q` → `docker compose --profile build build signer worker` → `make up` → `make signer-selftest` → `make signer-verify`.
+| # | Perintah di VPS | Hasil diharapkan | Gejala → diagnosis |
+|---|---|---|---|
+| V0 | `git pull --ff-only` | cabang fast-forward | "Not possible to fast-forward" → ada perubahan lokal; `git status` |
+| V1 | `docker compose version` | v2.x atau v5.x | tidak ada subperintah `compose` → pasang Compose v2 (`--profile` dan `COMPOSE_FILE` multi-berkas butuh v2) |
+| V2 | `docker compose config -q` lalu `COMPOSE_FILE=docker-compose.yml:docker-compose.keystore.yml docker compose config -q`. Opsional (K5/K6): pindahkan SATU berkas keystore sementara, jalankan `COMPOSE_FILE=… docker compose --profile build run --rm --no-deps signer true`, kembalikan berkasnya, dan pastikan `ls -ld secrets/signing_keystore.p12` tidak berubah menjadi direktori | keduanya tanpa galat; `config` tidak mengeluh berkas hilang; `run` gagal dengan "bind source path does not exist" | galat YAML → baris yang disebut; bila Compose MEMBUAT direktori → `rmdir secrets/signing_keystore.p12` dan laporkan versi Compose (Makefile tidak pernah memuat berkas tambahan tanpa keystore) |
+| V3 | `docker compose --profile build build signer worker` | build sukses; SHA-256 Build-Tools cocok; `ldd` OK; wrapper baru | `sha256sum` gagal → pin; `Unable to locate package` → jaringan; `COPY failed` → daftar COPY signer/worker |
+| V4 | `make up` | stack naik; `signer` **healthy** ≤ 30 dtk (bila keystore ada) | `signer` UNHEALTHY → `docker inspect --format '{{json .State.Health.Log}}' $(docker compose ps -q signer)` memuat alasannya; izin volume `builds`/`signspool`: `docker run --rm -v reverse-apk_builds:/v alpine ls -ln /v` (harus milik 10001) |
+| V5 | `make signer-selftest` | semua `[OK ]`; bagian kunci `[OK ]`; ringkasan 0 GAGAL | "terbaca uid 10001" GAGAL → `make keystore-access`; "`/data` hanya builds & signspool" GAGAL → volume salah pasang; wrapper `MaxDirectMemorySize` GAGAL → image lama (build ulang) |
+| V6 | `make signer-verify` | tabel semua `OK`, kode keluar 0 | per baris tabel; langkah 12 sertifikat beda → keystore lain terpasang (periksa `COMPOSE_FILE`); langkah 15 gagal → `O_NOFOLLOW` tak berlaku; langkah 18 gagal → **sandi bocor** (hentikan, ganti kunci: `make keystore` baru) |
+| V7 | `BIG_MB=1000 make signer-verify` (bebas ≥ 3040 MiB di volume `builds`) | langkah 17a (1 entri), 17b (60.000 entri), dan 17c (60.000 entri + `META-INF`, v1 aktif) OK; langkah 19: `oom_kill=0` dan puncak `anon` < 400 MiB pada ketiganya | `oom_kill>0`/`signer` restart/"alat dimatikan (kemungkinan kehabisan memori 512m)" → turunkan `-Xmx`/`MaxDirectMemorySize` atau naikkan `mem_limit` (keputusan pemilik); lulus 17a tetapi gagal 17b/17c ⇒ `MaxDirectMemorySize` kurang atau hilang dari wrapper (`docker compose exec -T signer cat /usr/local/bin/apksigner`); `no_space` → `docker system df` |
+| V8 | `docker compose exec -T signer sh -c 'ls -ln /run/secrets; id'` | dua berkas; `uid=10001` | berkas tak ada → `COMPOSE_FILE` tak memuat berkas tambahan (jalankan lewat `make`); mode 600 → V5 |
+| V9 | `docker stats --no-stream` (saat/sesudah job) | signer PIDS < 128, MEM < 512 MiB | PIDS mendekati 128 → naikkan `pids_limit` (JVM) |
+| V10 | `docker compose --profile build down && make up` | stack naik lagi | – |
+| V11 | ganti inode berkas kunci pada SALINAN uji (`cp secrets/signing_keystore_pass secrets/pw.new && mv secrets/pw.new secrets/signing_keystore_pass`), lalu `docker compose exec -T signer stat -c '%h %i' /run/secrets/signing_keystore_pass`; langkah 5 `signer-verify`/`docker inspect` health; `make restart`; label `reverse-apk.keystore-stamp` berubah | `0 <inode lama>`; `keystore_stale`/UNHEALTHY; `signer` dibuat ulang dan sehat; label berubah | `1 <inode>` → deteksi `stale` tidak berfungsi: andalkan label + "selalu `make restart`"; tidak dibuat ulang → `docker compose up -d --force-recreate signer` |
+| V12 | Ctrl+C saat `make signer-verify` langkah 10–16, lalu hitung proses `signer-selftest --watch` di kontainer | `0` dalam ≤ 10 dtk | `1` sesudah > 10 dtk → `docker compose exec -T` tak meneruskan EOF stdin; pemotret berhenti paling lambat pada 600 dtk; hapus: `docker compose exec -T signer touch /tmp/selftest-watch.stop` |
+Tambahan yang juga BELUM DIUJI: pewarisan izin volume bernama baru `builds`/`signspool`; SELinux/ACL/userns-remap/rootless terhadap bind-mount berkas 644 (diagnosis: `ls -lnZ secrets/`, `docker info | grep -i userns`, `getfacl secrets/signing_keystore.p12`); argv alat di kontainer nyata (langkah 18: `argv_apksigner ≥ 1`, bila 0 hasilnya DILEWATI bukan bukti); `pids_limit: 128`/`cpus: 1` pada JVM nyata; `restart: unless-stopped` bersama `run --rm`. `docker compose config` tidak bisa dijalankan di sandbox pengembangan (Docker rusak), jadi semua yang menyangkut Compose nyata ada di daftar ini.
+
 
 ## Upload besar dan Cloudflare
 Batas ukuran APK diatur `MAX_UPLOAD_MB` di `.env` (bawaan 200). Nilai yang sama dipakai aplikasi dan Caddy.
@@ -263,7 +322,7 @@ job tidak diambil dalam 2 menit, analisis gagal dengan kode `runner_unavailable`
 
 ## Catatan keamanan
 - `.env` dan `secrets/` tidak boleh di-commit (sudah ada di `.gitignore`). Izin: `.env` 600, `secrets/` 700.
-- `secrets/signing_keystore.p12` dan `secrets/signing_keystore_pass` (mode 600) adalah kunci penanda tangan APK: **cadangkan di luar server** dan jangan dibagikan. Kehilangan = kunci baru (lihat "Keystore penanda tangan").
+- `secrets/signing_keystore.p12` dan `secrets/signing_keystore_pass` (mode 644 DI DALAM folder `secrets/` mode 700 sejak Tahap 2a; sebelumnya 600) adalah kunci penanda tangan APK: **cadangkan di luar server** dan jangan dibagikan. Kehilangan = kunci baru (lihat "Keystore penanda tangan"). Kerahasiaannya kini bertumpu pada folder 700: jangan `chmod 755 secrets` (lihat "Signer-daemon & akses kunci (Tahap 2a)").
 - Aplikasi terbuka ke internet pada satu alamat; yang tampil ke publik hanya halaman login. Setelah HTTPS jalan,
   pertimbangkan Cloudflare Access di depannya (lihat PRD 07).
 - Batasan memori/proses di `docker-compose.yml` (`mem_limit`, `pids_limit`) berlaku di VPS Linux biasa.

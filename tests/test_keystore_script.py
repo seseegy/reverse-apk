@@ -181,7 +181,7 @@ def repo(tmp_path):
 
 def run_ks(repo: Path, *args: str, secrets: Path | None = None, **env_extra: str) -> subprocess.CompletedProcess:
     # Lingkungan nyata (shim JDK seperti mise butuh HOME/XDG asli) tanpa variabel milik skrip yang bisa bocor dari mesin pengembang.
-    env = {k: v for k, v in os.environ.items() if k not in ("KEYTOOL_CMD", "SECRETS_DIR", "DOCKER_CMD", "COMPOSE", "SIGNER_IMAGE")}
+    env = {k: v for k, v in os.environ.items() if k not in ("KEYTOOL_CMD", "SECRETS_DIR", "DOCKER_CMD", "COMPOSE", "SIGNER_IMAGE", "KS_CONTAINER_UID")}
     env.update({"LC_ALL": "C.UTF-8", "SECRETS_DIR": str(secrets or repo.parent / "secrets")})
     env.update(env_extra)
     return subprocess.run(["bash", str(repo / "scripts/keystore.sh"), *args], capture_output=True, text=True, env=env, timeout=120, cwd=repo.parent)
@@ -209,7 +209,8 @@ def made(repo, tmp_path):
 def test_create_makes_both_files_with_strict_modes(made):
     repo, secrets, r, _ = made
     assert (secrets / KS).is_file() and (secrets / PW).is_file()
-    assert mode_of(secrets / KS) == 0o600 and mode_of(secrets / PW) == 0o600  # keytool palsu menulis 644: chmod harus memperbaikinya
+    # Keputusan SADAR (menggantikan 600 Tahap 1): kontainer signer (uid 10001) bukan pemilik berkas, jadi berkas 644 di dalam folder 700.
+    assert mode_of(secrets / KS) == 0o644 and mode_of(secrets / PW) == 0o644
     assert mode_of(secrets) == 0o700
     assert sorted(p.name for p in secrets.iterdir()) == sorted([KS, PW])
     assert not list(secrets.glob(".keystore-work.*"))
@@ -439,7 +440,7 @@ def test_docker_mode_run_arguments_are_confined(repo, tmp_path):
         assert dst == "/out" and Path(src).parent == secrets.resolve() and Path(src).name.startswith(".keystore-work.")
         assert Path(src) != secrets.resolve()
         assert (secrets / PW).read_text() not in flat
-    assert (secrets / KS).is_file() and mode_of(secrets / KS) == 0o600
+    assert (secrets / KS).is_file() and mode_of(secrets / KS) == 0o644
 
 
 def test_docker_mode_does_not_see_other_secrets(repo, tmp_path):
@@ -487,7 +488,7 @@ def test_info_prints_fingerprint_dn_validity_algorithm(made, tmp_path):
     r = run_ks(repo, "info", KEYTOOL_CMD=str(kt))
     assert r.returncode == 0, r.stderr
     out = r.stdout
-    for must in ("reverse-apk", "3072-bit RSA", "SHA256withRSA", "PKCS12", "2056", "(mode 600)"):
+    for must in ("reverse-apk", "3072-bit RSA", "SHA256withRSA", "PKCS12", "2056", "(mode 644)"):
         assert must in out, must
     colon = re.search(r"SHA-256 \(keytool\)\s*:\s*((?:[0-9A-F]{2}:){31}[0-9A-F]{2})", out)
     plain = re.search(r"SHA-256 \(heks kecil\):\s*([0-9a-f]{64})", out)
@@ -495,12 +496,20 @@ def test_info_prints_fingerprint_dn_validity_algorithm(made, tmp_path):
     assert "⚠" not in out
 
 
-def test_info_warns_on_loose_mode(made, tmp_path):
+def test_info_warns_by_the_access_rule_not_by_the_old_chmod_600_rule(made, tmp_path):
+    """Aturan akses kunci (644 di folder 700): peringatan HANYA bila folder terbuka atau uid kontainer tak bisa membaca; 'chmod 600' lama sudah tidak ada."""
     repo, secrets, _, _ = made
-    (secrets / KS).chmod(0o644)
     kt, _ = fake_keytool(tmp_path)
+    ok = run_ks(repo, "info", KEYTOOL_CMD=str(kt))
+    assert ok.returncode == 0 and "⚠" not in ok.stderr and "chmod 600" not in ok.stderr  # 644/700 = keadaan benar
+    (secrets / KS).chmod(0o600)
+    r = run_ks(repo, "info", KEYTOOL_CMD=str(kt), KS_CONTAINER_UID=str(os.getuid() + 1))
+    assert r.returncode == 0 and "⚠" in r.stderr and "make keystore-access" in r.stderr and "chmod 600" not in r.stderr
+    (secrets / KS).chmod(0o644)
+    secrets.chmod(0o755)
     r = run_ks(repo, "info", KEYTOOL_CMD=str(kt))
-    assert r.returncode == 0 and "⚠" in r.stderr and "chmod 600" in r.stderr
+    secrets.chmod(0o700)
+    assert r.returncode == 0 and "⚠" in r.stderr and "chmod 700 secrets" in r.stderr
 
 
 def test_info_without_keystore_and_with_single_file(repo, tmp_path):
@@ -521,10 +530,16 @@ def test_status_states(repo, tmp_path):
     kt, _ = fake_keytool(tmp_path)
     assert run_ks(repo, "create", KEYTOOL_CMD=str(kt)).returncode == 0
     r = run_ks(repo, "status")
-    assert r.returncode == 0 and r.stdout.startswith("✓") and "600/600" in r.stdout
+    assert r.returncode == 0 and r.stdout.startswith("✓") and "mode 644/644, folder 700" in r.stdout
+    uid_other = str(os.getuid() + 1)  # uid 'kontainer' yang BUKAN pemilik: berkas 600 tak terbaca
+    (secrets / PW).chmod(0o600)
+    r = run_ks(repo, "status", KS_CONTAINER_UID=uid_other)
+    assert r.returncode == 0 and "signing_keystore_pass" in r.stderr and "mode 600" in r.stderr and "make keystore-access" in r.stderr and r.stdout == ""
     (secrets / PW).chmod(0o644)
+    secrets.chmod(0o755)  # folder terbuka: peringatan keras walau kedua berkas 644
     r = run_ks(repo, "status")
-    assert r.returncode == 0 and "600/644" in r.stderr and r.stdout == ""
+    secrets.chmod(0o700)
+    assert r.returncode == 0 and "mode 755" in r.stderr and "chmod 700 secrets" in r.stderr and r.stdout == ""
     (secrets / ".keystore-work.sisa").mkdir()
     assert "sisa direktori kerja" in run_ks(repo, "status").stderr
     (secrets / KS).unlink()
@@ -597,15 +612,21 @@ def test_makefile_has_keystore_targets_and_help_lists_them():
 
 # ================================================================================ 13: compose belum merujuk keystore
 def test_compose_does_not_reference_keystore_yet():
-    """PENJAGA SADAR: pada Tahap 1 keystore BELUM dihubungkan ke layanan mana pun (menambah `secrets:`/volume ke `signer` merusak jaminan
-    'signer tanpa secrets' dan cek 'tanpa /run/secrets' di signer-selftest). Tahap 2 (signer-daemon) MENGUBAH tes ini secara sadar."""
+    """PENJAGA SADAR: `docker-compose.yml` (DASAR) TIDAK menyebut keystore sama sekali, sehingga instalasi tanpa keystore tetap bisa `up` (Compose gagal bila
+    berkas secret sumber tidak ada). Tahap 2a menghubungkan kunci ke `signer` HANYA lewat berkas tambahan docker-compose.keystore.yml (dimuat Makefile bila
+    kedua berkas ada); asersi dasar di bawah TIDAK dilonggarkan, dan berkas tambahan dijaga di bawahnya (persis dua secret, hanya untuk `signer`)."""
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     code = "\n".join(re.sub(r"\s+#.*$", "", ln) for ln in compose.splitlines() if not ln.strip().startswith("#"))
     for name, block in services(code).items():
-        assert not re.search(r"signing_|keystore", block, re.I), f"layanan {name} tidak boleh merujuk keystore pada Tahap 1"
+        assert not re.search(r"signing_|keystore", block, re.I), f"layanan {name} di berkas DASAR tidak boleh merujuk keystore"
     assert not re.search(r"signing_keystore", code), "docker-compose.yml tidak boleh menyebut berkas keystore"
     top = code.split("\nsecrets:\n", 1)[1]
     assert re.findall(r"(?m)^  (\w+):", top) == ["admin_password_hash"]
+    # Berkas tambahan: persis dua secret, hanya untuk layanan `signer`.
+    extra = (ROOT / "docker-compose.keystore.yml").read_text(encoding="utf-8")
+    extra_code = "\n" + "\n".join(re.sub(r"\s+#.*$", "", ln) for ln in extra.splitlines() if not ln.strip().startswith("#"))
+    assert list(services(extra_code)) == ["signer"], "berkas tambahan hanya boleh menyentuh layanan signer"
+    assert re.findall(r"(?m)^  (\w+):", extra_code.split("\nsecrets:\n", 1)[1]) == ["signing_keystore", "signing_keystore_pass"]
 
 
 def test_compose_is_still_valid_yaml():
@@ -693,8 +714,8 @@ def test_real_dn_and_fingerprint_match_independent_computation(real):
 @needs_jdk
 def test_real_files_have_strict_modes_and_password_format(real):
     _, secrets, _ = real
-    assert mode_of(secrets / KS) == 0o600, "keytool menulis 644: skrip harus chmod 600"
-    assert mode_of(secrets / PW) == 0o600 and mode_of(secrets) == 0o700
+    assert mode_of(secrets / KS) == 0o644 and mode_of(secrets / PW) == 0o644, "644 di folder 700: terbaca uid 10001, kerahasiaan dijaga folder"
+    assert mode_of(secrets) == 0o700
     assert re.fullmatch(rb"[0-9a-f]{64}", (secrets / PW).read_bytes())
 
 
