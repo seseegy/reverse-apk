@@ -75,7 +75,7 @@ class AIConfig:
     shell_enabled: bool = False
     shell_timeout_s: int = 60                 # batas waktu bawaan satu perintah (AI boleh meminta lebih kecil; bench membatasi dari atas)
     shell_max_timeout_s: int = 120            # batas atas yang boleh diminta AI
-    shell_max_calls_per_turn: int = 40        # jumlah perintah per giliran (0 = tanpa batas)
+    shell_max_calls_per_turn: int = 200       # jumlah perintah per giliran (0 = tanpa batas)
     shell_max_output_chars: int = 12000       # keluaran per perintah yang dikirim kembali ke model (setelah redaksi)
     shell_spool_dir: str = "/data/benchspool"
     # Jaringan untuk shell AI (menguji API). Kosong = TANPA jaringan. Isi: host (api.contoh.com), subdomain (*.contoh.com), atau * (semua host PUBLIK;
@@ -165,7 +165,7 @@ def load_ai_config() -> AIConfig:
         shell_enabled=os.environ.get("AI_SHELL_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"},     # beda dengan redaksi: SALAH-nya = mati
         shell_timeout_s=_int("AI_SHELL_TIMEOUT", 60, 1, 3600),
         shell_max_timeout_s=_int("AI_SHELL_MAX_TIMEOUT", 120, 1, 3600),
-        shell_max_calls_per_turn=_int("AI_SHELL_MAX_CALLS_PER_TURN", 40, 0, 100_000),
+        shell_max_calls_per_turn=_int("AI_SHELL_MAX_CALLS_PER_TURN", 200, 0, 100_000),
         shell_max_output_chars=_int("AI_SHELL_MAX_OUTPUT_CHARS", 12000, 500, 1_000_000),
         shell_spool_dir=os.environ.get("AI_SHELL_SPOOL", "/data/benchspool").strip() or "/data/benchspool",
         shell_net_allow=_net_allow(os.environ.get("AI_SHELL_NET_ALLOW", "")),

@@ -288,7 +288,7 @@ Kedua master pada sampel APKS default **identik** (173 entri, CRC sama semua). I
 | Alat `apktool`, `jadx`, `aapt2`, `zipalign` di `bench` | **Tidak** (hanya `bash`, `coreutils`, `grep/sed/awk`, `find`, `unzip/zip`, `file`, `xxd`, `diff`, `patch`, `python3`) | Tanpa Java image tetap kecil; hasil apktool/jadx sudah ada di `$WORK`. Konsekuensi: AI bisa mengubah **salinan** smali/resource di `$WS`, tetapi tidak bisa membangun APK |
 | FR-9.14/9.39 ruang kerja "salinan `apktool`" dibuat lazily | Ruang kerja `bench/<id>/` **kosong**, dibuat saat perintah pertama; AI menyalin sendiri dari `$WORK` | Lebih sederhana; tidak ada salinan otomatis berukuran ratusan MB |
 | FR-9.35 perintah dan keluaran tampil (terlipat), tersimpan di `chat_message.tool_calls` | **Ya**, dibatasi (perintah 2000, stdout 6000, stderr 3000 karakter, sudah diredaksi) | |
-| FR-9.36 batas per giliran | Jumlah perintah (`AI_SHELL_MAX_CALLS_PER_TURN`, bawaan 40) dan waktu per perintah; total keluaran memakai `AI_MAX_TURN_TOOL_CHARS` yang sudah ada | |
+| FR-9.36 batas per giliran | Jumlah perintah (`AI_SHELL_MAX_CALLS_PER_TURN`, bawaan 200) dan waktu per perintah; total keluaran memakai `AI_MAX_TURN_TOOL_CHARS` yang sudah ada | |
 | FR-9.37 redaksi | **Ya**: stdout, stderr, **perintah**, dan argumen yang disimpan/dikirim ke UI | Lihat temuan kebocoran argumen di `audit.md` 10.11 |
 | FR-9.38 antarmuka ruang kerja untuk pengguna | **Tidak** | P2 |
 | Daur ulang kontainer per analisis | `BENCH_IDLE_EXIT` (bawaan 900 dtk idle) | Ruang kerja ada di volume dan bertahan |
