@@ -438,3 +438,31 @@ def test_selftest_data_dir_check_requires_exactly_builds_and_signspool_writable(
         finally:
             (data / "signspool").chmod(0o755)
         assert not ok and "signspool" in detail
+
+
+# ================================================================================ dokumen Tahap 2a
+def test_docs_record_signer_daemon_decisions():
+    deploy = (ROOT / "docs/deploy.md").read_text(encoding="utf-8")
+    prd = (ROOT / "docs/prd/09-bundles-and-workbench.md").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    audit = (ROOT / "audit.md").read_text(encoding="utf-8")
+    for needle in ("make signer-verify", "make keystore-access", "644", "700", "BELUM DIUJI", "Signer-daemon & akses kunci (Tahap 2a)"):
+        assert needle in deploy, f"docs/deploy.md tidak memuat {needle!r}"
+    assert "jalankan `make init` dan `make up` sebagai dua perintah" in deploy, "P6: Makefile membaca keystore saat dibaca"
+    assert "make up` membangun ulang image `web`, `worker`, `runner`, dan `bench` karena paket bersama `rvcore` berubah" in deploy
+    assert "3,2 GiB" in deploy and "3,0 GiB" in deploy and "export COMPOSE_FILE=docker-compose.yml:docker-compose.keystore.yml" in deploy
+    assert "UNHEALTHY" in deploy and "SELALU jalankan `make restart`" in deploy and "kompromi" in deploy.lower()
+    for alt in ("B.", "C1.", "C2.", "C3.", "C4.", "C5."):
+        assert f"| {alt} " in deploy, f"alternatif {alt} yang ditolak belum dicatat"
+    for risk in ("R3", "R10", "WAJIB ditutup sebelum runner diberi akses tulis"):
+        assert risk in deploy, risk
+    for n in range(13):
+        assert f"| V{n} |" in deploy, f"V{n} belum ada di tabel uji VPS"
+    assert "K1" in deploy and "K3" in deploy and "K6" in deploy and "v2.20.0" in deploy and "v5.6.0" in deploy
+    assert "Ukuran terbesar yang teruji: " in deploy and "BELUM DIUJI" in deploy.split("Ukuran terbesar yang teruji", 1)[1]
+    # Larangan klaim: tidak ada angka memori tanpa cgroup, tidak ada klaim "1 GB teruji"/"margin" di dokumen Tahap 2a.
+    for name, text in (("deploy.md", deploy), ("prd 09", prd), ("audit.md", audit), ("README.md", readme)):
+        assert "1 GB teruji" not in text and "margin" not in text.lower(), f"{name}: klaim yang dilarang"
+    assert "Tahap 2a" in prd and "FR-9.24" in prd and "SEBAGIAN" in prd
+    assert "signer-verify" in readme and "keystore-access" in readme
+    assert "10.17" in audit and "Belum terbukti" in audit and "Pelajaran keempat" in audit and "TIDAK PERNAH berstatus APPROVED" in audit
