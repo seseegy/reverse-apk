@@ -17,6 +17,7 @@ import unicodedata
 from typing import Any
 
 from .db import tx
+from .fsutil import scrub_paths
 
 # --- status analisis
 QUEUED, RUNNING, DONE, FAILED, CANCELLED = "queued", "running", "done", "failed", "cancelled"
@@ -793,11 +794,7 @@ _REQUESTED_BY_RE = re.compile(r"(user|ai:[0-9]{1,18})")
 _HEX64_RE = re.compile(r"[0-9a-f]{64}")
 _OUTPUT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}")
 _ERROR_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,39}")
-# Path internal (kontainer) yang tidak boleh sampai ke layar: /data/work/12/..., /tmp/x, /opt/...
-_INTERNAL_PATH_RE = re.compile(
-    r"(?<![\w<])/(?:data|tmp|opt|app|run|home|work|out|in|w|usr|var|etc|proc|root|mnt|srv|lib|bin|sbin|dev|sys)(?![\w-])"
-    r"(?:/[^\s'\"`]*)?"
-)
+# Path internal (kontainer) yang tidak boleh sampai ke layar disaring oleh fsutil.scrub_paths (absolut DAN relatif volume; NB-3).
 # Pengendali arah tulisan (bisa memalsukan tampilan teks di layar persetujuan) dibuang bersama karakter kontrol.
 _BIDI_CHARS = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 
@@ -869,7 +866,7 @@ def _clean_text(value: Any, limit: int, *, multiline: bool = False, scrub: bool 
         text = re.sub(r"\n{3,}", "\n\n", text)
     text = text.strip()
     if scrub:
-        text = _INTERNAL_PATH_RE.sub("<path>", text)
+        text = scrub_paths(text)
     return text[:limit].rstrip()
 
 

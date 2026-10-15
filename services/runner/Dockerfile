@@ -56,15 +56,16 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/* /tmp/*
 
 # uid 10001 sama dengan web/worker: berkas hasil dekompilasi harus bisa dihapus oleh web (hapus analisis)
-# dan dibaca worker. Pemisahan hak dilakukan lewat container & volume (uploads read-only, tanpa db), bukan uid.
+# dan dibaca worker. /data/bench (dipasang READ-ONLY: sumber snapshot build) dan /data/builds (tujuan build) dibuat di sini supaya volume baru mewarisi izin 10001. Pemisahan hak dilakukan lewat container & volume (uploads read-only, tanpa db), bukan uid.
 RUN groupadd --system --gid 10001 runner \
  && useradd --uid 10001 --gid runner --no-create-home --shell /usr/sbin/nologin runner \
- && mkdir -p /data/uploads /data/work /data/spool \
+ && mkdir -p /data/uploads /data/work /data/spool /data/bench /data/builds \
  && chown -R 10001:10001 /data
 
 WORKDIR /app
 COPY rvcore ./rvcore
 COPY runner/analyzer ./analyzer
+COPY runner/buildstage.py ./buildstage.py
 COPY runner/runner-selftest runner/runner-daemon /usr/local/bin/
 COPY runner/apktool-wrapper /usr/local/bin/apktool
 RUN chmod 0755 /usr/local/bin/runner-selftest /usr/local/bin/runner-daemon /usr/local/bin/apktool

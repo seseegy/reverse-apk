@@ -73,14 +73,16 @@ def _mounters(compose: str, volume: str) -> set[str]:
     return {parts[i] for i in range(1, len(parts), 2) if re.search(rf"(?m)^\s+- {re.escape(volume)}:/", parts[i + 1])}
 
 
-def test_compose_mounts_builds_and_signspool_only_for_worker_and_signer():
-    """Penjaga SADAR (menggantikan 'belum ada volume builds' Tahap 1): `builds` dan `signspool` hanya untuk worker + signer; runner/bench/egress/caddy/web/redis TIDAK."""
+def test_compose_mounts_builds_and_signspool_only_where_intended():
+    """Diubah SADAR (Tahap 2b; penjaga 'hanya worker + signer' Tahap 2a dicabut): runner menulis hasil `apktool b` ke `builds` dan web menghapus/menyajikannya.
+    `signspool` TETAP hanya worker + signer; bench/egress/caddy/redis TIDAK pernah memasang `builds`. Matriks lengkap yang ketat: test_build_compose.py."""
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     vols = compose.split("\nvolumes:\n", 1)[1].split("\nsecrets:\n", 1)[0]
     names = set(re.findall(r"^  ([A-Za-z0-9_]+):", vols, re.M))
-    assert {"builds", "signspool"} <= names
-    assert _mounters(compose, "builds") == {"worker", "signer"}
+    assert {"builds", "signspool", "signwork"} <= names
+    assert _mounters(compose, "builds") == {"web", "worker", "runner", "signer"}
     assert _mounters(compose, "signspool") == {"worker", "signer"}
-    for service in ("runner", "bench", "egress", "caddy", "web", "redis"):
+    assert _mounters(compose, "signwork") == {"signer"}
+    for service in ("bench", "egress", "caddy", "redis"):
         assert service in _service_names(compose), service
-        assert service not in _mounters(compose, "builds") | _mounters(compose, "signspool"), service
+        assert service not in _mounters(compose, "builds") | _mounters(compose, "signspool") | _mounters(compose, "signwork"), service

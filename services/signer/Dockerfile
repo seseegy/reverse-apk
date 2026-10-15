@@ -44,7 +44,7 @@ RUN printf '#!/bin/sh\nexec java -Xmx256m -XX:MaxDirectMemorySize=64m --enable-n
 RUN groupadd --system --gid 10001 signer \
  && useradd --uid 10001 --gid signer --no-create-home --shell /usr/sbin/nologin signer
 # Titik mount volume bernama mewarisi pemilik/izin direktori ini saat volume pertama kali dibuat (pola /data/spool): milik 10001.
-RUN mkdir -p /data/builds /data/signspool && chown -R 10001:10001 /data
+RUN mkdir -p /data/builds /data/signspool /data/signwork && chown -R 10001:10001 /data
 
 WORKDIR /app
 # `rvcore` = protokol signspool + pustaka kunci yang dipakai signer-daemon.

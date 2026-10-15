@@ -99,6 +99,9 @@ services:
       - db:/data/db
       - bench:/data/bench          # web hanya MENGHAPUS ruang kerja saat analisis dihapus; tidak pernah membaca isinya (data tak tepercaya)
       - benchspool:/data/benchspool
+      # Artefak build: web menghapusnya saat analisis dihapus dan nanti menyajikannya (Tahap 5). Runner menulis folder ini, jadi akses web SELALU lewat
+      # fsutil.open_dir_chain/rmtree_at (rantai O_NOFOLLOW), bukan jalur string.
+      - builds:/data/builds
       - ./config:/config:ro
     networks: [edge, backend]
     depends_on:
@@ -183,7 +186,7 @@ services:
 
   # ------------------------------------------------------------------ Runner (jadx + apktool)
   # Satu-satunya tempat yang mem-parsing APK tak tepercaya. TANPA JARINGAN, tanpa Redis, tanpa DB, tanpa
-  # Docker socket: hanya melihat APK (read-only), direktori kerja, dan spool job. Setelah tiap job, daemon
+  # Docker socket: hanya melihat APK (read-only), direktori kerja, spool job, ruang kerja bench (read-only) dan builds (tahap build). Setelah tiap job, daemon
   # keluar dan Docker memulai container baru (RUNNER_RECYCLE) sehingga tiap job berjalan di lingkungan bersih.
   runner:
     build:
@@ -211,6 +214,10 @@ services:
       - uploads:/data/uploads:ro
       - work:/data/work
       - spool:/data/spool
+      # Tahap build (2b): sumber snapshot = bench/<id>/project, DIBACA SAJA (`ro`: runner tidak boleh mengubah pekerjaan AI); keluaran = builds/<id>/<build>/ (rw).
+      # Runner TIDAK memasang benchspool/signspool/signwork/files/db: yang menulis `builds` bukan penanda tangan (penutupan R3/R10 ada di signer: kerja di `signwork` privat).
+      - bench:/data/bench:ro
+      - builds:/data/builds
     depends_on:
       web:
         condition: service_healthy
@@ -329,6 +336,9 @@ services:
     volumes:
       - builds:/data/builds
       - signspool:/data/signspool
+      # Ruang kerja PRIVAT signer (penutupan R3/R10): unsigned.apk disalin SEKALI dari satu fd ke sini, lalu zipalign/apksigner bekerja di sini. Runner yang menulis
+      # `builds` tidak memasang volume ini, jadi tidak bisa menukar apa pun saat alat penanda tangan berjalan.
+      - signwork:/data/signwork
     stop_grace_period: 20s
     healthcheck:
       test: ["CMD", "signer-daemon", "--health"]
@@ -360,8 +370,9 @@ volumes:
   spool:     # antrean berkas worker -> runner; hanya worker & runner
   bench:     # ruang kerja shell AI per analisis (bench/<id>/); web memasangnya untuk membersihkan, bench untuk bekerja
   benchspool: # antrean web -> bench (perintah shell AI); HANYA web & bench, terpisah dari spool worker/runner
-  builds:    # artefak build: signer rw, worker rw; runner/bench TIDAK memasangnya di 2a
+  builds:    # artefak build: runner rw (tahap build), signer rw, worker rw, web rw (hapus/sajikan); bench TIDAK memasangnya
   signspool: # antrean worker -> signer; hanya worker & signer
+  signwork:  # ruang kerja privat signer (salinan unsigned.apk, aligned, signed); HANYA signer yang memasangnya
   redisdata:
   caddy_data:
   caddy_config:

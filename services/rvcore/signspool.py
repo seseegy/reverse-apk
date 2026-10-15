@@ -4,8 +4,10 @@ Turunan `Spool` (rename atomik requests/ -> running/ -> results/), di VOLUME TER
 Jangan pernah berbagi direktori dengan spool lain: `claim_next` mengklaim apa saja yang lolos `JOB_ID_RE` di requests/.
 
 Kepercayaan:
-  * signer TIDAK mempercayai path dari worker. Request hanya memuat id bilangan bulat (analysis_id, build_id); path dihitung signer sendiri
-    lewat `Layout.build_dir`. Bidang lain di request (mis. `path`, `input`, `out`) tidak pernah dibaca.
+  * signer TIDAK mempercayai path dari worker. Request hanya memuat id bilangan bulat (analysis_id, build_id) dan `expect_sha256` (hash `unsigned.apk` yang
+    dilaporkan runner); path dihitung signer sendiri lewat `Layout.build_dir`. Bidang lain di request (mis. `path`, `input`, `out`) tidak pernah dibaca.
+  * signer menyalin `unsigned.apk` SEKALI dari satu fd ke ruang kerja privatnya (`signwork`), menghitung `input_sha256` dari byte yang disalin, dan MENOLAK
+    (`input_unsafe`) sebelum menjalankan alat apa pun bila `input_sha256 != expect_sha256` (berkas ditukar sejak runner selesai). Hasil `ok` memuat `input_sha256`.
   * worker TIDAK mempercayai hasil dari signer (kontainernya memproses APK tak tepercaya). Hasil dibaca dengan `read_small`
     (O_NOFOLLOW|O_NONBLOCK, batas ukuran) lalu dinormalkan ketat oleh `parse_result`; `ok` benar hanya bila `ok is True` DAN koheren.
   * Semua pembukaan berkas tak tepercaya (request, hasil, detak jantung) memakai `signkeys.OPEN_FLAGS` lewat `read_small`. `Spool.read_heartbeat`,
@@ -93,14 +95,20 @@ def new_job_id(analysis_id: int, build_id: int) -> str:
     return f"g{_clean_id('analysis_id', analysis_id)}-{_clean_id('build_id', build_id)}-{uuid.uuid4().hex[:8]}"
 
 
-def build_sign_request(analysis_id: int, build_id: int, timeout: int) -> dict[str, Any]:
-    """Request (sisi pengirim). ValueError untuk str/float/bool/<=0/>=2**31; path TIDAK ikut dikirim."""
+def _expect_sha(value: Any) -> str:
+    if not isinstance(value, str) or HEX64_RE.match(value) is None:
+        raise ValueError("expect_sha256 harus 64 karakter heks huruf kecil")
+    return value
+
+
+def build_sign_request(analysis_id: int, build_id: int, timeout: int, expect_sha256: str) -> dict[str, Any]:
+    """Request (sisi pengirim). ValueError untuk str/float/bool/<=0/>=2**31 dan `expect_sha256` selain heks-64 huruf kecil; path TIDAK ikut dikirim."""
     return {"job_id": new_job_id(analysis_id, build_id), "op": OP_SIGN, "analysis_id": analysis_id, "build_id": build_id,
-            "timeout": _clean_id("timeout", timeout), "created": time.time()}
+            "timeout": _clean_id("timeout", timeout), "expect_sha256": _expect_sha(expect_sha256), "created": time.time()}
 
 
-def validate_request(job: Any, job_id: str) -> tuple[int, int, int]:
-    """Validasi request (sisi signer) -> (analysis_id, build_id, timeout). ValueError bila tidak valid. Bidang lain DIABAIKAN."""
+def validate_request(job: Any, job_id: str) -> tuple[int, int, int, str]:
+    """Validasi request (sisi signer) -> (analysis_id, build_id, timeout, expect_sha256). ValueError bila tidak valid. Bidang lain DIABAIKAN."""
     if not isinstance(job, dict) or job.get("job_id") != job_id:
         raise ValueError("job_id tidak cocok")
     m = JOB_ID_RE.match(job_id)
@@ -115,7 +123,7 @@ def validate_request(job: Any, job_id: str) -> tuple[int, int, int]:
     timeout = job.get("timeout")
     if type(timeout) is not int:
         raise ValueError("timeout harus bilangan bulat")
-    return aid, bid, max(MIN_TIMEOUT, min(MAX_TIMEOUT, timeout))
+    return aid, bid, max(MIN_TIMEOUT, min(MAX_TIMEOUT, timeout)), _expect_sha(job.get("expect_sha256"))
 
 
 class SignSpool(Spool):
@@ -218,11 +226,13 @@ def parse_result(raw: Any) -> dict[str, Any]:
     signers = _int_or_none(raw.get("signer_count"))
     result: dict[str, Any] = {
         "ok": False, "error_code": None, "error_text": "", "output_name": OUTPUT_NAME,
-        "output_size": size if size is not None and size > 0 else 0, "output_sha256": out_sha, "cert_sha256": cert,
+        "output_size": size if size is not None and size > 0 else 0, "output_sha256": out_sha, "input_sha256": _hex64(raw.get("input_sha256")),
+        "cert_sha256": cert,
         "verify": verify, "signer_count": signers,
         "elapsed": float(elapsed) if type(elapsed) in (int, float) and math.isfinite(elapsed) and 0 <= elapsed <= 1e7 else 0.0,
     }
-    coherent = (out_sha is not None and cert is not None and result["output_size"] > 0 and signers == 1 and verify["v2"] and verify["v3"])
+    coherent = (out_sha is not None and cert is not None and result["input_sha256"] is not None and result["output_size"] > 0 and signers == 1
+                and verify["v2"] and verify["v3"])
     if raw.get("ok") is True and coherent:
         result["ok"] = True
         return result
@@ -286,7 +296,7 @@ def _cancelled(text: str) -> dict[str, Any]:
     return parse_result({"ok": False, "error_code": "cancelled", "error_text": text})
 
 
-def submit_and_wait(spool: Spool, analysis_id: int, build_id: int, *, timeout: int, cancel: threading.Event | None = None,
+def submit_and_wait(spool: Spool, analysis_id: int, build_id: int, *, timeout: int, expect_sha256: str, cancel: threading.Event | None = None,
                     pickup_timeout: float = 30.0, grace: float = 15.0, poll: float = 0.1) -> dict[str, Any]:
     """Kirim satu job tanda tangan dan tunggu hasilnya (dinormalkan). Memblokir. Melempar SignerUnavailable bila signer mati/keystore bermasalah/diam.
 
@@ -299,7 +309,7 @@ def submit_and_wait(spool: Spool, analysis_id: int, build_id: int, *, timeout: i
     if ks["state"] != "ok":
         raise SignerUnavailable(f"Keystore signer belum siap (status: {ks['state'] or 'tidak diketahui'}). {ks['detail']}".strip())
     try:
-        job = build_sign_request(analysis_id, build_id, timeout)
+        job = build_sign_request(analysis_id, build_id, timeout, expect_sha256)
     except ValueError as exc:
         raise SignerUnavailable(f"Permintaan tidak valid: {exc}.") from exc
     wait_timeout = max(MIN_TIMEOUT, min(MAX_TIMEOUT, timeout))          # signer menjepit timeout ke rentang yang sama

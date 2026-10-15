@@ -666,8 +666,15 @@ def rig(d, tmp_path, monkeypatch):
     return r
 
 
+def sreq(layout, aid, bid, timeout=60, expect=None):
+    """Request sign dengan `expect_sha256` = hash `unsigned.apk` yang SEKARANG ada (seperti yang dilaporkan runner); tak ada/bukan berkas biasa -> hash nol."""
+    f = layout.build_dir(aid, bid) / "unsigned.apk"
+    got = hashlib.sha256(f.read_bytes()).hexdigest() if f.is_file() and not f.is_symlink() else "0" * 64
+    return signspool.build_sign_request(aid, bid, timeout, expect or got)
+
+
 def run_one(d, aid=1, bid=2, timeout=60):
-    job = signspool.build_sign_request(aid, bid, timeout)
+    job = sreq(d.LAYOUT, aid, bid, timeout)
     d.SPOOL.submit(job)
     claimed = d.SPOOL.claim_next()
     assert claimed is not None and claimed[0] == job["job_id"]
@@ -697,11 +704,18 @@ def test_fake_success_flow_order_commands_and_published_file(rig):
     assert not (rig.home / job_id).exists()
     assert (rig.bdir / "unsigned.apk").read_bytes() == b"APK-TIRUAN" * 100
 
+    # R3/R10: SEMUA alat bekerja di ruang kerja privat signwork/<job>/, TIDAK di folder build milik runner.
+    wdir = d.LAYOUT.signwork / job_id
     sign = next(c for c in rig.calls() if c["key"] == "apksigner:sign")["argv"]
     assert sign[sign.index("--ks-pass") + 1] == f"file:{rig.secrets}/signing_keystore_pass"
-    assert sign[sign.index("--out") + 1] == str(bdir / ".sign-signed.tmp") and sign[-1] == str(bdir / ".sign-aligned.tmp")
+    assert sign[sign.index("--out") + 1] == str(wdir / "signed.apk") and sign[-1] == str(wdir / "aligned.apk")
     zipalign = next(c for c in rig.calls() if c["key"] == "zipalign")["argv"]
-    assert zipalign == ["-P", "16", "-f", "4", str(bdir / "unsigned.apk"), str(bdir / ".sign-aligned.tmp")]
+    assert zipalign == ["-P", "16", "-f", "4", str(wdir / "in.apk"), str(wdir / "aligned.apk")]
+    verify = next(c for c in rig.calls() if c["key"] == "apksigner:verify")["argv"]
+    assert verify[-1] == str(wdir / "signed.apk")
+    assert not any(str(bdir) in a for c in rig.calls() for a in c["argv"]), "tidak ada alat yang menyentuh jalur folder build"
+    assert not wdir.exists() and list(d.LAYOUT.signwork.iterdir()) == [], "ruang kerja privat dibersihkan"
+    assert res["input_sha256"] == hashlib.sha256(b"APK-TIRUAN" * 100).hexdigest()
 
 
 def test_fake_password_is_nowhere_but_the_secret_file(rig, capfd):
@@ -751,15 +765,15 @@ def test_fake_every_failure_path_leaves_no_temp_files_and_no_signed_apk(rig, beh
     job_id, res = rig.run()
     assert (res["ok"], res["error_code"]) == (False, code), res
     assert sorted(p.name for p in rig.bdir.iterdir()) == ["unsigned.apk"]
-    assert not (rig.home / job_id).exists()
+    assert not (rig.home / job_id).exists() and list(rig.d.LAYOUT.signwork.iterdir()) == []
     stored = signspool.parse_result(stored_result(rig.d, job_id))
     assert stored["ok"] is False and stored["error_code"] == code and stored["error_text"]
 
 
-def test_fake_sign_failure_still_removes_aligned_temp(rig):
+def test_fake_sign_failure_still_removes_aligned_copy(rig):
     rig.behave(**{"apksigner:sign": {"mode": "fail", "partial": True}})
     rig.run()
-    assert not any(p.name.startswith(".sign-") for p in rig.bdir.iterdir())
+    assert not any(p.name.startswith(".sign-") for p in rig.bdir.iterdir()) and list(rig.d.LAYOUT.signwork.iterdir()) == []
 
 
 def test_fake_cert_mismatch_text_has_both_prefixes_and_no_signed_apk(rig):
@@ -897,13 +911,14 @@ def test_fake_bad_requests_are_answered_without_running_tools(rig):
 
 
 def test_fake_unlink_after_directory_swap_never_follows_the_new_symlink(rig, tmp_path, monkeypatch):
-    """Semua unlink memakai dir_fd folder build yang SUDAH dibuka: folder diganti symlink di tengah job (antara zipalign dan sign) tidak boleh membuat
-    signer menghapus berkas di tujuan symlink (mutasi M35: unlink berbasis jalur string)."""
+    """Semua operasi (sweep, penerbitan `.sign-signed.tmp`, rename ke signed.apk, baca ulang, unlink) memakai dir_fd folder build yang SUDAH dibuka: folder diganti
+    symlink di tengah job (antara salin dan sign) tidak boleh membuat signer menghapus/menimpa berkas di tujuan symlink (mutasi M35: operasi berbasis jalur string)."""
     d = rig.d
     victim = tmp_path / "korban"
     victim.mkdir()
-    canary = victim / ".sign-aligned.tmp"
-    canary.write_text("jangan dihapus")
+    canaries = {name: victim / name for name in (".sign-signed.tmp", "signed.apk", ".sign-aligned.tmp")}
+    for c in canaries.values():
+        c.write_text("jangan dihapus")
     original = d.build_sign_cmd
 
     def swap(src, dst):
@@ -913,12 +928,15 @@ def test_fake_unlink_after_directory_swap_never_follows_the_new_symlink(rig, tmp
 
     monkeypatch.setattr(d, "build_sign_cmd", swap)
     _, res = rig.run()
-    assert canary.exists() and canary.read_text() == "jangan dihapus", res
-    assert not (rig.bdir.parent / "asli" / ".sign-aligned.tmp").exists()               # yang dihapus adalah berkas di folder ASLI (lewat dir_fd)
+    assert all(c.read_text() == "jangan dihapus" for c in canaries.values()), res
+    assert sorted(p.name for p in victim.iterdir()) == sorted(canaries), "tidak ada yang ditulis ke tujuan symlink"
+    # hasil terbit ke inode folder ASLI yang dibuka signer (lewat dir_fd); folder baru (symlink) tak berisi artefak => worker menangkapnya sebagai artifact_changed
+    assert res["ok"] is True and (rig.bdir.parent / "asli" / "signed.apk").is_file()
+    assert sorted(p.name for p in (rig.bdir.parent / "asli").iterdir()) == ["signed.apk", "unsigned.apk"]
 
 
 def test_fake_request_path_fields_are_ignored(rig, tmp_path):
-    job = signspool.build_sign_request(1, 2, 60)
+    job = sreq(rig.d.LAYOUT, 1, 2, 60)
     job.update(path="/etc/passwd", input="/etc/shadow", out="/tmp/x")
     rig.d.SPOOL.submit(job)
     job_id, request = rig.d.SPOOL.claim_next()
@@ -926,7 +944,7 @@ def test_fake_request_path_fields_are_ignored(rig, tmp_path):
     assert res["ok"] is True and not (tmp_path / "x").exists()
     # Jalur alat HANYA dari id bilangan bulat (Layout.build_dir), bukan dari bidang request (mutasi M11).
     first = next(c for c in rig.calls() if c["tool"] == "zipalign")
-    assert str(rig.bdir / "unsigned.apk") in first["argv"] and not any("/etc/" in a or "/tmp/x" in a for c in rig.calls() for a in c["argv"])
+    assert str(rig.d.LAYOUT.signwork / job_id / "in.apk") in first["argv"] and not any("/etc/" in a or "/tmp/x" in a for c in rig.calls() for a in c["argv"])
 
 
 @pytest.mark.parametrize("make_bad,code", [
@@ -992,7 +1010,7 @@ def test_fake_term_ignoring_tool_is_sigkilled_after_grace(rig, monkeypatch):
 def test_fake_cancel_stops_the_job(rig):
     d = rig.d
     rig.behave(**{"apksigner:sign": {"mode": "sleep"}})
-    job = signspool.build_sign_request(1, 2, 60)
+    job = sreq(d.LAYOUT, 1, 2, 60)
     d.SPOOL.submit(job)
     job_id, request = d.SPOOL.claim_next()
     d.SPOOL.request_cancel(job_id)
@@ -1091,7 +1109,7 @@ def test_fake_finish_that_always_fails_does_not_hang_and_leaves_request_running(
         raise OSError(errno.EIO, "io")
 
     monkeypatch.setattr(d.SPOOL, "finish", finish)
-    job = signspool.build_sign_request(1, 2, 60)
+    job = sreq(d.LAYOUT, 1, 2, 60)
     d.SPOOL.submit(job)
     job_id, request = d.SPOOL.claim_next()
     res = d.run_job(job_id, request)
@@ -1122,7 +1140,7 @@ def test_fake_finish_failing_with_enospc_writes_no_space_minimal_result(rig, mon
 # ---- pemulihan yatim
 def test_fake_orphan_recovery_answers_aborted_and_removes_outputs(rig):
     d = rig.d
-    job = signspool.build_sign_request(1, 2, 60)
+    job = sreq(d.LAYOUT, 1, 2, 60)
     d.SPOOL.ensure_dirs()
     (d.SPOOL.running / f"{job['job_id']}.json").write_text(json.dumps(job))
     for name in ("signed.apk", ".sign-aligned.tmp", ".sign-signed.tmp", "sisa.idsig"):
@@ -1140,7 +1158,7 @@ def test_fake_orphan_recovery_does_not_follow_symlinks(rig, tmp_path):
     (outside / "5").mkdir(parents=True)
     (outside / "5" / "signed.apk").write_bytes(b"jangan hapus")
     d.LAYOUT.builds_dir(4).symlink_to(outside)
-    job = signspool.build_sign_request(4, 5, 60)
+    job = sreq(d.LAYOUT, 4, 5, 60)
     d.SPOOL.ensure_dirs()
     (d.SPOOL.running / f"{job['job_id']}.json").write_text(json.dumps(job))
     d.abort_orphans()
@@ -1382,7 +1400,7 @@ sys.exit(m.main())
             time.sleep(0.1)
         assert signspool.signer_status(d.SPOOL)["keystore"]["state"] == "ok", "daemon tidak siap"
 
-        job = signspool.build_sign_request(1, 2, 60)
+        job = sreq(d.LAYOUT, 1, 2, 60)
         d.SPOOL.submit(job)
         end = time.monotonic() + 30
         while time.monotonic() < end and signspool.read_result(d.SPOOL, job["job_id"]) is None:
@@ -1391,7 +1409,7 @@ sys.exit(m.main())
         assert first is not None and first["ok"] is True and (rig.bdir / "signed.apk").exists()
 
         rig.behave(**{"apksigner:sign": {"mode": "sleep"}})
-        job2 = signspool.build_sign_request(1, 2, 60)
+        job2 = sreq(d.LAYOUT, 1, 2, 60)
         d.SPOOL.submit(job2)
         end = time.monotonic() + 30
         while time.monotonic() < end and signspool.signer_status(d.SPOOL)["job"] != job2["job_id"]:

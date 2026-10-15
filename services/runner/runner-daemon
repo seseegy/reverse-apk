@@ -11,7 +11,10 @@ Daya tahan:
   * RUNNER_RECYCLE=1 (default): setelah satu job, daemon keluar dan Docker (restart: unless-stopped) memulai
     container baru -> tmpfs, memori, dan proses bersih untuk job berikutnya (mendekati "container sekali pakai").
 
-Protokol berkas: lihat rvcore/spool.py.
+Tahap `build` (Tahap 2b) menjalankan `apktool b` atas SNAPSHOT ruang kerja (bench:ro) dan menulis ke builds/<aid>/<bid>/ (rw): logikanya ada di
+buildstage.py (cabang dijalankan SEBELUM pemeriksaan APK karena build tidak butuh uploads/). Tahap lama (apktool d, jadx, analyze) tidak berubah.
+
+Protokol berkas: lihat rvcore/spool.py (dan rvcore/buildproto.py untuk tahap build).
 """
 
 from __future__ import annotations
@@ -26,7 +29,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+import buildstage
 from rvcore import fmt
+from rvcore.buildproto import ERROR_TEXT as BUILD_ERROR_TEXT
+from rvcore.buildproto import dump_result as dump_build_result
+from rvcore.buildproto import validate_build_request
 from rvcore.bundle import BundleError, prepared_apk
 from rvcore.fsutil import remove_unsafe_entries, safe_rmtree, tree_stats
 from rvcore.paths import SHA256_RE, Layout
@@ -78,6 +85,9 @@ def say(msg: str) -> None:
 
 def build_command(stage: str, apk: Path, out: Path, deobf: bool) -> tuple[list[str], list[str]]:
     """(perintah_nyata, argumen_untuk_dicatat). Argumen berasal dari allowlist, bukan dari request."""
+    if stage == "build":
+        # Jalur generik TIDAK boleh membangun: tahap build punya jalurnya sendiri (buildstage.apktool_argv; sumber/keluaran dihitung dari id).
+        raise ValueError("tahap build tidak memakai build_command")
     if stage == "analyze":
         # Analisis statis berjalan sebagai proses Python terpisah agar bisa dihentikan (grup proses) saat timeout.
         work = out.parent
@@ -93,7 +103,7 @@ def build_command(stage: str, apk: Path, out: Path, deobf: bool) -> tuple[list[s
 
 
 def tool_version(stage: str) -> str | None:
-    key = {"apktool": "APKTOOL_VERSION", "jadx": "JADX_VERSION", "analyze": "ANALYZER_VERSION"}[stage]
+    key = {"apktool": "APKTOOL_VERSION", "jadx": "JADX_VERSION", "analyze": "ANALYZER_VERSION", "build": "APKTOOL_VERSION"}[stage]
     return os.environ.get(key)
 
 
@@ -269,8 +279,25 @@ def validate_request(job: dict[str, Any]) -> tuple[int, str, str, bool, int]:
     return analysis_id, stage, sha, bool(options.get("deobf")), timeout
 
 
+def build_env() -> buildstage.Env:
+    return buildstage.Env(
+        layout=LAYOUT, spool=SPOOL, stop=STOP, home_root=TOOL_HOME_ROOT, kill_group=kill_group, sweep_group=sweep_group, pump_output=pump_output,
+        max_output_bytes=MAX_OUTPUT_BYTES, max_output_files=MAX_OUTPUT_FILES, say=say)
+
+
+def run_build_job(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
+    """Tahap `build`: dijalankan SEBELUM pemeriksaan APK/work generik (build tidak membaca uploads/ dan tidak butuh work/<id> yang bisa ditulis)."""
+    try:
+        req = validate_build_request(job)
+    except ValueError as exc:
+        return dump_build_result({"status": "failed", "error_code": "bad_request", "error_text": f"{BUILD_ERROR_TEXT['bad_request']} ({exc})"})
+    return buildstage.run(build_env(), job_id, req)
+
+
 def run_job(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
     started = time.monotonic()
+    if job.get("stage") == "build":
+        return run_build_job(job_id, job)
     try:
         analysis_id, stage, sha, deobf, timeout = validate_request(job)
     except ValueError as exc:

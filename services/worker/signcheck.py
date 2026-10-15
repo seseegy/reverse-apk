@@ -13,11 +13,17 @@ dan build_id di luar 1..7. Subperintah diagnostik (put-garbage, put-symlink, put
 
 Keluaran `kunci=nilai` atau satu baris `HASIL ok=1|0 code=<kode>|- cert=<hex64>|- sha=<hex64>|- size=<n> v1=1|0|- v2=1|0 v3=1|0 signers=<n>|- elapsed=<detik>`.
 Kata sandi tidak pernah disentuh di sini; sertifikat/sha penuh (64 heks) bukan rahasia.
+
+Semua akses ke `builds/<aid>/<bid>` memakai rantai-dirfd (`fsutil.open_dir_chain` + operasi relatif `dir_fd`; hapus lewat `rmtree_at`): runner kini bisa menulis akar
+`builds`, jadi komponen perantara yang ditukar jadi symlink tidak boleh diikuti (A-03). `sign` mengirim `expect_sha256` = hash `unsigned.apk` yang dibaca dari folder
+itu (atau `--expect-sha256`; berkas tak ada/bukan berkas biasa -> hash nol supaya signer sendiri yang menjawab input_missing/input_unsafe).
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import errno
 import hashlib
 import os
 import re
@@ -27,10 +33,9 @@ import sys
 import time
 import zipfile
 from io import BytesIO
-from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
-from rvcore.fsutil import safe_rmtree
+from rvcore.fsutil import open_dir_chain, rmtree_at
 from rvcore.paths import Layout
 from rvcore.signspool import (ERROR_CODES, JOB_ID_RE, SignerUnavailable, make_spool, new_job_id, read_result, signer_status,
                               submit_and_wait)
@@ -46,6 +51,7 @@ MAX_ENTRIES = 70000                # batas entri APK ±65535; sedikit di atasnya
 CHUNK = MIB
 DISK_MARGIN_MIB = 64
 OWNER_RE = re.compile(r"[0-9a-fA-F]{64}\Z")
+EXPECT_RE = re.compile(r"[0-9a-f]{64}\Z")
 DEFAULT_SIGN_TIMEOUT = 300
 BAD_REQUEST_WAIT = 60.0
 UNSIGNED = "unsigned.apk"
@@ -86,6 +92,7 @@ def _parser() -> argparse.ArgumentParser:
     sp.add_argument("--expect-ok", action="store_true")
     sp.add_argument("--owner-sha256")
     sp.add_argument("--expect-error")
+    sp.add_argument("--expect-sha256")
     ids(sub.add_parser("ls"))
     sub.add_parser("df")
     ids(sub.add_parser("clean"), bid_optional=True)
@@ -132,52 +139,81 @@ def hasil_line(res: dict[str, Any]) -> str:
             f"signers={signers} elapsed={res.get('elapsed', 0.0):.1f}")
 
 
-def _build_dir(layout: Layout, aid: int, bid: int) -> Path:
-    return layout.build_dir(aid, bid)
+ZERO_SHA = "0" * 64
+OPEN_RD = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
-def _ensure_build_dir(layout: Layout, aid: int, bid: int) -> Path:
-    bdir = _build_dir(layout, aid, bid)
+@contextlib.contextmanager
+def build_fd(layout: Layout, aid: int, bid: int, *, create: bool) -> Iterator[int]:
+    """fd folder `builds/<aid>/<bid>` lewat rantai nofollow (A-03). Symlink/bukan direktori di komponen mana pun -> Operational (sasaran tak disentuh)."""
     try:
-        bdir.mkdir(parents=True, exist_ok=True)
+        fd = open_dir_chain(layout.builds, str(aid), str(bid), create=create)
     except OSError as exc:
-        raise Operational(f"tidak bisa membuat folder build: {exc.strerror or exc}") from exc
-    return bdir
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise Operational(f"builds/{aid}/{bid} bukan direktori biasa (symlink atau jenis lain); ditolak") from exc
+        raise Operational(f"folder build tidak bisa dibuka: {exc.strerror or exc}") from exc
+    try:
+        yield fd
+    finally:
+        os.close(fd)
 
 
 class Tmp:
-    """Berkas `.put-*.tmp` di folder build; dihapus bila tidak diterbitkan (galat atau KeyboardInterrupt)."""
+    """Berkas `.put-*.tmp` di folder build (relatif `bfd`); dihapus bila tidak diterbitkan (galat atau KeyboardInterrupt)."""
 
-    def __init__(self, bdir: Path) -> None:
-        self.path = bdir / f".put-{secrets.token_hex(6)}.tmp"
+    def __init__(self, bfd: int) -> None:
+        self.bfd = bfd
+        self.name = f".put-{secrets.token_hex(6)}.tmp"
         self.published = False
 
     def __enter__(self) -> "Tmp":
         return self
 
-    def publish(self, dest: Path) -> None:
-        os.replace(self.path, dest)
+    def publish(self, dest: str) -> None:
+        os.replace(self.name, dest, src_dir_fd=self.bfd, dst_dir_fd=self.bfd)
         self.published = True
+
+    def size(self) -> int:
+        return os.stat(self.name, dir_fd=self.bfd, follow_symlinks=False).st_size
 
     def __exit__(self, *exc: object) -> None:
         if not self.published:
             try:
-                os.unlink(self.path)
+                os.unlink(self.name, dir_fd=self.bfd)
             except OSError:
                 pass
 
 
 def _open_tmp(tmp: Tmp) -> int:
     try:
-        return os.open(tmp.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+        return os.open(tmp.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644, dir_fd=tmp.bfd)
     except OSError as exc:
         raise Operational(f"tidak bisa menulis berkas sementara: {exc.strerror or exc}") from exc
 
 
+def unsigned_sha256(layout: Layout, aid: int, bid: int) -> str:
+    """sha256 `unsigned.apk` dibaca lewat rantai nofollow; tak ada / bukan berkas biasa / tak terbaca -> hash nol (signer yang menjawab input_missing/input_unsafe)."""
+    try:
+        with build_fd(layout, aid, bid, create=False) as bfd:
+            fd = os.open(UNSIGNED, OPEN_RD, dir_fd=bfd)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    return ZERO_SHA
+                digest = hashlib.sha256()
+                while True:
+                    chunk = os.read(fd, CHUNK)
+                    if not chunk:
+                        return digest.hexdigest()
+                    digest.update(chunk)
+            finally:
+                os.close(fd)
+    except (OSError, Operational):
+        return ZERO_SHA
+
+
 def cmd_put(layout: Layout, aid: int, bid: int, stdin: Any) -> None:
-    bdir = _ensure_build_dir(layout, aid, bid)
     digest, total = hashlib.sha256(), 0
-    with Tmp(bdir) as tmp:
+    with build_fd(layout, aid, bid, create=True) as bfd, Tmp(bfd) as tmp:
         fd = _open_tmp(tmp)
         try:
             with os.fdopen(fd, "wb") as out:
@@ -195,7 +231,7 @@ def cmd_put(layout: Layout, aid: int, bid: int, stdin: Any) -> None:
         except OSError as exc:
             raise Operational(f"gagal menulis unsigned.apk: {exc.strerror or exc}") from exc
         try:
-            tmp.publish(bdir / UNSIGNED)
+            tmp.publish(UNSIGNED)
         except OSError as exc:
             raise Operational(f"gagal menerbitkan unsigned.apk: {exc.strerror or exc}") from exc
     print(f"ditulis={total}")
@@ -203,32 +239,32 @@ def cmd_put(layout: Layout, aid: int, bid: int, stdin: Any) -> None:
 
 
 def cmd_put_garbage(layout: Layout, aid: int, bid: int) -> None:
-    bdir = _ensure_build_dir(layout, aid, bid)
     data = b"bukan zip\n"
-    with Tmp(bdir) as tmp:
+    with build_fd(layout, aid, bid, create=True) as bfd, Tmp(bfd) as tmp:
         fd = _open_tmp(tmp)
         with os.fdopen(fd, "wb") as out:
             out.write(data)
         try:
-            tmp.publish(bdir / UNSIGNED)
+            tmp.publish(UNSIGNED)
         except OSError as exc:
             raise Operational(f"gagal menerbitkan unsigned.apk: {exc.strerror or exc}") from exc
     print(f"ditulis={len(data)}")
 
 
 def cmd_put_symlink(layout: Layout, aid: int, bid: int) -> None:
-    bdir = _ensure_build_dir(layout, aid, bid)
-    link = bdir / UNSIGNED
-    try:
-        if os.path.lexists(link):
-            link.unlink()
-        os.symlink("/etc/hostname", link)
-    except OSError as exc:
-        raise Operational(f"gagal membuat symlink: {exc.strerror or exc}") from exc
+    with build_fd(layout, aid, bid, create=True) as bfd:
+        try:
+            try:
+                os.unlink(UNSIGNED, dir_fd=bfd)
+            except FileNotFoundError:
+                pass
+            os.symlink("/etc/hostname", UNSIGNED, dir_fd=bfd)
+        except OSError as exc:
+            raise Operational(f"gagal membuat symlink: {exc.strerror or exc}") from exc
     print("dibuat=symlink")
 
 
-def free_mib(path: Path) -> int:
+def free_mib(path: Any) -> int:
     try:
         st = os.statvfs(path)
     except OSError as exc:
@@ -281,27 +317,27 @@ def cmd_put_big(layout: Layout, aid: int, bid: int, args: argparse.Namespace, st
     base = stdin.read(MAX_BASE_BYTES + 1)
     if not base or len(base) > MAX_BASE_BYTES:
         raise Operational(f"APK dasar dari stdin harus 1 B..{MAX_BASE_BYTES // MIB} MiB")
-    bdir = _ensure_build_dir(layout, aid, bid)
-    bebas = free_mib(bdir)
-    if bebas < args.size_mb + DISK_MARGIN_MIB:
-        raise Operational(f"ruang disk tidak cukup: butuh {args.size_mb + DISK_MARGIN_MIB} MiB, bebas {bebas} MiB")
-    try:
-        with Tmp(bdir) as tmp:
-            fd = _open_tmp(tmp)
-            try:
-                with os.fdopen(fd, "wb") as out:
-                    count = build_big_zip(out, BytesIO(base), args.size_mb, args.entries, args.jar_meta)
-                    out.flush()
-                    os.fsync(out.fileno())
-            except (OSError, zipfile.BadZipFile) as exc:
-                raise Operational(f"gagal membuat APK besar: {getattr(exc, 'strerror', None) or exc}") from exc
-            written = tmp.path.stat().st_size
-            try:
-                tmp.publish(bdir / UNSIGNED)
-            except OSError as exc:
-                raise Operational(f"gagal menerbitkan unsigned.apk: {exc.strerror or exc}") from exc
-    except KeyboardInterrupt:
-        raise Operational("dihentikan; berkas sementara dihapus") from None
+    with build_fd(layout, aid, bid, create=True) as bfd:
+        bebas = free_mib(bfd)
+        if bebas < args.size_mb + DISK_MARGIN_MIB:
+            raise Operational(f"ruang disk tidak cukup: butuh {args.size_mb + DISK_MARGIN_MIB} MiB, bebas {bebas} MiB")
+        try:
+            with Tmp(bfd) as tmp:
+                fd = _open_tmp(tmp)
+                try:
+                    with os.fdopen(fd, "wb") as out:
+                        count = build_big_zip(out, BytesIO(base), args.size_mb, args.entries, args.jar_meta)
+                        out.flush()
+                        os.fsync(out.fileno())
+                except (OSError, zipfile.BadZipFile) as exc:
+                    raise Operational(f"gagal membuat APK besar: {getattr(exc, 'strerror', None) or exc}") from exc
+                written = tmp.size()
+                try:
+                    tmp.publish(UNSIGNED)
+                except OSError as exc:
+                    raise Operational(f"gagal menerbitkan unsigned.apk: {exc.strerror or exc}") from exc
+        except KeyboardInterrupt:
+            raise Operational("dihentikan; berkas sementara dihapus") from None
     print(f"ditulis={written}")
     print(f"entri={count}")
 
@@ -317,10 +353,10 @@ def cmd_status(layout: Layout) -> None:
 
 
 def cmd_ls(layout: Layout, aid: int, bid: int) -> None:
-    bdir = _build_dir(layout, aid, bid)
     try:
-        names = sorted(os.listdir(bdir)) if not bdir.is_symlink() else []
-    except OSError:
+        with build_fd(layout, aid, bid, create=False) as bfd:
+            names = sorted(os.listdir(bfd))
+    except (OSError, Operational):
         names = []
     for name in names:
         print(_line(name))
@@ -330,31 +366,56 @@ def cmd_df(layout: Layout) -> None:
     print(f"bebas_mib={free_mib(layout.builds)}")
 
 
-def _unlink_or_rmtree(path: Path) -> bool:
+def _unlink_or_rmtree(folder: Any, name: str) -> bool:
+    """Hapus satu entri spool (berkas atau direktori yang menyamar) tanpa mengikuti symlink. True bila ada yang dihapus."""
     try:
-        st = os.lstat(path)
+        dfd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except OSError:
         return False
     try:
-        if stat.S_ISDIR(st.st_mode):
-            safe_rmtree(path)
-        else:
-            os.unlink(path)
+        if not os.path.lexists(os.path.join(folder, name)):
+            return False
+        rmtree_at(dfd, name)
     except OSError:
         return False
+    finally:
+        os.close(dfd)
     return True
 
 
 def cmd_clean(layout: Layout, aid: int, bid: int | None) -> None:
-    """Hapus folder build sentinel (aid atau aid/bid) dan sisa berkas job sentinel di signspool. Hanya id sentinel yang sampai ke sini."""
+    """Hapus folder build sentinel (aid atau aid/bid) dan sisa berkas job sentinel di signspool. Hanya id sentinel yang sampai ke sini.
+    Semua lewat rantai-dirfd: `builds/<aid>` yang ternyata symlink TIDAK diikuti (`clean AID` hanya meng-unlink symlinknya; `clean AID BID` menolak dengan GALAT)."""
     removed = False
-    target = _build_dir(layout, aid, bid) if bid is not None else layout.builds_dir(aid)
-    if os.path.lexists(target):
-        try:
-            safe_rmtree(target)
-            removed = True
-        except OSError as exc:
-            raise Operational(f"gagal menghapus {target.name}: {exc.strerror or exc}") from exc
+    try:
+        if bid is not None:
+            try:
+                afd = open_dir_chain(layout.builds, str(aid))
+            except FileNotFoundError:
+                afd = -1
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise Operational(f"builds/{aid} bukan direktori biasa (symlink atau jenis lain); ditolak, sasarannya tidak disentuh") from exc
+                raise
+            if afd >= 0:
+                try:
+                    present = os.path.lexists(os.path.join(layout.builds, str(aid), str(bid)))
+                    rmtree_at(afd, str(bid))
+                    removed = present
+                finally:
+                    os.close(afd)
+        else:
+            rfd = open_dir_chain(layout.builds)
+            try:
+                present = os.path.lexists(os.path.join(layout.builds, str(aid)))
+                rmtree_at(rfd, str(aid))
+                removed = present
+            finally:
+                os.close(rfd)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise Operational(f"gagal menghapus build {aid}: {exc.strerror or exc}") from exc
     spool = make_spool(layout.signspool)
     for folder, suffix in ((spool.requests, ".json"), (spool.running, ".json"), (spool.results, ".json"), (spool.cancel, "")):
         try:
@@ -366,7 +427,7 @@ def cmd_clean(layout: Layout, aid: int, bid: int | None) -> None:
             m = JOB_ID_RE.match(stem)
             if m is None or int(m.group(1)) != aid or (bid is not None and int(m.group(2)) != bid):
                 continue
-            removed = _unlink_or_rmtree(folder / name) or removed
+            removed = _unlink_or_rmtree(folder, name) or removed
     print(f"dibersihkan={int(removed)}")
 
 
@@ -407,8 +468,13 @@ def cmd_sign(layout: Layout, aid: int, bid: int, args: argparse.Namespace) -> in
         raise Usage("--expect-ok butuh --owner-sha256 berisi 64 karakter heks")
     if args.expect_error and args.expect_error not in ERROR_CODES:
         raise Usage("--expect-error harus salah satu kode galat signer")
+    expect = args.expect_sha256
+    if expect is not None and not EXPECT_RE.match(expect):
+        raise Usage("--expect-sha256 harus 64 karakter heks huruf kecil")
+    if expect is None:
+        expect = unsigned_sha256(layout, aid, bid)
     try:
-        res = submit_and_wait(make_spool(layout.signspool), aid, bid, timeout=args.timeout)
+        res = submit_and_wait(make_spool(layout.signspool), aid, bid, timeout=args.timeout, expect_sha256=expect)
     except SignerUnavailable as exc:
         raise Operational(_line(exc.message)) from exc
     return _report(res, args.expect_ok, owner, args.expect_error)
