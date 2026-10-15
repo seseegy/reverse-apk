@@ -22,9 +22,11 @@ Semua ukuran/nama dari arsip tak tepercaya: nama hanya dibandingkan dengan nama 
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
+import stat
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +38,32 @@ MAX_LISTED = 20                       # nama split yang dicatat di opsi analisis
 BASE_NAME = "base.apk"                # nama sementara di work/<id>/
 ZIP_MAGIC = b"PK\x03\x04"
 
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
+
+
+# Batas zip: bawaan dan nama env SAMA dengan services/web/app/config.py (tes menjaga kesamaan). Compose hari ini tidak meneruskan ZIP_MAX_*
+# ke web, runner, maupun worker; menaikkan batas berarti mengubah compose di KETIGA layanan (docs/deploy.md).
+ZIP_MAX_ENTRIES = _env_int("ZIP_MAX_ENTRIES", 100_000)
+ZIP_MAX_TOTAL_BYTES = _env_int("ZIP_MAX_UNCOMPRESSED_MB", 3072) * MIB
+ZIP_MAX_ENTRY_BYTES = _env_int("ZIP_MAX_ENTRY_MB", 512) * MIB
+ZIP_MAX_RATIO = _env_int("ZIP_MAX_RATIO", 100)
+BOMB_ENTRY_MIN = 8 * MIB              # rasio per entri hanya dinilai untuk entri >= 8 MiB (sama dengan apkcheck)
+MAX_BUNDLE_APKS = 200                 # FR-9.3: base + 199 split
+MAX_ALIAS_CANDIDATES = 8
+MAX_NAME_BYTES = 255
+UPLOAD_COPY_MAX_RUNNER_MB = 512       # batas salinan memfd upload; runner jauh dari 3 GiB karena salinan diambil sesudah apktool
+UPLOAD_COPY_MAX_WORKER_MB = 256       # worker mem_limit 512m: memfd dihitung ke memori kontainer (ASUMSI, diukur di e2e)
+DROPPED_DIRS = ("standalones/", "instant/", "system/")
+SAI_MARKERS = ("meta.sai_v1.json", "meta.sai_v2.json")
+
+_ALIAS_RE = re.compile(r"^splits/base-master_([0-9]+)\.apk$")
+_GLOB_CHARS = frozenset("*?[]")
 _MASTER_RE = re.compile(r"^(?:splits/)?base-master(?:_(\d+))?\.apk$")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -85,8 +113,8 @@ def _read_json_member(zf: zipfile.ZipFile, name: str) -> object:
         raise BundleError("bad_bundle", f"{name} bukan JSON yang valid.") from exc
 
 
-def _plan_xapk(zf: zipfile.ZipFile, names: list[str], apks: list[str]) -> BundlePlan:
-    manifest = _read_json_member(zf, "manifest.json")
+def _xapk_base(manifest: object, names: list[str], apks: list[str]) -> str:
+    """Pilih base XAPK dari manifest.json yang sudah di-parse (dipakai `plan_bundle` dan `plan_split_set`: satu keputusan)."""
     if not isinstance(manifest, dict):
         raise BundleError("bad_bundle", "manifest.json XAPK bukan objek JSON.")
     base: str | None = None
@@ -110,7 +138,12 @@ def _plan_xapk(zf: zipfile.ZipFile, names: list[str], apks: list[str]) -> Bundle
     # Nama dari manifest hanya diterima bila sama persis dengan entri yang ada: tidak pernah menjadi path.
     if base not in names or not base.lower().endswith(".apk"):
         raise BundleError("bundle_no_base", "manifest.json menunjuk APK base yang tidak ada di dalam arsip.")
-    return BundlePlan(format="xapk", base=base, apks=tuple(apks))
+    return base
+
+
+def _plan_xapk(zf: zipfile.ZipFile, names: list[str], apks: list[str]) -> BundlePlan:
+    manifest = _read_json_member(zf, "manifest.json")
+    return BundlePlan(format="xapk", base=_xapk_base(manifest, names, apks), apks=tuple(apks))
 
 
 def _plan_apks(names: list[str], apks: list[str]) -> BundlePlan:
@@ -134,6 +167,10 @@ def plan_bundle(zf: zipfile.ZipFile) -> BundlePlan:
         raise BundleError("no_manifest", "Bukan APK: AndroidManifest.xml tidak ditemukan di akar arsip.")
     if len(set(names)) != len(names):
         raise BundleError("duplicate_entry", "Arsip berisi entri dengan nama ganda, ditolak.")
+    for info in infos:
+        _check_entry(info)
+    if len(apks) > MAX_BUNDLE_APKS:
+        raise BundleError("bundle_too_many_apks", f"Paket berisi {len(apks)} APK; batasnya {MAX_BUNDLE_APKS} (base + {MAX_BUNDLE_APKS - 1} split).")
     if "toc.pb" in names or "universal.apk" in names or any(_MASTER_RE.match(n) for n in names):
         plan = _plan_apks(names, apks)
     elif "manifest.json" in names:
@@ -141,6 +178,9 @@ def plan_bundle(zf: zipfile.ZipFile) -> BundlePlan:
     elif "info.json" in names:
         raise BundleError("unsupported_bundle", "Ini tampak seperti paket APKM. Format itu belum didukung karena belum pernah diuji pada berkas "
                                                 "asli; unggah base APK, XAPK, atau APKS.")
+    elif any(n in names for n in SAI_MARKERS):
+        raise BundleError("unsupported_bundle", "Ini tampak seperti paket SAI (Split APKs Installer). Format itu tidak didukung; "
+                                                "unggah base APK, XAPK, atau APKS.")
     else:
         raise BundleError("unsupported_bundle", "Ini paket multi-APK dengan susunan yang tidak dikenal (bukan XAPK maupun APKS). "
                                                 "Unggah base APK saja.")
@@ -148,6 +188,252 @@ def plan_bundle(zf: zipfile.ZipFile) -> BundlePlan:
     if info.is_dir() or info.flag_bits & 0x1:
         raise BundleError("bad_bundle", "APK base di dalam paket berupa folder atau terenkripsi; tidak bisa dianalisis.")
     return plan
+
+
+# ---------------------------------------------------------------------------------------------- keselamatan entri
+def _check_entry(info: zipfile.ZipInfo) -> None:
+    """Tolak entri yang tidak pernah boleh ada di paket: bukan berkas biasa/folder (symlink, perangkat, FIFO, soket), nama berisi kontrol atau `\\`,
+    komponen kosong/`.`/`..`, nama > 255 byte UTF-8. Nama tidak pernah menjadi path di sistem ini, tetapi disalin ke paket akhir yang diekstrak
+    alat lain di perangkat pemilik. Mode Unix 0 (zip buatan Windows/Java) diterima sebagai berkas biasa."""
+    name = info.filename
+    mode = info.external_attr >> 16
+    kind = stat.S_IFMT(mode)
+    if kind not in (0, stat.S_IFREG, stat.S_IFDIR):
+        raise BundleError("bundle_unsafe_entry", f"Paket berisi entri yang bukan berkas biasa (symlink/perangkat/FIFO): {_clean(name)!r}.")
+    if _CONTROL_RE.search(name) or "\\" in name:
+        raise BundleError("bundle_unsafe_entry", f"Paket berisi nama entri dengan karakter kontrol atau garis miring terbalik: {_clean(name)!r}.")
+    if len(name.encode("utf-8", "surrogatepass")) > MAX_NAME_BYTES:
+        raise BundleError("bundle_unsafe_entry", "Paket berisi nama entri yang terlalu panjang (> 255 byte).")
+    parts = name[:-1].split("/") if name.endswith("/") else name.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        raise BundleError("bundle_unsafe_entry", f"Paket berisi nama entri dengan komponen kosong atau titik: {_clean(name)!r}.")
+
+
+# ---------------------------------------------------------------------------------------------- rencana set split
+@dataclass(frozen=True)
+class SplitSet:
+    """Hasil `plan_split_set`. Posisi APK = indeks dalam `apk_order` (mulai 0). Murni dari central directory luar."""
+    format: str                           # "xapk" | "apks"
+    base: str                             # nama entri base
+    apk_order: tuple[str, ...]            # semua *.apk kecuali base dan `dropped`, urut central directory
+    alias_candidates: tuple[str, ...]     # APKS: splits/base-master_<n>.apk (n>=2), <= MAX_ALIAS_CANDIDATES; tetap ada di apk_order
+    dropped: tuple[str, ...]              # APKS: *.apk di standalones/|instant/|system/ selain base (tidak ditandatangani, tidak ada di hasil)
+    extras: tuple[str, ...]               # semua entri bukan-.apk (ikon, manifest.json, toc.pb, .obb, folder)
+    plan_sha256: str                      # SHA-256 atas baris "nama\tCRC\tukuran\n" seluruh entri; mendeteksi beda aturan antar kontainer
+    warnings: tuple[str, ...] = ()        # kode peringatan (mis. alias_terlalu_banyak)
+
+
+def plan_split_set(infos: list[zipfile.ZipInfo], manifest_bytes: bytes | None) -> SplitSet:
+    """Rencana set split dari central directory paket LUAR dan manifest.json kecil (<= 1 MiB). Murni: tidak membuka APK bersarang.
+
+    Dipakai runner dan worker atas salinan memfd yang sama (`plan_sha256` harus sama). Lebih ketat dari `plan_bundle` (jalur build, bukan analisis):
+    nama .apk/.obb berglob, duplikat huruf-sama (`casefold`) -> `bundle_unsafe_entry`; XAPK yang menyebut split yang tidak ada -> `split_missing`.
+    """
+    names = [i.filename for i in infos]
+    if len(set(names)) != len(names):
+        raise BundleError("duplicate_entry", "Arsip berisi entri dengan nama ganda, ditolak.")
+    folded = {n.casefold() for n in names}
+    if len(folded) != len(names):
+        raise BundleError("bundle_unsafe_entry", "Paket berisi nama entri yang hanya berbeda huruf besar/kecil; ditolak.")
+    if len(infos) > ZIP_MAX_ENTRIES:
+        raise BundleError("bundle_too_large", "Paket berisi terlalu banyak entri.")
+    for info in infos:
+        _check_entry(info)
+        low = info.filename.lower()
+        if (low.endswith(".apk") or low.endswith(".obb")) and _GLOB_CHARS & set(info.filename):
+            raise BundleError("bundle_unsafe_entry", f"Nama entri .apk/.obb berisi karakter glob (* ? [ ]): {_clean(info.filename)!r}.")
+    apks = [n for n in names if n.lower().endswith(".apk")]
+    if not apks:
+        raise BundleError("bundle_invalid", "Bukan paket multi-APK: tidak ada entri .apk.")
+    if len(apks) > MAX_BUNDLE_APKS:
+        raise BundleError("bundle_too_many_apks", f"Paket berisi {len(apks)} APK; batasnya {MAX_BUNDLE_APKS} (base + {MAX_BUNDLE_APKS - 1} split).")
+    if "AndroidManifest.xml" in names:
+        raise BundleError("bundle_invalid", "Berkas ini APK biasa, bukan paket multi-APK.")
+    warnings: list[str] = []
+    dropped: tuple[str, ...] = ()
+    candidates: tuple[str, ...] = ()
+    if "toc.pb" in names or "universal.apk" in names or any(_MASTER_RE.match(n) for n in names):
+        fmt = "apks"
+        base = _plan_apks(names, apks).base
+        dropped = tuple(n for n in apks if n != base and n.casefold().startswith(DROPPED_DIRS))
+        if base == "splits/base-master.apk":
+            found = [n for n in names if (m := _ALIAS_RE.match(n)) and int(m.group(1)) >= 2]
+            if len(found) > MAX_ALIAS_CANDIDATES:
+                warnings.append("alias_terlalu_banyak")
+            candidates = tuple(found[:MAX_ALIAS_CANDIDATES])
+    elif "manifest.json" in names:
+        fmt = "xapk"
+        if manifest_bytes is None:
+            raise BundleError("bundle_invalid", "manifest.json XAPK tidak diberikan ke perencana.")
+        if len(manifest_bytes) > MAX_MANIFEST_BYTES:
+            raise BundleError("bad_bundle", "manifest.json terlalu besar untuk manifest paket.")
+        try:
+            manifest = json.loads(manifest_bytes.decode("utf-8-sig"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise BundleError("bad_bundle", "manifest.json bukan JSON yang valid.") from exc
+        base = _xapk_base(manifest, names, apks)
+        declared = manifest.get("split_apks") if isinstance(manifest, dict) else None
+        if isinstance(declared, list):
+            nameset = set(names)
+            for d in declared:
+                f = d.get("file") if isinstance(d, dict) else None
+                if isinstance(f, str) and f not in nameset:
+                    raise BundleError("split_missing", f"manifest.json menyebut split yang tidak ada di paket: {_clean(f)!r}.")
+    elif "info.json" in names:
+        raise BundleError("unsupported_bundle", "Ini tampak seperti paket APKM; belum didukung.")
+    else:
+        raise BundleError("unsupported_bundle", "Susunan paket multi-APK tidak dikenal (bukan XAPK maupun APKS).")
+    skip = set(dropped) | {base}
+    order = tuple(n for n in apks if n not in skip)
+    extras = tuple(n for n in names if not n.lower().endswith(".apk"))
+    digest = hashlib.sha256()
+    for i in infos:
+        digest.update(f"{i.filename}\t{i.CRC}\t{i.file_size}\n".encode("utf-8", "surrogatepass"))
+    return SplitSet(fmt, base, order, candidates, dropped, extras, digest.hexdigest(), tuple(warnings))
+
+
+# ---------------------------------------------------------------------------------------------- upload TOCTOU-aman
+_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+class UploadCopy:
+    """Salinan memfd upload yang sudah diverifikasi. `.zip` = SATU ZipFile untuk semua pembacaan (daftar entri, ekstraksi split, extras).
+    Memfd anonim: tidak ada di filesystem mana pun, sehingga tak dapat ditulis web/runner lain; penulisan-di-tempat pada upload asli tak berpengaruh."""
+
+    def __init__(self, memfd: int, size: int, sha256: str) -> None:
+        self.size = size
+        self.sha256 = sha256
+        self._memfd = memfd
+        self.zip: zipfile.ZipFile | None = None
+        try:
+            self.zip = zipfile.ZipFile(os.fdopen(os.dup(memfd), "rb"))
+        except (zipfile.BadZipFile, zipfile.LargeZipFile, NotImplementedError, EOFError, OSError) as exc:
+            self.close()
+            raise BundleError("bundle_invalid", f"Upload bukan arsip ZIP yang valid ({type(exc).__name__}).") from exc
+
+    def close(self) -> None:
+        if self.zip is not None:
+            with contextlib.suppress(Exception):
+                self.zip.close()
+            self.zip = None
+        if self._memfd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(self._memfd)
+            self._memfd = -1
+
+    def __enter__(self) -> "UploadCopy":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+class UploadHandle:
+    """Upload yang sudah DIBUKA SEKALI (nofollow/nonblock, S_ISREG, nlink==1, ukuran <= cap) dan lolos lintasan 1 (hash dari fd == sha).
+    `zipfile()` membaca central directory dari fd itu (gagal-cepat, hanya baca). `copy()` = lintasan 2: salin ke memfd sambil hash ulang."""
+
+    def __init__(self, fd: int, size: int, sha: str, cap: int, on_tick: Callable[[], None] | None) -> None:
+        self._fd, self.size, self.sha256, self._cap, self._tick = fd, size, sha, cap, on_tick
+
+    def _chunks(self) -> Iterator[bytes]:
+        os.lseek(self._fd, 0, os.SEEK_SET)
+        total = 0
+        while True:
+            chunk = os.read(self._fd, MIB)
+            if not chunk:
+                return
+            total += len(chunk)
+            if total > self._cap:
+                raise BundleError("bundle_too_large", f"Upload melebihi batas salinan {self._cap // MIB} MB.")
+            if self._tick:
+                self._tick()
+            yield chunk
+
+    def zipfile(self) -> zipfile.ZipFile:
+        """ZipFile atas duplikat fd lintasan 1 (hanya untuk membaca central directory). Pemanggil menutupnya."""
+        try:
+            return zipfile.ZipFile(os.fdopen(os.dup(self._fd), "rb"))
+        except (zipfile.BadZipFile, zipfile.LargeZipFile, NotImplementedError, EOFError, OSError) as exc:
+            raise BundleError("bundle_invalid", f"Upload bukan arsip ZIP yang valid ({type(exc).__name__}).") from exc
+
+    def copy(self) -> UploadCopy:
+        if not hasattr(os, "memfd_create"):
+            raise BundleError("memfd_unavailable", "memfd_create tidak tersedia; tanpa cadangan ke berkas biasa (gagal-tertutup).")
+        try:
+            mfd = os.memfd_create("upload", getattr(os, "MFD_CLOEXEC", 0))
+        except OSError as exc:
+            raise BundleError("memfd_unavailable", f"memfd_create gagal ({type(exc).__name__}); tanpa cadangan ke berkas biasa.") from exc
+        try:
+            h = hashlib.sha256()
+            size = 0
+            for chunk in self._chunks():
+                h.update(chunk)
+                size += len(chunk)
+                view = memoryview(chunk)
+                while view:
+                    view = view[os.write(mfd, view):]
+            if h.hexdigest() != self.sha256:
+                raise BundleError("bundle_changed", "Isi upload berubah sejak diverifikasi.")
+            os.lseek(mfd, 0, os.SEEK_SET)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(mfd)
+            raise
+        return UploadCopy(mfd, size, self.sha256)        # dari sini UploadCopy pemilik memfd (menutupnya sendiri bila ZIP tak valid)
+
+    def close(self) -> None:
+        if self._fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(self._fd)
+            self._fd = -1
+
+    def __enter__(self) -> "UploadHandle":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+def begin_upload(uploads_dirfd: int, sha: str, cap_bytes: int, on_tick: Callable[[], None] | None = None) -> UploadHandle:
+    """Buka `<sha>.apk` SEKALI lewat `dir_fd` (O_NOFOLLOW|O_NONBLOCK), pastikan berkas reguler, nlink==1, 0 < ukuran <= cap, lalu LINTASAN 1:
+    hash seluruh isi dari fd itu harus == `sha` (gagal-cepat, tidak menulis apa pun). Galat: `bundle_changed` (hilang/hash beda),
+    `bundle_invalid` (sha tak valid, bukan reguler/symlink/FIFO, nlink>1, kosong), `bundle_too_large`."""
+    if not isinstance(sha, str) or not _SHA_RE.match(sha):
+        raise BundleError("bundle_invalid", "Hash upload tidak valid.")
+    try:
+        fd = os.open(f"{sha}.apk", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=uploads_dirfd)
+    except FileNotFoundError as exc:
+        raise BundleError("bundle_changed", "Upload tidak ada lagi di penyimpanan.") from exc
+    except OSError as exc:
+        raise BundleError("bundle_invalid", f"Upload tidak dapat dibuka dengan aman ({type(exc).__name__}).") from exc
+    handle = UploadHandle(fd, 0, sha, cap_bytes, on_tick)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            raise BundleError("bundle_invalid", "Upload bukan berkas biasa dengan satu tautan.")
+        if st.st_size <= 0:
+            raise BundleError("bundle_invalid", "Upload kosong.")
+        if st.st_size > cap_bytes:
+            raise BundleError("bundle_too_large", f"Upload melebihi batas salinan {cap_bytes // MIB} MB.")
+        h = hashlib.sha256()
+        size = 0
+        for chunk in handle._chunks():
+            h.update(chunk)
+            size += len(chunk)
+        if h.hexdigest() != sha:
+            raise BundleError("bundle_changed", "Isi upload tidak sama dengan hash yang diminta.")
+        handle.size = size
+        return handle
+    except BaseException:
+        handle.close()
+        raise
+
+
+def open_upload(uploads_dirfd: int, sha: str, cap_bytes: int, on_tick: Callable[[], None] | None = None) -> UploadCopy:
+    """Lintasan 1 + lintasan 2 berurutan dari satu pembukaan; mengembalikan salinan memfd (`UploadCopy`). Dipakai worker (awal perakitan).
+    Runner memakai `begin_upload` lalu `.copy()` tepat sebelum isi dipakai (setelah apktool)."""
+    with begin_upload(uploads_dirfd, sha, cap_bytes, on_tick) as handle:
+        return handle.copy()
 
 
 # ---------------------------------------------------------------------------------------------- mengekstrak base
