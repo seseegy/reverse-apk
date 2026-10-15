@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import pwd
 import re
 import shutil
 import stat
@@ -30,7 +31,10 @@ MAKEFILE = ROOT / "Makefile"
 KS, PW = "signing_keystore.p12", "signing_keystore_pass"
 ME = os.getuid()
 OTHER = str(ME + 1)  # uid 'kontainer' yang BUKAN pemilik berkas uji
-OWNER = subprocess.run(["stat", "-c", "%U", "/proc/self"], capture_output=True, text=True).stdout.strip() or "UNKNOWN"
+try:
+    OWNER = pwd.getpwuid(ME).pw_name  # nama pemilik berkas uji = nama yang dicetak `stat -c %U` oleh keystore.sh
+except KeyError:
+    OWNER = "UNKNOWN"
 is_root = pytest.mark.skipif(ME != 0, reason="butuh root (chown ke uid lain); dibuktikan di sandbox root, BUKAN dijaga CI non-root")
 
 
