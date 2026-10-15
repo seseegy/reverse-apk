@@ -613,7 +613,8 @@ step10() {
   row OK "$N10" "approve --hold -> cancel -> hasil=cancelled, status cancelled, tanpa folder build"
 }
 step11() {
-  local i ids="" pruned dirs n problem="" first="$BID"
+  local i ids="" pruned dirs n problem="" first="$BID" list item id st donedirs=""
+  local -a items=()
   for i in 1 2; do
     build_once
     case $? in 2) problem="$problem; request ke-$i gagal: $(err_text)"; break ;; 3) problem="$problem; approve ke-$i gagal: $(err_text)"; break ;; esac
@@ -626,16 +627,25 @@ step11() {
   pruned="$(lv pruned)"
   [ "$RC" -eq 0 ] || problem="prune_for gagal: $(printf '%s' "$OUT" | tail -n 2 | tr '\n' ' ')"
   bc status --analysis "$AID"
-  dirs="$(lv build_dirs)"; n="$(lv build_dirs_n)"
-  [ "$n" = 2 ] || problem="$problem; tepat dua folder done seharusnya tersisa, dapat ${n:--} ($dirs)"
-  for i in $ids; do case ",$dirs," in *",$i,"*) ;; *) problem="$problem; folder build $i (terbaru) hilang" ;; esac; done
+  dirs="$(lv build_dirs)"; list="$(lv builds)"; n=0
+  # Retensi menghitung build `done` dan build gagal/batal TERPISAH (store.prune_builds): build gagal (mis. workspace_changed di langkah 9) tetap menyisakan folder
+  # berisi build.log, jadi yang dihitung hanya folder milik build berstatus `done`.
+  IFS=, read -r -a items <<<"$list"
+  for item in ${items[@]+"${items[@]}"}; do
+    id="${item%%:*}"; st="${item#*:}"
+    [ "$st" = done ] || continue
+    n=$((n + 1))
+    case ",$dirs," in *",$id,"*) donedirs="$donedirs${donedirs:+,}$id" ;; *) problem="$problem; build done $id tidak punya folder" ;; esac
+  done
+  [ "$n" = 2 ] || problem="$problem; tepat dua build done seharusnya tersisa, dapat $n (builds=${list:--}; folder=${dirs:--})"
+  for i in $ids; do case ",$donedirs," in *",$i,"*) ;; *) problem="$problem; folder build $i (terbaru) hilang" ;; esac; done
   if [ -n "$first" ]; then
     case ",$dirs," in *",$first,"*) problem="$problem; build tertua $first masih ada di volume" ;; esac
     bc status "$first"
     if [ "$RC" -ne 3 ] || [ "$(lv kode)" != build_tidak_ada ]; then problem="$problem; baris build tertua $first masih ada (harus build_tidak_ada): $(err_text)"; fi
   fi
   if [ -n "$problem" ]; then row GAGAL "$N11" "${problem#; }"; return 1; fi
-  row OK "$N11" "dua build done tambahan ($ids ); prune_for nyata dengan BUILD_KEEP=2 -> pruned=${pruned:--}; tersisa dua folder done ($dirs); build tertua hilang dari volume dan DB; build gagal/batal tidak menggeser done"
+  row OK "$N11" "dua build done tambahan ($ids ); prune_for nyata dengan BUILD_KEEP=2 -> pruned=${pruned:--}; tersisa dua folder done ($donedirs; folder build gagal tidak dihitung); build tertua hilang dari volume dan DB; build gagal/batal tidak menggeser done"
 }
 
 # ------------------------------------------------------------------------------------------------ langkah 12

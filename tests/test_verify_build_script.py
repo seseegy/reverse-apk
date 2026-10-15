@@ -99,7 +99,7 @@ def settle(b):
         b.update(status="failed", error_code="runner_gagal", error_text="apktool gagal", dir=False)
         return
     if b["hash"] != wsh() and not (sc.get("toctou_done") and b["hold"]):
-        b.update(status="failed", error_code="workspace_changed", error_text="pohon berubah", dir=False)
+        b.update(status="failed", error_code="workspace_changed", error_text="pohon berubah", dir=bool(sc.get("failed_keeps_dir")))
         return
     b.update(status="done", dir=True, name=NAME % b["id"], sha=hashlib.sha256(("apk%d" % b["id"]).encode()).hexdigest(), size=4321,
              cert=OWNER, verify_ok=1, flipped=False)
@@ -321,7 +321,8 @@ def main():
             for p in c[c.index("vb-absent") + 1:]:
                 m = re.match(r"/data/builds/\d+/(\d+)(/.*)?$", p)
                 b = bget(int(m.group(1))) if m else None
-                if b is not None and b.get("dir"):
+                # folder build gagal hanya berisi build.log: isi (unsigned.apk, src/) tidak ada; folder build `done` berisi artefak
+                if b is not None and b.get("dir") and (m.group(2) is None or b["status"] == "done"):
                     bad = 1
             if sc.get("absent_fail"):
                 bad = 1
@@ -865,6 +866,16 @@ def test_step_11_runs_the_real_prune_in_a_oneshot_with_build_keep_2(rig):
     argv = pr["argv"]
     assert argv[argv.index("run"):argv.index("run") + 7] == ["run", "--rm", "--no-deps", "-T", "-e", "BUILD_KEEP=2", "worker"]
     assert "builds.prune_for(int(sys.argv[1]))" in argv[-2] and argv[-1] == str(AID)
+
+
+def test_step_11_ignores_the_folder_a_failed_build_keeps(rig):
+    """e2e proses nyata: build gagal (workspace_changed langkah 9) tetap menyisakan folder berisi build.log; retensi menghitung `done` dan gagal terpisah,
+    jadi langkah 11 hanya boleh menghitung folder milik build `done`."""
+    rig.scn(failed_keeps_dir=True)
+    res, rows = run_ok(rig)
+    assert status_of(rows, "9 negatif TOCTOU") == "OK"
+    assert status_of(rows, "11 retensi") == "OK"
+    assert res.returncode == 0
 
 
 def test_step_11_wrong_number_of_surviving_builds_fails(rig):
