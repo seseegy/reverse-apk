@@ -5,6 +5,9 @@ Yang boleh DIBACA  : sistem (/usr, /bin, /lib, /etc, /opt), hasil analisis yang 
 Yang boleh DITULIS : ruang kerja analisis itu (bench/<id>/) dan folder sementara job (/tmp/...).
 DITOLAK            : work/<id>/index (nilai rahasia MENTAH; sama dengan penjelajah folder), analisis lain, db, files, spool, daftar isi /data.
 Semua path dihitung di sini dari `analysis_id` (angka) dan `sha256` (heksa 64): tidak ada path dari web yang dipercaya.
+
+Pohon yang DIBANGUN dan di-diff adalah `$WS/project` (= bench/<id>/project, disalin dari baseline work/<id>/apktool oleh op `init`). `$WS` tetap seluruh
+bench/<id>; aturan RW pada `$WS` sudah mencakup `project/` (Landlock berlaku untuk seluruh pohon di bawahnya), jadi `rules_for` tidak berubah.
 """
 
 from __future__ import annotations
@@ -12,6 +15,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+
+from rvcore.paths import check_proto_id
 
 from .landlock import DEV, RO, RW, Rule
 
@@ -41,6 +46,16 @@ class Dirs:
 
 def workspace(dirs: Dirs, analysis_id: int) -> Path:
     return dirs.bench / str(int(analysis_id))              # int() menolak '/' dan '..'
+
+
+def project_dir(dirs: Dirs, analysis_id: int) -> Path:
+    """Pohon yang dibangun/di-diff: bench/<id>/project. Ketat: hanya int murni 1..MAX_PROTO_ID (op init/diff tidak menerima string atau bool)."""
+    return dirs.bench / str(check_proto_id("analysis_id", analysis_id)) / "project"
+
+
+def base_tree(dirs: Dirs, analysis_id: int) -> Path:
+    """Baseline hasil apktool: work/<id>/apktool (dibaca saja; bench memasang `work` read-only)."""
+    return dirs.work / str(check_proto_id("analysis_id", analysis_id)) / "apktool"
 
 
 def rules_for(dirs: Dirs, analysis_id: int, sha256: str | None, scratch: Path) -> list[Rule]:

@@ -734,3 +734,52 @@ def test_a_successful_command_refreshes_the_marker_at_the_end_too(box):
     r = run(box, "sleep 2.2")
     assert r["status"] == "ok"
     assert mark.stat().st_mtime >= t0 + 2.0, "penanda harus diperbarui di akhir perintah, bukan hanya di awal"
+
+
+# ================================================================================ $WS/project (Tahap 2b): pohon yang dibangun ada di dalam ruang kerja yang boleh ditulis
+def test_policy_project_and_baseline_paths_are_strict_ints_computed_by_bench():
+    dirs = P.Dirs(Path("/data"))
+    assert P.project_dir(dirs, 7) == P.workspace(dirs, 7) / "project" == Path("/data/bench/7/project")
+    assert P.base_tree(dirs, 7) == Path("/data/work/7/apktool")
+    for bad in ("7", "../7", True, 0, -1, 10**9, 7.0, None):
+        for fn in (P.project_dir, P.base_tree):
+            with pytest.raises(ValueError):
+                fn(dirs, bad)
+
+
+def test_policy_makes_ws_project_writable_through_the_workspace_rule_and_never_the_baseline():
+    """`project/` ada di bawah `$WS`: aturan RW pada `$WS` mencakupnya (Landlock berlaku untuk seluruh pohon). Baseline `work/<id>/apktool` hanya RO."""
+    dirs = P.Dirs(Path("/data"))
+    rs = P.rules_for(dirs, 1, SHA, Path("/tmp/s"))
+    rw = [r for r in rs if r.rights == LL.RW]
+    assert [r.path for r in rw if not r.path.startswith("/tmp")] == [str(P.workspace(dirs, 1))]
+    ws = Path(rw[0].path)
+    assert Path(P.project_dir(dirs, 1)).is_relative_to(ws)
+    assert not Path(P.base_tree(dirs, 1)).is_relative_to(ws)
+    base_rules = [r for r in rs if r.path == str(P.base_tree(dirs, 1))]
+    assert base_rules and all(r.rights == LL.RO for r in base_rules)
+    env = P.env_for(dirs, 1, SHA, Path("/tmp/s"), "s1-x")
+    assert env["WS"] == str(P.workspace(dirs, 1)) and "project" not in env["WS"], "$WS tetap bench/<id>; pohon yang dibangun adalah $WS/project"
+
+
+@needs_landlock
+def test_confined_command_builds_inside_ws_project_and_cannot_touch_the_baseline(box):
+    from bench import workspace as W
+    dirs, data = box
+    assert W.op_init(dirs, 64 * 1024 * 1024, 1, False, timeout=30)["created"] is True
+    r = run(box, "mkdir -p $WS/project/res/values $WS/project/smali/a && echo '<r/>' > $WS/project/res/values/x.xml "
+                 "&& sed -i 's/manifest/MANIFEST/' $WS/project/AndroidManifest.xml "
+                 "&& mv $WS/project/res/values/x.xml $WS/project/smali/a/y.xml && cat $WS/project/AndroidManifest.xml && rm -r $WS/project/res")
+    assert r["status"] == "ok" and r["exit_code"] == 0 and "<MANIFEST/>" in r["stdout"], r
+    d = W.op_diff(dirs, 1, timeout=30)
+    assert d["status"] == "ok" and d["counts"] == {"added": 1, "modified": 1, "removed": 0}
+    assert sorted(t["path"] for t in d["top"]) == ["AndroidManifest.xml", "smali/a/y.xml"]
+    assert (data / "work/1/apktool/AndroidManifest.xml").read_text() == "<manifest/>"
+    for cmd in ("echo x > $WORK/apktool/dari-ai.txt", "rm $WORK/apktool/AndroidManifest.xml", "ln -s $WORK/apktool $WS/project/tautan && echo x > $WS/project/tautan/hack.txt",
+                "ln $WORK/apktool/AndroidManifest.xml $WS/project/keras.xml"):
+        r = run(box, cmd)
+        assert not (data / "work/1/apktool/dari-ai.txt").exists() and not (data / "work/1/apktool/hack.txt").exists(), cmd
+        assert (data / "work/1/apktool/AndroidManifest.xml").read_text() == "<manifest/>", cmd
+    after = W.op_diff(dirs, 1, timeout=30)
+    assert after["skipped"]["symlink"] == 1, "symlink yang ditanam AI diabaikan treediff, tidak diikuti"
+    assert after["counts"] == {"added": 1, "modified": 1, "removed": 0}

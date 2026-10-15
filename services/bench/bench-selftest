@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.environ.get("PYTHONPATH", "/app").split(":")[0])
 
-from bench import executor, landlock, netprobe, policy  # noqa: E402
+from bench import executor, landlock, netprobe, policy, workspace  # noqa: E402
 
 failed = False
 UMPAN = "UMPAN-RAHASIA-JANGAN-BOCOR"
@@ -134,6 +134,29 @@ must_block("symlink ke index/ lalu baca", "ln -s $WORK/index $WS/s && cat $WS/s/
 must_block("lewat /proc/self/root", "cat /proc/self/root$WORK/index/findings.jsonl")
 must_block("lewat ..", "cat $WS/../2/catatan.txt")
 must_block("lingkungan daemon (/proc/<ppid>/environ)", "cat /proc/$PPID/environ")
+# --- 3a. $WS/project: op init/diff (Tahap 2b) dan pohon yang dibangun. Op ini dikerjakan daemon (tak terkurung); perintah AI mengubah `project/` di dalam kurungan.
+init1 = workspace.op_init(dirs, limits.workspace_bytes, 1, False, timeout=60)
+report(init1["status"] == "ok" and init1.get("created") is True and (data / "bench/1/project/AndroidManifest.xml").is_file(), "init menyalin baseline ke $WS/project",
+       f"status={init1['status']} created={init1.get('created')} {init1.get('message', '')}")
+(data / "bench/1/project/PEKERJAAN-AI.txt").write_text("jangan ditimpa")
+init2 = workspace.op_init(dirs, limits.workspace_bytes, 1, False, timeout=60)
+report(init2["status"] == "ok" and init2.get("created") is False and (data / "bench/1/project/PEKERJAAN-AI.txt").is_file(), "init kedua TIDAK menimpa pekerjaan di project/",
+       f"created={init2.get('created')} reason={init2.get('reason')}")
+(data / "bench/1/project/PEKERJAAN-AI.txt").unlink()
+d0 = workspace.op_diff(dirs, 1, timeout=60)
+c0 = d0.get("counts") or {}
+report(d0["status"] == "ok" and not any(c0.values()), "diff pohon yang baru di-init kosong", f"status={d0['status']} counts={c0}")
+must_work("perintah terkurung boleh MENULIS di $WS/project (berkas baru + ubah berkas ada dengan sed -i)",
+          "mkdir -p $WS/project/res/values && echo '<resources/>' > $WS/project/res/values/strings.xml && sed -i 's/manifest/MANIFEST/' $WS/project/AndroidManifest.xml "
+          "&& cat $WS/project/AndroidManifest.xml", "<MANIFEST/>")
+must_block("perintah terkurung TIDAK boleh menulis baseline lewat $WORK (pohon yang dibangun hanya $WS/project)", "echo x > $WORK/apktool/dari-ai.txt")
+d1 = workspace.op_diff(dirs, 1, timeout=60)
+c1 = d1.get("counts") or {}
+report(d1["status"] == "ok" and c1 == {"added": 1, "modified": 1, "removed": 0} and d1["diff_sha256"] != d0["diff_sha256"], "diff melihat tepat 1 berkas ditambah dan 1 diubah",
+       f"status={d1['status']} counts={c1}")
+report((data / "work/1/apktool/AndroidManifest.xml").read_text() == "<manifest/>" and not (data / "work/1/apktool/dari-ai.txt").exists(), "baseline work/<id>/apktool tidak berubah")
+report(not os.path.lexists("/data/builds"), "volume bench TIDAK memuat builds", "/data/builds tidak ada" if not os.path.lexists("/data/builds") else "/data/builds ADA di bench")
+
 # Jaringan dari DALAM perintah AI TANPA konfigurasi jaringan (keadaan bawaan). Dua lapis: (1) jaringan internal tanpa rute keluar (cek di atas), (2) Landlock TCP
 # (ABI >= 4). Cek ini hanya bermakna bila lapis 1 terbukti; bila tidak, hasilnya TIDAK membuktikan apa pun tentang Landlock dan ditandai jelas.
 net = run("python3 -c \"import socket; socket.create_connection(('1.1.1.1', 443), timeout=3)\"")

@@ -26,6 +26,8 @@ def safe_rmtree(path: str | os.PathLike[str]) -> None:
     except OSError:
         return
 
+    tried: set[str] = set()
+
     def _onexc(func, failed_path, exc):  # noqa: ANN001
         if isinstance(exc, FileNotFoundError):
             return
@@ -34,6 +36,14 @@ def safe_rmtree(path: str | os.PathLike[str]) -> None:
             os.chmod(failed_path, 0o700)
         except OSError:
             pass
+        if func in (os.open, os.scandir, os.listdir):
+            # Direktori tanpa bit baca (mode 000): rmtree berbasis fd memanggil handler dengan `os.open(nama, flags, dir_fd=)`, jadi `func(failed_path)` di bawah
+            # akan TypeError. Setelah izin diperbaiki, ulangi penghapusan direktori itu dari awal; `tried` mencegah rekursi tak berujung bila chmod tidak berhasil.
+            if failed_path in tried:
+                raise exc
+            tried.add(failed_path)
+            shutil.rmtree(failed_path, onexc=_onexc)
+            return
         func(failed_path)  # bila masih gagal, biarkan exception naik
 
     shutil.rmtree(p, onexc=_onexc)

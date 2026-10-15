@@ -21,12 +21,22 @@ import re
 from pathlib import Path
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+# Id terbesar yang muat di id job spool (pola `\d{1,9}` di spool.py dan shellspool.py): id lebih besar akan dibuang diam-diam oleh `claim_next`.
+# Validator protokol baru menolak lebih awal dengan pesan jelas, regex id job TIDAK diubah.
+MAX_PROTO_ID = 999_999_999
 
 
 def _positive_id(name: str, value: object) -> int:
     """Hanya bilangan bulat positif murni. Menolak bool, str (mis. '../x'), float, bytes, None: id jadi segmen path."""
     if type(value) is not int or value <= 0:
         raise ValueError(f"{name} harus bilangan bulat positif")
+    return value
+
+
+def check_proto_id(name: str, value: object) -> int:
+    """Id untuk protokol spool: `int` murni (bukan bool/str/float), 1..MAX_PROTO_ID. Selain itu ValueError."""
+    if type(value) is not int or not 1 <= value <= MAX_PROTO_ID:
+        raise ValueError(f"{name} harus bilangan bulat 1..{MAX_PROTO_ID}")
     return value
 
 
