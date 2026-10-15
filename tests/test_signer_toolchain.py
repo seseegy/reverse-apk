@@ -234,7 +234,7 @@ def _make_recipe(target: str) -> str:
 def test_makefile_has_signer_targets():
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     phony = next(ln for ln in makefile.splitlines() if ln.startswith(".PHONY:"))
-    for target in ("signer-selftest", "tools-check", "keystore-access"):
+    for target in ("signer-selftest", "signer-verify", "tools-check", "keystore-access"):
         assert re.search(rf"^{target}:.*## ", makefile, re.M), f"{target} harus punya deskripsi `## ` agar muncul di `make help`"
         assert re.search(rf"\b{target}\b", phony), f"{target} harus ada di .PHONY"
     assert "./scripts/keystore.sh access" in _make_recipe("keystore-access") and "--auto" not in _make_recipe("keystore-access")
@@ -256,6 +256,7 @@ def test_makefile_has_signer_targets():
         assert must in recipe, must
     assert "--toolchain-only" not in recipe
     assert "./scripts/tools-check.sh" in _make_recipe("tools-check")
+    assert './scripts/signer-verify.sh' in _make_recipe("signer-verify") and 'COMPOSE="$(COMPOSE)"' in _make_recipe("signer-verify")
 
 
 def test_tools_check_script_is_executable_bash():

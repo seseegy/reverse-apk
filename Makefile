@@ -14,7 +14,7 @@ export COMPOSE_PROFILES := build
 export KEYSTORE_STAMP := $(shell stat -c '%i-%s-%Y' secrets/signing_keystore.p12 secrets/signing_keystore_pass 2>/dev/null | tr '\n' ':')
 endif
 
-.PHONY: help init keystore keystore-info keystore-access password up down restart logs ps update runner-selftest signer-selftest tools-check bench-selftest net-check ai-check env-check doctor test
+.PHONY: help init keystore keystore-info keystore-access password up down restart logs ps update runner-selftest signer-selftest signer-verify tools-check bench-selftest net-check ai-check env-check doctor test
 
 help: ## Tampilkan daftar perintah
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[32m%-16s\033[0m %s\n", $$1, $$2}'
@@ -73,6 +73,9 @@ runner-selftest: ## Uji runner: alat benar-benar bisa bekerja + bukti isolasi (j
 signer-selftest: ## Uji signer: zipalign + apksigner (keystore sementara -> sign -> verify, tes negatif) + bukti isolasi dari dalam kontainer (profil `build`, tidak ikut `make up`)
 	$(COMPOSE) --profile build build signer
 	$(COMPOSE) --profile build run --rm --no-deps signer signer-selftest
+
+signer-verify: ## Bukti end-to-end signer: APK uji ditandatangani dengan keystore pemilik lewat spool + verifikasi independen + negatif + kebocoran sandi (BIG_MB=1000 menambah uji APK besar & memori)
+	@COMPOSE="$(COMPOSE)" ./scripts/signer-verify.sh
 
 tools-check: ## Tabel versi semua alat build (java, apktool, jadx, keytool, zipalign, apksigner) dari image runner & signer, dibandingkan dengan pin
 	@COMPOSE="$(COMPOSE)" ./scripts/tools-check.sh

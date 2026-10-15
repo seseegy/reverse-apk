@@ -12,20 +12,38 @@ Dijalankan lewat `make signer-selftest`, yang memakai opsi isolasi yang sama den
 Opsi `--toolchain-only` melewati HANYA bagian isolasi kontainer (untuk membuktikan jalur fungsional di luar Docker,
 mis. di mesin pengembangan). Makefile/Dockerfile/compose tidak pernah memakainya.
 Keystore dibuat sementara di direktori kerja dan dihapus di akhir; kata sandinya acak dan hanya lewat ENV subprocess.
+
+Bagian kunci pemilik (kedua mode): bila /run/secrets/signing_keystore ada, diperiksa terbaca uid ini, alias reverse-apk bertipe PrivateKeyEntry, sidik jari
+dihitung DUA cara (DER sha256 dan teks keytool -list -v) dan keluaran selftest tidak memuat kata sandi; bila tidak ada -> DILEWATI (bukan gagal).
+Ringkasan akhir: `ringkasan: N OK, M GAGAL, K DILEWATI` (kode keluar 1 hanya bila ada GAGAL).
+
+Dua mode terpisah yang HANYA dipanggil `make signer-verify` (bukan bagian `make signer-selftest`); keluarannya baris `kunci=nilai`, BUKAN JSON:
+  --leak-scan        potret SATU KALI /proc/*/{environ,cmdline}: `diperiksa=N`, `bocor=N`; kode 0 bila bocor=0, 1 bila ada, 2 bila pola tak tersedia.
+  --watch [SEC]      pemotret berkelanjutan (bawaan 600 dtk; tiap ±30 ms) argv/environ semua proses, /tmp/hsperfdata_*/*, dan (cgroup v2) memory.stat/events.
+                     Berhenti oleh SEC habis, EOF pada stdin, atau berkas /tmp/selftest-watch.stop. Kunci (urutan tetap, sekali di akhir): samples,
+                     argv_apksigner, argv_zipalign, argv_keytool, bocor, anon_peak_mib, oom_kill, memory_peak. Kode 0 bila pemotret selesai.
+Pola yang dicari = ISI berkas sandi (/run/secrets/signing_keystore_pass); isinya TIDAK pernah dicetak.
 """
 
+import glob
 import os
 import re
 import secrets
+import select
 import shutil
 import socket
 import struct
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 
+from rvcore.signkeys import ALIAS, ToolResult, inspect_key_file, owner_fingerprint, read_small
+
 failed = False
+counts = {"ok": 0, "gagal": 0, "skip": 0}
+printed: list[str] = []          # semua baris yang dicetak report/skip/info: bukti "keluaran tidak memuat kata sandi"
 
 DEX_MARKER = b"MARKER-DEX"
 KEY_EXT = (".jks", ".keystore", ".p12", ".pfx", ".bks", ".uber", ".p8", ".key")
@@ -38,16 +56,41 @@ DATA_DIR = "/data"
 DATA_NAMES = ("builds", "signspool")
 WRAPPER_FLAGS = ("--enable-native-access=ALL-UNNAMED", "-Xmx256m", "-XX:MaxDirectMemorySize=64m")
 SECRET_ENV = ("API_KEY", "SECRET", "PASSWORD", "TOKEN", "REDIS", "KEYSTORE", "STOREPASS")
+KS_NAME, PASS_NAME = SECRETS_NAMES
+PASS_PATH = os.path.join(SECRETS_DIR, PASS_NAME)
+PROC_ROOT = "/proc"
+CGROUP_ROOT = "/sys/fs/cgroup"
+TMP_ROOT = "/tmp"
+STOP_FILE = "/tmp/selftest-watch.stop"
+WATCH_DEFAULT_SEC = 600
+WATCH_INTERVAL = 0.03
+MIN_PATTERN = 16                 # sandi lebih pendek tak bermakna untuk dicari sebagai substring (positif palsu)
+PROC_READ_LIMIT = 1024 * 1024
+MIB = 1024 * 1024
+SKIP_NO_KEYSTORE = ("tidak ada /run/secrets. Bila secrets/signing_keystore.p12 sudah ada di host, jalankan lewat 'make' (memuat docker-compose.keystore.yml); "
+                    "bila belum, 'make keystore' lalu 'make up'")
+
+
+def emit(line: str) -> None:
+    print(line)
+    printed.append(line)
 
 
 def report(ok: bool, name: str, detail: str = "") -> None:
     global failed
     failed = failed or not ok
-    print(f"[{'OK ' if ok else 'GAGAL'}] {name}" + (f" — {detail}" if detail else ""))
+    counts["ok" if ok else "gagal"] += 1
+    emit(f"[{'OK ' if ok else 'GAGAL'}] {name}" + (f" — {detail}" if detail else ""))
+
+
+def skip(reason: str) -> None:
+    """Pemeriksaan tidak berlaku di sini (bukan gagal): dihitung sebagai DILEWATI di ringkasan dan tidak mengubah kode keluar."""
+    counts["skip"] += 1
+    emit(f"[ -- ] DILEWATI — {reason}")
 
 
 def info(name: str, detail: str = "") -> None:
-    print(f"[ -- ] {name}" + (f" — {detail}" if detail else ""))
+    emit(f"[ -- ] {name}" + (f" — {detail}" if detail else ""))
 
 
 def run(cmd: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
@@ -180,6 +223,239 @@ def check_data_dir(path: str = DATA_DIR) -> tuple[bool, str]:
     return True, "builds dan signspool; akar keduanya dapat ditulis uid " + str(os.geteuid())
 
 
+def _key_home() -> str:
+    home = os.path.join(os.environ.get("HOME", "/tmp/home"), "_key")
+    try:
+        os.makedirs(home, mode=0o700, exist_ok=True)
+    except OSError:
+        pass
+    return home
+
+
+def _keytool_run(argv: list[str], *, deadline: float, home: str, stderr: str = "separate") -> ToolResult:
+    """Adaptor `run` untuk signkeys.owner_fingerprint (kontrak: deadline = time.monotonic() absolut). Kata sandi hanya lewat -storepass:file."""
+    try:
+        proc = subprocess.run(argv, capture_output=True, timeout=max(1.0, deadline - time.monotonic()), stdin=subprocess.DEVNULL,
+                              env={**os.environ, "HOME": str(home)})
+    except subprocess.TimeoutExpired:
+        return ToolResult(None, b"", "tenggat")
+    except OSError as exc:
+        return ToolResult(None, b"", type(exc).__name__)
+    return ToolResult(proc.returncode, proc.stdout, proc.stderr.decode("utf-8", errors="replace")[-300:])
+
+
+def check_keystore(secrets_dir: str = SECRETS_DIR) -> None:
+    """Kunci pemilik di `secrets_dir` (bawaan /run/secrets). Tidak ada keystore -> DILEWATI (instalasi tanpa keystore tetap sah), BUKAN gagal."""
+    p12, passfile = os.path.join(secrets_dir, KS_NAME), os.path.join(secrets_dir, PASS_NAME)
+    first = inspect_key_file(p12, kind="p12")
+    if first.state == "missing":
+        skip(SKIP_NO_KEYSTORE)
+        return
+    euid = os.geteuid()
+    both_ok = True
+    for label, state in ((KS_NAME, first), (PASS_NAME, inspect_key_file(passfile, kind="pass"))):
+        both_ok = both_ok and state.state == "ok"
+        report(state.state == "ok", f"kunci pemilik: {label} berkas biasa (bukan symlink) dan terbaca uid {euid}",
+               "terbaca" if state.state == "ok" else f"{state.state}: {state.detail}")
+    if not both_ok:
+        return
+    home = _key_home()
+    out = run(["keytool", "-list", "-v", "-alias", ALIAS, "-keystore", p12, "-storetype", "PKCS12", "-storepass:file", passfile,
+               "-J-Xmx128m", f"-J-Duser.home={home}", "-J-Duser.language=en"], env={**os.environ, "HOME": home})
+    text = out.stdout or ""
+    entry = re.search(r"(?m)^Entry type:\s*(\S+)", text)
+    entry_type = entry.group(1) if entry else ""
+    if out.returncode != 0:
+        report(False, f"kunci pemilik: keytool -list -v membaca keystore (alias {ALIAS})", tail(out, 1))
+    else:
+        report(entry_type == "PrivateKeyEntry", f"kunci pemilik: alias {ALIAS} bertipe PrivateKeyEntry", f"tipe entri: {entry_type or 'tidak terbaca'}")
+        listed = re.search(r"(?m)^\s*SHA-?256:\s*((?:[0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2})\s*$", text)
+        listed_hex = listed.group(1).replace(":", "").lower() if listed else ""
+        state, value = owner_fingerprint(p12, passfile, _keytool_run, home=home)
+        same = state == "ok" and bool(listed_hex) and value == listed_hex
+        report(same, "kunci pemilik: sidik jari SHA-256 sama dari dua cara (DER -exportcert dan teks -list -v)",
+               f"{value[:12]}…" if same else f"berbeda atau tidak terbaca (DER: {value[:12] if state == 'ok' else state}; teks: {listed_hex[:12] or 'tidak ada'})")
+    check_output_has_no_password(passfile)
+
+
+def load_pattern(pw_path: str | None = None) -> bytes | None:
+    """Isi berkas sandi (tanpa \\r\\n akhir) sebagai pola pencarian; None bila tidak terbaca atau terlalu pendek. Isinya tidak pernah dicetak."""
+    data = read_small(pw_path or PASS_PATH, 258)
+    if data is None:
+        return None
+    pw = data.rstrip(b"\r\n")
+    return pw if len(pw) >= MIN_PATTERN else None
+
+
+def check_output_has_no_password(pw_path: str) -> None:
+    raw = read_small(pw_path, 258)
+    if raw is None:
+        return
+    pattern = load_pattern(pw_path)
+    if pattern is None:
+        skip("keluaran selftest tidak memuat kata sandi: berkas sandi terlalu pendek untuk diperiksa secara bermakna")
+        return
+    report(pattern not in "\n".join(printed).encode("utf-8", errors="replace"), "keluaran selftest tidak memuat kata sandi", f"{len(printed)} baris diperiksa")
+
+
+# ---------------------------------------------------------------- pemindai /proc (--leak-scan, --watch); murni, /proc disuntik untuk tes
+def _pids(proc_root: str) -> list[str]:
+    try:
+        return sorted(n for n in os.listdir(proc_root) if n.isdigit())
+    except OSError:
+        return []
+
+
+def scan_proc(proc_root: str, pattern: bytes) -> tuple[int, list[str]]:
+    """Potret satu kali: (jumlah berkas environ/cmdline yang terbaca, daftar 'pid/berkas' yang memuat pola). Berkas tak terbaca (uid lain) tidak dihitung."""
+    checked, leaks = 0, []
+    for pid in _pids(proc_root):
+        for name in ("environ", "cmdline"):
+            data = read_small(os.path.join(proc_root, pid, name), PROC_READ_LIMIT)
+            if data is None:
+                continue
+            checked += 1
+            if pattern in data:
+                leaks.append(f"{pid}/{name}")
+    return checked, leaks
+
+
+def classify_cmdline(cmdline: bytes) -> set[str]:
+    """Alat penanda tangan apa yang ada di argv ini (apksigner berjalan sebagai JVM: `java ... -jar apksigner.jar`)."""
+    args = [a.decode("utf-8", errors="replace") for a in cmdline.split(b"\0") if a]
+    if not args:
+        return set()
+    base = os.path.basename(args[0])
+    names = {os.path.basename(a) for a in args}
+    found = set()
+    if "apksigner.jar" in names or base == "apksigner" or (base in ("sh", "bash", "dash") and "apksigner" in names):
+        found.add("apksigner")
+    if base == "zipalign":
+        found.add("zipalign")
+    if base == "keytool" or (base == "java" and any(a.endswith("keytool.Main") for a in args)):
+        found.add("keytool")
+    return found
+
+
+def _cgroup_sample(cgroup_root: str) -> tuple[int | None, int | None]:
+    """(anon+shmem dalam byte, oom_kill) dari cgroup v2; None bila tidak terbaca."""
+    anon = oom = None
+    raw = read_small(os.path.join(cgroup_root, "memory.stat"), 64 * 1024)
+    if raw is not None:
+        fields = {}
+        for line in raw.decode("utf-8", errors="replace").splitlines():
+            key, _, value = line.partition(" ")
+            if value.strip().isdigit():
+                fields[key] = int(value)
+        if "anon" in fields:
+            anon = fields["anon"] + fields.get("shmem", 0)
+    raw = read_small(os.path.join(cgroup_root, "memory.events"), 64 * 1024)
+    if raw is not None:
+        for line in raw.decode("utf-8", errors="replace").splitlines():
+            key, _, value = line.partition(" ")
+            if key == "oom_kill" and value.strip().isdigit():
+                oom = int(value)
+    return anon, oom
+
+
+def _stdin_eof(stream) -> bool:  # noqa: ANN001
+    """True bila stdin sudah EOF (ujung tulis FIFO ditutup: skrip pemanggil mati). Tanpa fileno yang valid -> False."""
+    if stream is None:
+        return False
+    try:
+        fd = stream.fileno()
+        ready, _, _ = select.select([fd], [], [], 0)
+        return bool(ready) and os.read(fd, 4096) == b""
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def watch(seconds: float, *, pattern: bytes, proc_root: str | None = None, cgroup_root: str | None = None, tmp_root: str | None = None,
+          stop_file: str | None = None, stdin=None, interval: float = WATCH_INTERVAL, sleep=time.sleep, clock=time.monotonic) -> dict[str, object]:  # noqa: ANN001
+    """Pemotret berkelanjutan. Berhenti oleh `seconds` habis, EOF `stdin`, atau `stop_file`. Selalu mengambil minimal satu sampel.
+    `oom_kill` = selisih terhadap sampel pertama (kejadian SELAMA pemantauan; riwayat lama kontainer tidak dihitung)."""
+    proc_root, cgroup_root = proc_root or PROC_ROOT, cgroup_root or CGROUP_ROOT
+    tmp_root, stop_file = tmp_root or TMP_ROOT, stop_file or STOP_FILE
+    samples = leaked_samples = 0
+    argv_seen = {"apksigner": 0, "zipalign": 0, "keytool": 0}
+    anon_peak: int | None = None
+    oom_first = oom_last = None
+    end = clock() + seconds
+    while True:
+        samples += 1
+        leaked, tools = False, set()
+        for pid in _pids(proc_root):
+            cmd = read_small(os.path.join(proc_root, pid, "cmdline"), PROC_READ_LIMIT)
+            if cmd is not None:
+                leaked = leaked or pattern in cmd
+                tools |= classify_cmdline(cmd)
+            env = read_small(os.path.join(proc_root, pid, "environ"), PROC_READ_LIMIT)
+            leaked = leaked or (env is not None and pattern in env)
+        for path in glob.glob(os.path.join(tmp_root, "hsperfdata_*", "*")):
+            data = read_small(path, PROC_READ_LIMIT)
+            leaked = leaked or (data is not None and pattern in data)
+        leaked_samples += leaked
+        for tool in tools:
+            argv_seen[tool] += 1
+        anon, oom = _cgroup_sample(cgroup_root)
+        if anon is not None:
+            anon_peak = anon if anon_peak is None else max(anon_peak, anon)
+        if oom is not None:
+            oom_first = oom if oom_first is None else oom_first
+            oom_last = oom
+        if clock() >= end or os.path.lexists(stop_file) or _stdin_eof(stdin):
+            break
+        sleep(interval)
+    peak_raw = read_small(os.path.join(cgroup_root, "memory.peak"), 64)
+    peak_txt = peak_raw.strip().decode("ascii", errors="replace") if peak_raw else ""
+    return {
+        "samples": samples, "argv_apksigner": argv_seen["apksigner"], "argv_zipalign": argv_seen["zipalign"], "argv_keytool": argv_seen["keytool"],
+        "bocor": leaked_samples, "anon_peak_mib": "-" if anon_peak is None else anon_peak // MIB,
+        "oom_kill": "-" if oom_last is None else max(0, oom_last - (oom_first or 0)),
+        "memory_peak": f"{int(peak_txt) // MIB} MiB" if peak_txt.isdigit() else "tidak tersedia",
+    }
+
+
+WATCH_KEYS = ("samples", "argv_apksigner", "argv_zipalign", "argv_keytool", "bocor", "anon_peak_mib", "oom_kill", "memory_peak")
+
+
+def watch_verdict(result: dict[str, object]) -> tuple[str, str]:
+    """('OK'|'GAGAL'|'tidak terbukti', alasan). Tanpa satu pun sampel yang melihat argv apksigner, 'tidak ada kebocoran' TIDAK terbukti (bukan OK)."""
+    if int(result["bocor"]) > 0:  # type: ignore[call-overload]
+        return "GAGAL", f"kata sandi terlihat di {result['bocor']} sampel"
+    if int(result["argv_apksigner"]) == 0:  # type: ignore[call-overload]
+        return "tidak terbukti", "pemotret tidak sempat melihat argv alat penanda tangan"
+    return "OK", f"{result['samples']} sampel, argv apksigner teramati {result['argv_apksigner']} kali, tanpa kata sandi"
+
+
+def run_leak_scan(proc_root: str | None = None, pw_path: str | None = None) -> int:
+    pattern = load_pattern(pw_path)
+    if pattern is None:
+        print(f"GALAT: pola tidak tersedia (berkas sandi {pw_path or PASS_PATH} tidak terbaca atau lebih pendek dari {MIN_PATTERN} karakter)", file=sys.stderr)
+        return 2
+    checked, leaks = scan_proc(proc_root or PROC_ROOT, pattern)
+    print(f"diperiksa={checked}")
+    print(f"bocor={len(leaks)}")
+    if leaks:
+        print("kata sandi terlihat di: " + ", ".join(leaks[:10]), file=sys.stderr)
+        return 1
+    return 0
+
+
+def run_watch(seconds: float, *, pw_path: str | None = None, stdin=None, **kwargs) -> int:  # noqa: ANN001, ANN003
+    pattern = load_pattern(pw_path)
+    if pattern is None:
+        print(f"GALAT: pola tidak tersedia (berkas sandi {pw_path or PASS_PATH} tidak terbaca atau lebih pendek dari {MIN_PATTERN} karakter)", file=sys.stderr)
+        return 2
+    result = watch(seconds, pattern=pattern, stdin=stdin, **kwargs)
+    for key in WATCH_KEYS:
+        print(f"{key}={result[key]}")
+    sys.stdout.flush()
+    state, why = watch_verdict(result)
+    print(f"[ -- ] {state} — {why}", file=sys.stderr)
+    return 0
+
+
 def check_isolation() -> None:
     report(os.geteuid() != 0, "bukan root", f"uid={os.geteuid()}")
 
@@ -297,8 +573,26 @@ def _toolchain(work: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     global failed
     failed = False
+    counts.update(ok=0, gagal=0, skip=0)
+    printed.clear()
     args = sys.argv[1:] if argv is None else argv
     toolchain_only = "--toolchain-only" in args
+
+    if "--leak-scan" in args or "--watch" in args:
+        if "--leak-scan" in args and "--watch" in args:
+            print("GALAT: --leak-scan dan --watch tidak boleh dipakai bersamaan", file=sys.stderr)
+            return 64
+        if "--leak-scan" in args:
+            return run_leak_scan()
+        at = args.index("--watch")
+        seconds = WATCH_DEFAULT_SEC
+        if at + 1 < len(args) and not args[at + 1].startswith("--"):
+            if not args[at + 1].isdigit() or int(args[at + 1]) < 1:
+                print("GALAT: --watch butuh bilangan bulat detik > 0", file=sys.stderr)
+                return 64
+            seconds = int(args[at + 1])
+        return run_watch(seconds, stdin=sys.stdin)
+
     os.makedirs(os.environ.get("HOME", "/tmp/home"), exist_ok=True)
 
     check_tools()
@@ -306,7 +600,9 @@ def main(argv: list[str] | None = None) -> int:
         info("bagian isolasi kontainer DILEWATI", "--toolchain-only")
     else:
         check_isolation()
+    check_keystore()
     check_toolchain()
+    print(f"ringkasan: {counts['ok']} OK, {counts['gagal']} GAGAL, {counts['skip']} DILEWATI")
     return 1 if failed else 0
 
 
