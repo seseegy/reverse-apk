@@ -21,7 +21,7 @@ Berjalan di VPS sendiri lewat Docker Compose.
 > (HANYA lewat CLI; tidak ada rute web, tool AI, atau unduhan), `runner` memasang `bench` read-only, signer bekerja di volume privat `signwork` (penutupan R3/R10 di kode). Env baru
 > `TIMEOUT_BUILD`/`TIMEOUT_SIGN`. **FR-9.24 (badging) dan FR-9.41 ditunda ke Tahap 5** — menunggu konfirmasi pemilik (PRD 09); prasyarat Tahap 5: unduh = salin-lalu-hash-lalu-bandingkan.
 > **BELUM DIUJI:** semuanya di Docker/Compose nyata, cgroup, dan RQ/Redis nyata (sandbox memakai `fakeredis`; Docker di sandbox rusak, jadi compose hanya dibuktikan lewat tes yang mem-parse YAML).
-> Detail, tabel mount, dan gejala VPS: [docs/deploy.md](docs/deploy.md#build-apk-tahap-2b-pipeline-bench--runner--signer-status-terbukti-di-sandbox-belum-diuji-di-docker).
+> Bukti satu-perintah di VPS: `make verify-build` (BELUM DIUJI di Docker). Detail, tabel mount, dan gejala VPS: [docs/deploy.md](docs/deploy.md#build-apk-tahap-2b-pipeline-bench--runner--signer-status-terbukti-di-sandbox-belum-diuji-di-docker).
 
 ## Mulai cepat
 ```bash
@@ -33,7 +33,7 @@ make doctor      # periksa kesehatan
 Panduan lengkap untuk VPS: [docs/deploy.md](docs/deploy.md).
 
 ## Perintah
-`make help` menampilkan semuanya: `init`, `keystore` (buat keystore bila belum ada; tidak pernah menimpa), `keystore-info` (sidik jari, tanpa kata sandi), `keystore-access` (pastikan kunci terbaca kontainer signer: `secrets/` 700, berkas 644; hanya `chmod`), `password`, `up`, `down`, `restart`, `logs`, `ps`, `update`, `runner-selftest`, `signer-selftest`, `signer-verify` (bukti end-to-end penandatanganan dengan keystore pemilik; `BIG_MB=1000` menambah APK besar), `tools-check` (tabel versi alat build), `bench-selftest`, `net-check` (shell AI dan jaringannya, lihat `.env.example`), `doctor`, `test`.
+`make help` menampilkan semuanya: `init`, `keystore` (buat keystore bila belum ada; tidak pernah menimpa), `keystore-info` (sidik jari, tanpa kata sandi), `keystore-access` (pastikan kunci terbaca kontainer signer: `secrets/` 700, berkas 644; hanya `chmod`), `password`, `up`, `down`, `restart`, `logs`, `ps`, `update`, `runner-selftest`, `signer-selftest`, `signer-verify` (bukti end-to-end penandatanganan dengan keystore pemilik; `BIG_MB=1000` menambah APK besar), `verify-build` (bukti end-to-end pipeline build 2b: satu tabel OK/GAGAL, membersihkan analisis ujinya sendiri), `tools-check` (tabel versi alat build), `bench-selftest`, `net-check` (shell AI dan jaringannya, lihat `.env.example`), `doctor`, `test`.
 
 Tes (tanpa Docker): `pip install -r services/web/requirements.txt -r tests/requirements.txt` lalu `make test`. CI menjalankannya di setiap PR.
 

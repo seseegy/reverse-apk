@@ -342,7 +342,7 @@ def test_deploy_doc_covers_2b_matrix_symptoms_and_the_stage5_prerequisite():
         assert needle in section, needle
     for volume in ("uploads", "work", "files", "db", "spool", "bench", "benchspool", "builds", "signspool", "signwork"):
         assert f"| `{volume}` |" in section, volume
-    assert "verify-build" not in section  # skrip itu baru ada di FEAT G
+    assert "make verify-build" in section and "VB_STRICT_DIFF" in section and "BELUM DIUJI" in section   # FEAT G: bagian verify-build ada
 
 
 def test_docs_do_not_make_the_wrong_runner_recycle_claim():
@@ -361,4 +361,4 @@ def test_readme_and_audit_state_2b_status_honestly():
     entry = audit.split("### 10.18 ", 1)[1]
     for needle in ("R3", "R10", "R-1", "Belum terbukti", "fakeredis", "RQ nyata", "Docker", "FR-9.24"):
         assert needle in entry, needle
-    assert "verify-build" not in readme.split("Tahap 2b", 1)[1].split("\n## ", 1)[0] and "verify-build" not in entry
+    assert "make verify-build" in readme and "verify-build" not in entry     # README menyebutnya (FEAT G); audit 10.18 ditulis sebelum G
