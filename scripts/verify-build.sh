@@ -334,8 +334,17 @@ step1() {
     row GAGAL "$N1" "'$COMPOSE version' gagal: $(printf '%s' "$ver" | tail -n 2); pasang Docker Compose v2"
     return 1
   fi
+  # Kontainer yang baru dibuat oleh `make up` berstatus `starting` beberapa puluh detik: tunggu (bawaan 90 dtk,
+  # VB_HEALTH_WAIT=0 mematikan). Hanya `starting` yang ditunggu; `unhealthy`/`absen`/`none` langsung GAGAL.
+  local t0 wait_s="${VB_HEALTH_WAIT:-90}"
+  case "$wait_s" in ''|*[!0-9]*) wait_s=90 ;; esac
+  t0=$SECONDS
   for svc in web worker redis runner bench signer; do
     hs="$(health_of "$svc")"
+    while [ "$hs" = starting ] && [ $((SECONDS - t0)) -lt "$wait_s" ]; do
+      sleep 2
+      hs="$(health_of "$svc")"
+    done
     [ "$hs" = healthy ] || bad+=("$svc tidak sehat (status: $hs; make logs)")
   done
   cr runner test -f /app/buildstage.py; [ "$RC" -eq 0 ] || bad+=("image runner lama (tak ada /app/buildstage.py)")
