@@ -454,8 +454,9 @@ def test_tree_limits_during_snapshot_become_tree_too_large(rig, monkeypatch, lim
 def test_unreadable_project_file_fails_closed(rig):
     if os.geteuid() == 0:
         pytest.skip("root mengabaikan izin; dibuktikan sebagai uid 10001 di tes proses nyata")
+    diff = rig.diff()                                    # dihitung SEBELUM berkas dikunci (compute_diff juga gagal tertutup pada berkas tak terbaca)
     os.chmod(rig.project / "res" / "layout" / "main.xml", 0o000)
-    res = rig.run()
+    res = rig.run(diff=diff)
     assert res["error_code"] == "tree_unreadable" and "res/layout/main.xml" in res["error_text"] and str(rig.tmp) not in res["error_text"]
 
 

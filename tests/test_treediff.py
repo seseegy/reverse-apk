@@ -659,7 +659,7 @@ def test_large_tree_is_hashed_and_copied_within_limits_and_hashes_match(tmp_path
 def test_copy_modes_are_deterministic_and_independent_of_umask_and_source_mode(tmp_path):
     src = tmp_path / "src"
     mktree(src, {"plain": "1", "ro": "2", "none": "3", "run": "4", "d/sub/f": "5"}, empty_dirs=("e",))
-    os.chmod(src / "ro", 0o444), os.chmod(src / "none", 0o000), os.chmod(src / "run", 0o700), os.chmod(src / "d", 0o500)
+    os.chmod(src / "ro", 0o444), os.chmod(src / "none", 0o000 if os.geteuid() == 0 else 0o400), os.chmod(src / "run", 0o700), os.chmod(src / "d", 0o500)
     os.utime(src / "plain", (1_000_000_000, 1_000_000_000))
     old = os.umask(0o077)
     try:
