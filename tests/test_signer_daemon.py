@@ -903,6 +903,9 @@ def test_fake_request_path_fields_are_ignored(rig, tmp_path):
     job_id, request = rig.d.SPOOL.claim_next()
     res = rig.d.run_job(job_id, request)
     assert res["ok"] is True and not (tmp_path / "x").exists()
+    # Jalur alat HANYA dari id bilangan bulat (Layout.build_dir), bukan dari bidang request (mutasi M11).
+    first = next(c for c in rig.calls() if c["tool"] == "zipalign")
+    assert str(rig.bdir / "unsigned.apk") in first["argv"] and not any("/etc/" in a or "/tmp/x" in a for c in rig.calls() for a in c["argv"])
 
 
 @pytest.mark.parametrize("make_bad,code", [
@@ -1307,6 +1310,16 @@ def test_run_tool_calls_on_tick_while_waiting(d, tmp_path):
     ticks = []
     res = d.run_tool([str(script)], deadline=time.monotonic() + 10, home=tmp_path / "h", on_tick=lambda: ticks.append(1))
     assert res.status == "done" and len(ticks) >= 3
+
+
+def test_run_tool_puts_the_tool_in_its_own_session_and_process_group(d, tmp_path):
+    """kill_group/sweep_group memakai killpg(proc.pid): alat HARUS pemimpin sesi/grup sendiri, bukan satu grup dengan daemon (mutasi M31b)."""
+    script = tmp_path / "t.py"
+    script.write_text("import os\nprint(os.getpid(), os.getpgid(0), os.getsid(0))\n")
+    res = d.run_tool([sys.executable, str(script)], deadline=time.monotonic() + 20, home=tmp_path / "h", on_tick=lambda: None)
+    pid, pgid, sid = (int(x) for x in res.text().split())
+    assert res.status == "done" and pid == pgid == sid
+    assert pgid != os.getpgid(0) and sid != os.getsid(0)
 
 
 def test_run_tool_sweeps_grandchildren_left_behind_by_a_finished_tool(d, tmp_path):
