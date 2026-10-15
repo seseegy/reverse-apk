@@ -467,6 +467,17 @@ def test_create_validates_diff_summary(conn):
     assert row(conn, ok)["diff_summary"] == "{}"
 
 
+def test_create_rejects_summary_nested_too_deep_without_recursion_error(conn):
+    """NB-1 Tahap 1: json.dumps atas struktur 100.000 tingkat melempar RecursionError (bukan ValueError) dan dulu lolos sebagai 500."""
+    aid = make_done_analysis(conn)
+    deep: dict = {}
+    for _ in range(100_000):
+        deep = {"a": deep}
+    with pytest.raises(store.BuildInputError):
+        store.create_build(conn, aid, requested_by="user", source_kind="apk", diff_sha256=DIFF, diff_summary=deep)
+    assert conn.execute("SELECT COUNT(*) FROM build WHERE analysis_id = ?", (aid,)).fetchone()[0] == 0
+
+
 # ================================================================ 8. teks bebas
 def test_note_is_cleaned_and_truncated(conn):
     aid = make_done_analysis(conn)

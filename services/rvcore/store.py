@@ -935,7 +935,7 @@ def create_build(conn: sqlite3.Connection, analysis_id: int, *, requested_by: st
         raise BuildInputError("Ringkasan diff harus berupa objek.")
     try:
         summary = json.dumps(diff_summary, sort_keys=True, ensure_ascii=False)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):      # struktur sangat dalam: json.dumps melempar RecursionError (NB-1)
         raise BuildInputError("Ringkasan diff tidak bisa diserialisasi.") from None
     if len(summary) > BUILD_SUMMARY_MAX:      # JSON terpotong = rusak, jadi ditolak, bukan dipotong
         raise BuildInputError(f"Ringkasan diff terlalu besar (maksimum {BUILD_SUMMARY_MAX} karakter).")
