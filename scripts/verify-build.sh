@@ -3,7 +3,7 @@
 # independen, ditambah negatif TOCTOU/pembatalan, retensi, dan kebersihan. Satu laporan: tabel `LANGKAH | STATUS | KETERANGAN` (status OK, GAGAL, DILEWATI, INFO).
 # Pemakaian: scripts/verify-build.sh   (lewat `make verify-build`; butuh Docker Compose v2, keystore sudah dibuat, stack sudah `make up`, testdata/vulnsample.apk ada)
 #   BIG_MB=<1..1100>   opsional; hanya dicatat sebagai baris INFO (uji APK besar untuk signer = `BIG_MB=1000 make signer-verify`)
-#   VB_STRICT_DIFF=1   opsional; langkah 8: selisih isi di luar allowlist = GAGAL (bawaan: hanya dilaporkan INFO sampai selisih NYATA diukur)
+#   VB_STRICT_DIFF=0   opsional; langkah 8: selisih isi di luar allowlist hanya INFO (bawaan 1 = GAGAL; allowlist memuat original/META-INF/* hasil ukur nyata)
 # Kode keluar: 0 tidak ada GAGAL; 1 ada GAGAL (atau dihentikan / analisis uji tertinggal); 64 salah pakai.
 #
 # Prinsip: bash di host TIDAK PERNAH mem-parse JSON. Semua keputusan bergantung isi dibuat DI DALAM kontainer (app.buildctl, signer-selftest --check-apk, tamu
@@ -20,7 +20,7 @@ cd "$(dirname "$0")/.." || exit 1
 COMPOSE="${COMPOSE:-docker compose}"
 DOCKER_CMD="${DOCKER_CMD:-docker}"
 BIG_MB="${BIG_MB:-}"
-VB_STRICT_DIFF="${VB_STRICT_DIFF:-0}"
+VB_STRICT_DIFF="${VB_STRICT_DIFF:-1}"
 TIMEOUT_BUILD="${TIMEOUT_BUILD:-1800}"
 TIMEOUT_SIGN="${TIMEOUT_SIGN:-900}"
 APK=testdata/vulnsample.apk
@@ -28,7 +28,7 @@ APK=testdata/vulnsample.apk
 case "${1-}" in
   -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   "") ;;
-  *) echo "✗ pemakaian: scripts/verify-build.sh   (tanpa argumen; opsional BIG_MB=<MiB>, VB_STRICT_DIFF=1)" >&2; exit 64 ;;
+  *) echo "✗ pemakaian: scripts/verify-build.sh   (tanpa argumen; opsional BIG_MB=<MiB>, VB_STRICT_DIFF=0)" >&2; exit 64 ;;
 esac
 if [ -n "$BIG_MB" ]; then
   if ! [[ "$BIG_MB" =~ ^[0-9]+$ ]] || [ "$BIG_MB" -lt 1 ] || [ "$BIG_MB" -gt 1100 ]; then
@@ -156,6 +156,16 @@ from rvcore.fsutil import open_dir_chain
 aid, bid, name, mark, old, asal, dsha, strict = sys.argv[1:9]
 ALLOW = {("M", "res/values/strings.xml"), ("A", "assets/reverse-apk-modified.txt"), ("M", "apktool.yml"), ("M", "original/AndroidManifest.xml")}
 ALLOW_DIRS = {"assets"}     # direktori baru yang hanya menampung berkas allowlist
+# apktool menyalin tanda tangan lama APK asal ke original/META-INF/ (diukur nyata di e2e T-3: MANIFEST.MF, *.RSA, *.SF); namanya bergantung kunci APK asal, jadi awalan.
+META_PREFIX = "original/META-INF"
+
+
+def di_luar(op, p, kind):
+    if (op, p) in ALLOW or (op == "A" and kind == "d" and p in ALLOW_DIRS):
+        return False
+    if op == "A" and (p == META_PREFIX or (p.startswith(META_PREFIX + "/") and ".." not in p.split("/"))):
+        return False
+    return True
 
 
 def kv(key, value):
@@ -190,8 +200,7 @@ try:
         kv("apktool", "treediff gagal: %s" % exc)
         sys.exit(3)
     diffs = [(e[0], e[1], e[2]) for e in entries]
-    outside = [(op, p) for op, p, kind in diffs
-               if (op, p) not in ALLOW and not (op == "A" and kind == "d" and p in ALLOW_DIRS)]
+    outside = [(op, p) for op, p, kind in diffs if di_luar(op, p, kind)]
     with open(os.path.join(out, "res/values/strings.xml"), encoding="utf-8", errors="replace") as fh:
         text = fh.read()
     baru = int(mark in text)
@@ -561,7 +570,7 @@ step8() {
   fi
   row OK "$N8" "app_name = $MARK (nilai lama '$OLD' hilang); jejak memuat asal_sha256 APK uji dan diff_sha256 build; selisih $(lv selisih_n) entri terhadap work/$AID/apktool"
   if [ "$(lv selisih_luar_n)" != 0 ]; then
-    row INFO "8 selisih di luar allowlist" "$(lv selisih_luar_n) entri (mode longgar; VB_STRICT_DIFF=1 menjadikannya GAGAL): ${luar}"
+    row INFO "8 selisih di luar allowlist" "$(lv selisih_luar_n) entri (mode longgar VB_STRICT_DIFF=0; bawaan 1 menjadikannya GAGAL): ${luar}"
   fi
   return 0
 }

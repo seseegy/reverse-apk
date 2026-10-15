@@ -802,12 +802,39 @@ def test_step_8_passes_marker_old_value_provenance_and_strict_flag(rig):
     assert re.fullmatch(r"VB[0-9a-f]{12}", marker)
     assert old == "VulnSample"
     assert re.fullmatch(r"[0-9a-f]{64}", asal) and re.fullmatch(r"[0-9a-f]{64}", dsha)
-    assert strict == "0"
+    assert strict == "1"
 
 
-def test_step_8_strict_mode_is_off_by_default_and_opt_in(rig):
-    res, rows = run_ok(rig, VB_STRICT_DIFF="1")
-    assert rig.kinds("isi")[0]["argv_isi"][-1] == "1"
+def test_step_8_strict_mode_is_on_by_default_and_can_be_disabled(rig):
+    res, rows = run_ok(rig, VB_STRICT_DIFF="0")
+    assert rig.kinds("isi")[0]["argv_isi"][-1] == "0"
+
+
+def _py_isi_allowlist():
+    """Ambil blok ALLOW..di_luar dari heredoc PY_ISI dan eksekusi agar predikat allowlist diuji nyata."""
+    text = (ROOT / "scripts" / "verify-build.sh").read_text(encoding="utf-8")
+    body = text.split("read -r -d '' PY_ISI <<'PYEOF'\n", 1)[1].split("\nPYEOF", 1)[0]
+    block = body[body.index("ALLOW ="):body.index("def kv(")]
+    ns = {}
+    exec(block, ns)
+    return ns["di_luar"]
+
+
+def test_step_8_allowlist_accepts_original_meta_inf_signature_files_added_by_apktool():
+    di_luar = _py_isi_allowlist()
+    for p, kind in (("original/META-INF", "d"), ("original/META-INF/MANIFEST.MF", "f"),
+                    ("original/META-INF/REVERSE-.RSA", "f"), ("original/META-INF/REVERSE-.SF", "f")):
+        assert not di_luar("A", p, kind), p
+
+
+def test_step_8_allowlist_still_rejects_everything_else():
+    di_luar = _py_isi_allowlist()
+    for op, p, kind in (("M", "res/values/public.xml", "f"), ("A", "smali/Evil.smali", "f"), ("M", "AndroidManifest.xml", "f"),
+                        ("D", "original/META-INF/MANIFEST.MF", "f"), ("M", "original/META-INF/MANIFEST.MF", "f"),
+                        ("A", "original/META-INFX/a", "f"), ("A", "original/META-INF/../smali/x", "f"),
+                        ("A", "original/other.dex", "f")):
+        assert di_luar(op, p, kind), (op, p)
+    assert not di_luar("M", "res/values/strings.xml", "f") and not di_luar("A", "assets", "d")
 
 
 def test_step_8_content_failure_is_reported_with_the_container_listing(rig):
@@ -820,7 +847,7 @@ def test_step_8_content_failure_is_reported_with_the_container_listing(rig):
 
 def test_step_8_outside_allowlist_is_info_when_not_strict(rig):
     rig.scn(isi=[0, "apktool=ok\nstrings_baru=1\nstrings_lama=0\njejak_asal=1\njejak_diff=1\nselisih_n=5\nselisih_luar_n=1\nselisih_luar.1=M res/values/public.xml"])
-    res, rows = run_ok(rig)
+    res, rows = run_ok(rig, VB_STRICT_DIFF="0")
     assert res.returncode == 0
     assert status_of(rows, "8 isi artefak") == "OK"
     assert any(v[0] == "INFO" and "public.xml" in v[1] for v in rows.values())
