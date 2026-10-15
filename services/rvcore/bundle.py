@@ -292,6 +292,21 @@ def plan_split_set(infos: list[zipfile.ZipInfo], manifest_bytes: bytes | None) -
     return SplitSet(fmt, base, order, candidates, dropped, extras, digest.hexdigest(), tuple(warnings))
 
 
+def plan_from_zip(zf: zipfile.ZipFile) -> SplitSet:
+    """`plan_split_set` atas sebuah ZipFile (runner: lintasan 1 dan memfd; worker: memfd), membaca `manifest.json` <= 1 MiB bila ada.
+    Satu fungsi untuk semua pemanggil supaya `plan_sha256` sama bila isinya sama."""
+    infos = zf.infolist()
+    first = next((i for i in infos if i.filename == "manifest.json"), None)
+    raw: bytes | None = None
+    if first is not None:
+        try:
+            with zf.open(first) as fh:
+                raw = fh.read(MAX_MANIFEST_BYTES + 1)
+        except (RuntimeError, zipfile.BadZipFile, NotImplementedError, OSError, EOFError) as exc:
+            raise BundleError("bad_bundle", f"manifest.json tidak dapat dibaca ({type(exc).__name__}).") from exc
+    return plan_split_set(infos, raw)
+
+
 # ---------------------------------------------------------------------------------------------- upload TOCTOU-aman
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 

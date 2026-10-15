@@ -13,6 +13,12 @@ Urutan (design.md 6.2 + adendum A-07; setiap langkah menghormati SATU tenggat `s
   6. apktool b   : lewat wrapper produksi (`b` argumen pertama), argv dari allowlist, grup proses sendiri
   7. hasil       : `unsigned.apk` dibuka O_NOFOLLOW|O_NONBLOCK, harus berkas biasa, hash + ukuran dari fd itu
   8. pembersihan : (di `finally`, SEBELUM `Spool.finish`) `src/`, HOME job, dan `unsigned.apk` bila hasilnya bukan ok. `build.log` (<= 64 KiB) tinggal.
+Paket XAPK/APKS (Tahap 3; `req.source_kind` xapk|apks; langkah tambahan HANYA untuk paket, APK tunggal tidak membuka uploads/): setelah langkah 1,
+  1b. upload       : `bundle.begin_upload` (buka-sekali nofollow/nonblock, hash dari fd == sha) -> `plan_from_zip` -> format turunan == `source_kind`, sebelum cek disk
+  2.  cek disk     : + jumlah ukuran terdeklarasi split + split terbesar
+  7b. peringatan   : package/versionCode efektif (pohon teks) dihitung SEBELUM `src/` dihapus; lalu `src/` dibuang
+  7c. split        : salinan memfd upload (lintasan 2, hash ulang), rencana dihitung ulang (harus sama), keputusan alias (`content_digest`), tiap split ->
+                     `.split-NNN.raw` -> `splitzip.strip_signatures` -> `split-NNN.apk` (hash + ukuran dari fd yang sama)
 Runner satu domain kepercayaan dengan penulis `builds/<aid>/<bid>/` (uid sama); pemeriksaan folder di langkah 1 hanya untuk pesan galat yang jelas.
 """
 
@@ -27,12 +33,15 @@ import stat
 import subprocess
 import threading
 import time
+import zipfile
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from rvcore import treediff
-from rvcore.buildproto import ERROR_TEXT, ERROR_TEXT_MAX, LOG_TAIL_MAX, BuildRequest, dump_result
+from rvcore import bundle, splitzip, treediff
+from rvcore.buildproto import BUILD_ERROR_CODES, ERROR_TEXT, ERROR_TEXT_MAX, LOG_TAIL_MAX, BuildRequest, dump_result
+from rvcore.bundle import BundleError
 from rvcore.fsutil import DIR_FLAGS, open_dir_chain, rmtree_at, safe_rmtree, scrub_paths, tree_stats
 from rvcore.paths import Layout
 from rvcore.spool import Spool
@@ -46,6 +55,10 @@ LOG_HEAD = 8 * 1024
 LOG_TAIL = LOG_MAX - LOG_HEAD - len(LOG_MARK)       # kepala + penanda + ekor == tepat 64 KiB
 TRACE_DIR, TRACE_NAME = "assets", "reverse-apk-modified.txt"
 SRC, UNSIGNED, LOG = "src", "unsigned.apk", "build.log"
+SPLIT_RE = re.compile(r"split-\d{3}\.apk(?:\.part)?\Z")
+SPLIT_SCRATCH = (".split-", ".alias-")
+YML_CAP, MANIFEST_CAP = 64 * 1024, 256 * 1024
+_ZIP_ERRORS = (zipfile.BadZipFile, zipfile.LargeZipFile, NotImplementedError, EOFError, RuntimeError, zlib.error)
 OPEN_FILE = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _ERROR_LINE = re.compile(r"(?i)(exception|error|fatal|failed|cannot|unable)")
 # Kode TreeLimitError -> kode galat build.
@@ -80,6 +93,8 @@ class Env:
     tick: float = 0.5
     output_check_every: float = 5.0
     cgroup_peak: str = "/sys/fs/cgroup/memory.peak"
+    upload_cap_bytes: int = bundle.UPLOAD_COPY_MAX_RUNNER_MB * MIB      # batas salinan memfd upload (paket)
+    max_split_bytes: int = 1024 * MIB                                  # byte nyata maksimum satu APK bersarang yang diekstrak
 
 
 class _Ticker:
@@ -226,13 +241,13 @@ def _check_base(layout: Layout, aid: int) -> None:
             os.close(fd)
 
 
-def _check_disk(env: Env, project: Path, build_dir: Path) -> None:
+def _check_disk(env: Env, project: Path, build_dir: Path, extra: int = 0) -> None:
     size, _files, over = tree_stats(project, Limits().max_total_bytes)
     if over:
         raise _failed("tree_too_large", f"{ERROR_TEXT['tree_too_large']} (lebih dari {Limits().max_total_bytes // MIB} MiB)")
     st = os.statvfs(build_dir)
     free = st.f_bavail * st.f_frsize
-    need = 2 * size + RESERVE
+    need = 2 * size + RESERVE + extra
     if free < need:
         raise _failed("no_space", f"Ruang disk tidak cukup: butuh {need // MIB} MiB (2x pohon {size // MIB} MiB + cadangan), bebas {free // MIB} MiB.")
 
@@ -382,6 +397,172 @@ def _peak_mem_mib(path: str) -> int | None:
         return None
 
 
+
+# ------------------------------------------------------------------ paket XAPK/APKS (Tahap 3)
+def _bundle_finish(exc: BundleError) -> _Finish:
+    """BundleError -> hasil akhir. Kode di luar daftar build (mis. `bundle_unsafe_entry`, `bad_bundle`, `duplicate_entry`) -> `bundle_invalid`."""
+    code = exc.code if exc.code in BUILD_ERROR_CODES else "bundle_invalid"
+    return _failed(code, exc.message)
+
+
+def _open_plan(env: Env, req: BuildRequest, ticker: _Ticker) -> tuple[bundle.UploadHandle, bundle.SplitSet, int]:
+    """Langkah 1b: buka upload SEKALI (lintasan 1), rencanakan set split dari central directory, cocokkan format. Mengembalikan (handle, rencana, byte tambahan disk)."""
+    try:
+        ufd = open_dir_chain(env.layout.uploads)
+    except OSError as exc:
+        raise _failed("bundle_changed") from exc
+    try:
+        handle = bundle.begin_upload(ufd, req.sha256, env.upload_cap_bytes, ticker)
+    except BundleError as exc:
+        raise _bundle_finish(exc) from exc
+    finally:
+        os.close(ufd)
+    try:
+        with handle.zipfile() as zf:
+            plan = bundle.plan_from_zip(zf)
+            sizes = {i.filename: i.file_size for i in zf.infolist()}
+        if plan.format != req.source_kind:
+            raise _failed("bad_request", f"{ERROR_TEXT['bad_request']} (isi unggahan berformat {plan.format}, permintaan {req.source_kind})")
+        declared = [sizes[n] for n in plan.apk_order]
+        return handle, plan, sum(declared) + max(declared, default=0)
+    except BundleError as exc:
+        handle.close()
+        raise _bundle_finish(exc) from exc
+    except BaseException:
+        handle.close()
+        raise
+
+
+def _read_text(root: Path, name: str, cap: int, *, truncate: bool) -> str | None:
+    """Berkas teks di akar pohon (nofollow, harus berkas biasa). Lebih dari `cap`: dipotong bila `truncate`, selain itu None. Tak terbaca -> None."""
+    try:
+        dfd = os.open(root, DIR_FLAGS)
+    except OSError:
+        return None
+    try:
+        fd = os.open(name, OPEN_FILE, dir_fd=dfd)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or (st.st_size > cap and not truncate):
+                return None
+            return os.read(fd, cap).decode("utf-8", errors="replace")
+        finally:
+            os.close(fd)
+    except OSError:
+        return None
+    finally:
+        os.close(dfd)
+
+
+def _effective_version(root: Path) -> tuple[str | None, str | None] | None:
+    """(package efektif, versionCode efektif) dari pohon TEKS apktool (tanpa parser XML). `apktool.yml` menang (renameManifestPackage, versionInfo.versionCode),
+    selain itu atribut pada tag `<manifest` pertama. None bila tag tidak ditemukan dalam batas baca."""
+    yml = _read_text(root, "apktool.yml", YML_CAP, truncate=True) or ""
+    manifest = _read_text(root, "AndroidManifest.xml", MANIFEST_CAP, truncate=False)
+    tag = re.search(r"<manifest\b[^>]*>", manifest) if manifest is not None else None
+    if tag is None:
+        return None
+    text = tag.group(0)
+    pkg: str | None = None
+    ren = re.search(r"^renameManifestPackage:[ \t]*(\S+)[ \t]*$", yml, re.M)
+    if ren and ren.group(1).strip("'\"") not in ("", "null"):
+        pkg = ren.group(1).strip("'\"")
+    else:
+        m = re.search(r"\spackage=([\"'])(.*?)\1", text)
+        pkg = m.group(2) if m else None
+    code: str | None = None
+    in_block = False
+    for line in yml.splitlines():
+        if re.match(r"^versionInfo:\s*$", line):
+            in_block = True
+        elif in_block:
+            if not line.strip():
+                continue
+            if not line[0].isspace():
+                in_block = False
+                continue
+            m = re.match(r"^\s+versionCode:\s*['\"]?(\d+)['\"]?\s*$", line)
+            if m:
+                code = m.group(1)
+                break
+    if code is None:
+        m = re.search(r"\sandroid:versionCode=[\"'](\d+)[\"']", text)
+        code = m.group(1) if m else None
+    return pkg, code
+
+
+def _version_warnings(base: Path, src: Path) -> list[str]:
+    """Peringatan non-blokir: split lama merujuk package/versionCode asli, jadi bila base berubah set tak akan terpasang. Atas pohon teks dasar vs snapshot."""
+    before, after = _effective_version(base), _effective_version(src)
+    if before is None or after is None:
+        return ["perbandingan_versi_gagal"]
+    out = []
+    if before[0] != after[0]:
+        out.append("package_berubah")
+    if before[1] != after[1]:
+        out.append("version_code_berubah")
+    return out
+
+
+def _open_zip_at(bfd: int, name: str) -> zipfile.ZipFile:
+    fd = os.open(name, OPEN_FILE, dir_fd=bfd)
+    try:
+        return zipfile.ZipFile(os.fdopen(fd, "rb"))
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
+def _nested(env: Env, bfd: int, zf: zipfile.ZipFile, member: str, raw: str, budget: splitzip.ZipBudget, ticker: _Ticker, use: Callable[[zipfile.ZipFile], Any]) -> Any:
+    """Ekstrak satu APK bersarang ke `raw` (nama dibuat sistem), jalankan `use(ZipFile)` atasnya, lalu hapus `raw` apa pun hasilnya."""
+    try:
+        splitzip.extract_member_at(zf, member, bfd, raw, env.max_split_bytes, ticker, budget)
+        try:
+            with _open_zip_at(bfd, raw) as nz:
+                return use(nz)
+        except _ZIP_ERRORS as exc:
+            raise BundleError("split_invalid", f"APK di dalam paket rusak atau tidak didukung ({type(exc).__name__}).") from exc
+    finally:
+        rmtree_at(bfd, raw)
+
+
+def _make_splits(env: Env, bfd: int, handle: bundle.UploadHandle, plan: bundle.SplitSet, ticker: _Ticker) -> tuple[list[int], list[dict[str, Any]]]:
+    """Langkah 7c. Mengembalikan (posisi alias dalam apk_order, [{index, sha256, size}])."""
+    copy = handle.copy()                                    # lintasan 2: hash ulang ke memfd; semua pembacaan sesudahnya dari sini
+    try:
+        again = bundle.plan_from_zip(copy.zip)
+        if again.plan_sha256 != plan.plan_sha256:
+            raise BundleError("bundle_changed", "Isi unggahan berubah di antara dua pembacaan.")
+        budget = splitzip.ZipBudget()
+        aliases: list[int] = []
+        if plan.alias_candidates:
+            master = _nested(env, bfd, copy.zip, plan.base, ".alias-000.raw", budget, ticker, lambda nz: splitzip.content_digest(nz, budget, ticker))
+            for n, cand in enumerate(plan.alias_candidates, start=1):
+                digest = _nested(env, bfd, copy.zip, cand, f".alias-{n:03d}.raw", budget, ticker, lambda nz: splitzip.content_digest(nz, budget, ticker))
+                if digest != master:
+                    raise BundleError("bundle_invalid", "Ada base-master_N yang isinya berbeda dari base-master; paket tidak bisa dipasang dengan satu base.")
+                aliases.append(plan.apk_order.index(cand))
+        splits: list[dict[str, Any]] = []
+        names = [n for i, n in enumerate(plan.apk_order) if i not in set(aliases)]
+        for k, member in enumerate(names, start=1):
+            ticker()
+            sha, size = _nested(env, bfd, copy.zip, member, f".split-{k:03d}.raw", budget, ticker,
+                                lambda nz, k=k: splitzip.strip_signatures(nz, bfd, f"split-{k:03d}.apk", budget, ticker))
+            splits.append({"index": k, "sha256": sha, "size": size})
+        return aliases, splits
+    finally:
+        copy.close()
+
+
+def _scrub_bundle(bfd: int, *, outputs: bool) -> None:
+    """Buang berkas antara paket (`.split-*`, `.alias-*`) dan, bila `outputs`, juga `split-NNN.apk[.part]`. Nama dari listdir, dihapus lewat dir_fd."""
+    for name in os.listdir(bfd):
+        if name.startswith(SPLIT_SCRATCH) or (outputs and SPLIT_RE.match(name)):
+            rmtree_at(bfd, name)
+
 # ------------------------------------------------------------------ titik masuk
 def run(env: Env, job_id: str, req: BuildRequest) -> dict[str, Any]:
     """Jalankan satu build. Tidak pernah melempar (kecuali KeyboardInterrupt); hasil sudah lolos `dump_result` (<= 8 KiB)."""
@@ -397,6 +578,8 @@ def run(env: Env, job_id: str, req: BuildRequest) -> dict[str, Any]:
     roots = [(str(src), "<proyek>"), (str(project), "<proyek>"), (str(build_dir), "<build>"), (str(base), "<dasar>"), (str(home), "<home>")]
     ticker = _Ticker(env, job_id, deadline)
     stats: treediff.CopyStats | None = None
+    is_bundle = req.source_kind != "apk"
+    handle: bundle.UploadHandle | None = None
     bfd = -1
     log_text = ""
     result: dict[str, Any] = {"status": "failed", "error_code": "internal", "error_text": ERROR_TEXT["internal"]}
@@ -409,7 +592,11 @@ def run(env: Env, job_id: str, req: BuildRequest) -> dict[str, Any]:
             _open_project(layout, aid)
             _check_base(layout, aid)
             ticker()
-            _check_disk(env, project, build_dir)
+            plan: bundle.SplitSet | None = None
+            extra_disk = 0
+            if is_bundle:
+                handle, plan, extra_disk = _open_plan(env, req, ticker)
+            _check_disk(env, project, build_dir, extra_disk)
             os.makedirs(home, mode=0o700, exist_ok=True)
             rmtree_at(bfd, SRC)
             rmtree_at(bfd, UNSIGNED)
@@ -430,6 +617,19 @@ def run(env: Env, job_id: str, req: BuildRequest) -> dict[str, Any]:
                 raise _failed("build_failed", reason if reason else f"apktool keluar dengan kode {rc}")
             sha, size = _open_unsigned(bfd)
             result = {"status": "ok", "output_size": size, "output_sha256": sha, "apktool_log_tail": log_text[-LOG_TAIL_MAX:]}
+            if is_bundle and plan is not None and handle is not None:
+                try:
+                    warnings = _version_warnings(base, src)              # sebelum src/ dihapus (adendum #5)
+                except OSError:
+                    warnings = ["perbandingan_versi_gagal"]
+                rmtree_at(bfd, SRC)
+                aliases, splits = _make_splits(env, bfd, handle, plan, ticker)
+                if plan.dropped:
+                    warnings.append(f"entri_dibuang_n={len(plan.dropped)}")
+                result.update(source_kind=req.source_kind, plan_sha256=plan.plan_sha256, aliases=aliases, splits=splits, warnings=warnings + list(plan.warnings))
+        except BundleError as exc:
+            result = _bundle_finish(exc).result
+            result["apktool_log_tail"] = log_text[-LOG_TAIL_MAX:]
         except _Finish as fin:
             result = fin.result
             result["apktool_log_tail"] = log_text[-LOG_TAIL_MAX:]
@@ -440,6 +640,8 @@ def run(env: Env, job_id: str, req: BuildRequest) -> dict[str, Any]:
             result = {"status": "failed", "error_code": code, "error_text": ERROR_TEXT[code]}
             env.say(f"[{job_id}] WARN galat I/O build ({_errno(exc)})")
     finally:
+        if handle is not None:
+            handle.close()
         # Pembersihan SEBELUM Spool.finish (disk penuh tidak boleh membuat hasil hilang); idempoten, tidak pernah melempar.
         if bfd >= 0:
             try:
@@ -448,6 +650,8 @@ def run(env: Env, job_id: str, req: BuildRequest) -> dict[str, Any]:
                 env.say(f"[{job_id}] WARN build.log tidak dapat ditulis ({_errno(exc)})")
             try:
                 rmtree_at(bfd, SRC)
+                if is_bundle:
+                    _scrub_bundle(bfd, outputs=result.get("status") != "ok")
             except OSError as exc:
                 env.say(f"[{job_id}] WARN pembersihan {SRC} gagal ({_errno(exc)})")
         try:
