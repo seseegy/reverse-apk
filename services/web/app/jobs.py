@@ -27,3 +27,20 @@ def enqueue_analysis(conn: redis.Redis, analysis_id: int, job_timeout: int, only
         failure_ttl=86400,
     )
     return job.id
+
+
+def enqueue_build(conn: redis.Redis, build_id: int, job_timeout: int) -> str:
+    """Kirim `tasks.run_build(build_id)` ke worker (antrean `jobs` yang sama dengan analisis; build mengantre FIFO di belakangnya).
+
+    Worker mengklaim build lewat compare-and-set (queued -> building), jadi job ganda atau job untuk build yang sudah dibatalkan tidak berbahaya.
+    Awalan `build-<id>-` dipakai `approve` (idempoten) dan `worker.builds.requeue_orphans` untuk mengenali build yang sudah punya job."""
+    queue = Queue(QUEUE_NAME, connection=conn)
+    job = queue.enqueue(
+        "tasks.run_build",
+        int(build_id),
+        job_id=f"build-{int(build_id)}-{uuid.uuid4().hex[:8]}",
+        job_timeout=job_timeout,
+        result_ttl=300,
+        failure_ttl=86400,
+    )
+    return job.id

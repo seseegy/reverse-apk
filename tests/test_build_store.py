@@ -798,10 +798,11 @@ def test_audit_records_each_action_without_content(conn):
     assert SECRET not in everything, "audit tidak boleh memuat note, diff_summary, error_text, atau alasan"
     for _a, d in rows:
         assert set(d) <= {"build_id", "analysis_id", "requested_by", "source_kind", "diff_sha256", "statement_version", "statement_sha256",
-                          "error_code", "from_status", "by", "output_sha256", "output_size", "output_format", "cert_sha256"}
+                          "error_code", "from_status", "by", "output_sha256", "output_size", "output_format", "cert_sha256", "via"}
         assert d["build_id"] > 0 and d["analysis_id"] == aid
     approved = dict(rows)["build_approved"]
-    assert approved["diff_sha256"] == DIFF and approved["statement_version"] == 1
+    assert approved["diff_sha256"] == DIFF and approved["statement_version"] == 1 and approved["via"] == "ui"     # FEAT E: saluran persetujuan tercatat (bawaan ui)
+    assert all("via" not in d for a, d in rows if a != "build_approved"), "kunci `via` hanya milik persetujuan"
 
 
 def test_cancel_audit_distinguishes_request_and_executor(conn):

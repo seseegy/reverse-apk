@@ -61,6 +61,9 @@ services:
       FILES_MAX_COUNT: ${FILES_MAX_COUNT:-2000}
       # --- Build APK: jumlah build selesai yang disimpan per analisis (klem 1-100)
       BUILD_KEEP: ${BUILD_KEEP:-10}
+      # --- Build APK: batas waktu, dipakai web hanya untuk menghitung `job_timeout` RQ (TIMEOUT_BUILD + TIMEOUT_SIGN + 600) saat `approve`
+      TIMEOUT_BUILD: ${TIMEOUT_BUILD:-1800}
+      TIMEOUT_SIGN: ${TIMEOUT_SIGN:-900}
       MIN_FREE_GB: ${MIN_FREE_GB:-15}
       JOB_TIMEOUT: ${JOB_TIMEOUT:-2700}
       # --- AI (M4). Kunci hanya masuk ke service web; tidak pernah ke browser, worker, atau runner.
