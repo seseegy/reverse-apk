@@ -37,8 +37,8 @@ BUILD_ERROR_CODES = (
 # Satu kalimat Indonesia per kode. 'bad_result' hanya dibuat pembaca (hasil tidak bisa dipercaya). Aman ditampilkan: tanpa path.
 ERROR_TEXT: dict[str, str] = {
     "bad_request": "Permintaan build tidak valid.",
-    "no_workspace": "Ruang kerja (bench/<analisis>/project) tidak ditemukan; jalankan 'init' lalu ajukan build lagi.",
-    "baseline_missing": "Pohon dasar hasil apktool (work/<analisis>/apktool) tidak ada atau tidak lengkap; analisis ulang diperlukan.",
+    "no_workspace": "Ruang kerja proyek tidak ditemukan; jalankan 'init' lalu ajukan build lagi.",
+    "baseline_missing": "Pohon dasar hasil apktool tidak ada atau tidak lengkap; analisis ulang diperlukan.",
     "tree_too_large": "Pohon proyek melebihi batas ukuran atau jumlah berkas yang boleh dibangun.",
     "tree_unreadable": "Ada berkas atau direktori di pohon proyek yang tidak bisa dibaca (izin), sehingga build dibatalkan.",
     "no_space": "Ruang disk tidak cukup untuk membangun APK ini.",

@@ -19,7 +19,7 @@ RUN pip install -r requirements.txt
 
 COPY rvcore ./rvcore
 COPY worker/worker.py worker/tasks.py worker/healthcheck.py worker/pipeline.py \
-     worker/logtail.py worker/manifest.py worker/findings_import.py worker/signcheck.py ./
+     worker/logtail.py worker/manifest.py worker/findings_import.py worker/signcheck.py worker/builds.py ./
 
 USER 10001:10001
 
