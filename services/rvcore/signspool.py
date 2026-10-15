@@ -6,6 +6,10 @@ Jangan pernah berbagi direktori dengan spool lain: `claim_next` mengklaim apa sa
 Kepercayaan:
   * signer TIDAK mempercayai path dari worker. Request hanya memuat id bilangan bulat (analysis_id, build_id) dan `expect_sha256` (hash `unsigned.apk` yang
     dilaporkan runner); path dihitung signer sendiri lewat `Layout.build_dir`. Bidang lain di request (mis. `path`, `input`, `out`) tidak pernah dibaca.
+  * MULTI-BERKAS (Tahap 3; XAPK/APKS): SATU request = base + 0..199 split (BATCH, bukan satu job per berkas). `splits` = daftar `expect_sha256` per split, urutannya
+    = indeks 1..n; nama berkas (`unsigned.apk`, `split-NNN.apk`, `signed.apk`, `signed-NNN.apk`) dihitung SIGNER dari indeks, TIDAK PERNAH dari request. Hasil
+    semua-atau-tidak-sama-sekali: satu berkas gagal -> tidak ada `signed*.apk`. Semua berkas ditandatangani kunci pemilik yang SAMA (sertifikat tiap berkas dicek).
+    Tanpa `splits` seluruh perilaku 2b tidak berubah.
   * signer menyalin `unsigned.apk` SEKALI dari satu fd ke ruang kerja privatnya (`signwork`), menghitung `input_sha256` dari byte yang disalin, dan MENOLAK
     (`input_unsafe`) sebelum menjalankan alat apa pun bila `input_sha256 != expect_sha256` (berkas ditukar sejak runner selesai). Hasil `ok` memuat `input_sha256`.
   * worker TIDAK mempercayai hasil dari signer (kontainernya memproses APK tak tepercaya). Hasil dibaca dengan `read_small`
@@ -33,12 +37,13 @@ from .spool import Spool
 
 # OPEN_FLAGS diekspor ulang: tes menjaga bahwa signspool memakai SATU konstanta yang sama dengan signkeys untuk semua pembukaan tak tepercaya.
 __all__ = ["OPEN_FLAGS", "read_small", "JOB_ID_RE", "ERROR_CODES", "ERROR_TEXT", "SignerUnavailable", "SignSpool", "make_spool", "new_job_id",
-           "build_sign_request", "validate_request", "parse_result", "read_result", "signer_status", "submit_and_wait"]
+           "build_sign_request", "validate_request", "parse_result", "read_result", "signer_status", "submit_and_wait", "MAX_SPLITS", "SIGN_PER_FILE_S",
+           "sign_timeout", "split_input_name", "split_output_name"]
 
 # Spool memanggil `.match(stem)`: awal terkunci oleh match, akhir oleh \Z. Bukan \d (cocok digit Unicode) dan bukan $ (cocok sebelum '\n').
 JOB_ID_RE = re.compile(r"g([0-9]{1,10})-([0-9]{1,10})-[0-9a-f]{8}\Z")
-MAX_REQUEST_BYTES = 4096
-MAX_RESULT_BYTES = 64 * 1024
+MAX_REQUEST_BYTES = 16 * 1024            # 199 x 67 B (hash heks-64 + tanda baca) ~ 13,3 KiB + ~0,3 KiB bidang lain
+MAX_RESULT_BYTES = 128 * 1024            # hasil 199 split ~ 60 KiB
 MAX_HEARTBEAT_BYTES = 16 * 1024
 HEARTBEAT_STALE_AFTER = 20.0             # detik; signer menulis detak jantung tiap 5 detik
 MAX_ID = 2**31
@@ -46,12 +51,14 @@ MIN_TIMEOUT, MAX_TIMEOUT = 10, 3600
 TEXT_MAX = 300
 OP_SIGN = "sign"
 OUTPUT_NAME = "signed.apk"
+MAX_SPLITS = 199                         # base + 199 split = 200 APK (FR-9.3); WAJIB sama dengan `bundle.MAX_BUNDLE_APKS - 1` (dijaga tes)
+SIGN_PER_FILE_S = 10                     # tambahan tenggat per split; worker dan signer memakai konstanta ini (jangan disalin)
 HEX64_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 ERROR_CODES = frozenset({
     "bad_request", "keystore_missing", "keystore_unreadable", "keystore_invalid", "keystore_stale",
     "input_missing", "input_unsafe", "input_too_large", "no_space", "align_failed", "sign_failed", "verify_failed",
-    "cert_mismatch", "timeout", "cancelled", "aborted", "output_limit", "internal",
+    "cert_mismatch", "timeout", "cancelled", "aborted", "output_limit", "internal", "stale_signature",
 })
 # Satu kalimat per kode; 'bad_result' hanya dibuat pembaca (hasil tidak bisa dipercaya). Aman ditampilkan: tanpa path rahasia.
 ERROR_TEXT: dict[str, str] = {
@@ -73,6 +80,7 @@ ERROR_TEXT: dict[str, str] = {
     "aborted": "Signer dimulai ulang saat penandatanganan berjalan; coba lagi.",
     "output_limit": "Keluaran alat penandatangan melebihi batas dan dihentikan.",
     "internal": "Terjadi galat internal pada signer.",
+    "stale_signature": "Sisa tanda tangan lama (META-INF/*.SF, *.RSA, *.DSA, *.EC, atau MANIFEST.MF) ditemukan pada salah satu split; seluruh set dibuang.",
     "bad_result": "hasil signer rusak",
 }
 
@@ -101,14 +109,50 @@ def _expect_sha(value: Any) -> str:
     return value
 
 
-def build_sign_request(analysis_id: int, build_id: int, timeout: int, expect_sha256: str) -> dict[str, Any]:
-    """Request (sisi pengirim). ValueError untuk str/float/bool/<=0/>=2**31 dan `expect_sha256` selain heks-64 huruf kecil; path TIDAK ikut dikirim."""
-    return {"job_id": new_job_id(analysis_id, build_id), "op": OP_SIGN, "analysis_id": analysis_id, "build_id": build_id,
-            "timeout": _clean_id("timeout", timeout), "expect_sha256": _expect_sha(expect_sha256), "created": time.time()}
+def _splits(value: Any) -> list[str]:
+    """Daftar `expect_sha256` split (urutan = indeks 1..n): list/tuple berisi heks-64 huruf kecil, paling banyak MAX_SPLITS. Duplikat BOLEH (isi dua split bisa sama)."""
+    if type(value) not in (list, tuple):
+        raise ValueError("splits harus berupa daftar")
+    if len(value) > MAX_SPLITS:
+        raise ValueError(f"splits melebihi {MAX_SPLITS} berkas")
+    return [_expect_sha(item) for item in value]
 
 
-def validate_request(job: Any, job_id: str) -> tuple[int, int, int, str]:
-    """Validasi request (sisi signer) -> (analysis_id, build_id, timeout, expect_sha256). ValueError bila tidak valid. Bidang lain DIABAIKAN."""
+def sign_timeout(base: int, n_splits: int) -> int:
+    """Tenggat tanda tangan satu set: `base` + SIGN_PER_FILE_S per split, dijepit ke MAX_TIMEOUT. Dipakai worker (kirim) dan signer (batas sendiri)."""
+    return min(MAX_TIMEOUT, base + SIGN_PER_FILE_S * n_splits)
+
+
+def _index(value: Any) -> int:
+    if type(value) is not int or not 1 <= value <= MAX_SPLITS:
+        raise ValueError(f"indeks split harus bilangan bulat 1..{MAX_SPLITS}")
+    return value
+
+
+def split_input_name(index: int) -> str:
+    """Nama masukan split di folder build: dihitung dari indeks, tidak pernah dari request."""
+    return f"split-{_index(index):03d}.apk"
+
+
+def split_output_name(index: int) -> str:
+    """Nama keluaran split bertanda tangan di folder build: dihitung dari indeks."""
+    return f"signed-{_index(index):03d}.apk"
+
+
+def build_sign_request(analysis_id: int, build_id: int, timeout: int, expect_sha256: str, splits: Any = ()) -> dict[str, Any]:
+    """Request (sisi pengirim). ValueError untuk str/float/bool/<=0/>=2**31 dan `expect_sha256` selain heks-64 huruf kecil; path TIDAK ikut dikirim.
+    `splits` (opsional): `expect_sha256` tiap split berurutan indeks 1..n (<= MAX_SPLITS); kosong -> bidangnya tidak ada (bentuk 2b)."""
+    job = {"job_id": new_job_id(analysis_id, build_id), "op": OP_SIGN, "analysis_id": analysis_id, "build_id": build_id,
+           "timeout": _clean_id("timeout", timeout), "expect_sha256": _expect_sha(expect_sha256), "created": time.time()}
+    items = _splits(splits)
+    if items:
+        job["splits"] = items
+    return job
+
+
+def validate_request(job: Any, job_id: str) -> tuple[int, int, int, str, list[str]]:
+    """Validasi request (sisi signer) -> (analysis_id, build_id, timeout, expect_sha256, splits). ValueError bila tidak valid. Bidang lain DIABAIKAN
+    (termasuk nama/path berkas: nama dihitung signer dari indeks). `splits` ada tetapi bukan daftar heks-64 (<= MAX_SPLITS) -> ValueError; tidak ada -> `[]`."""
     if not isinstance(job, dict) or job.get("job_id") != job_id:
         raise ValueError("job_id tidak cocok")
     m = JOB_ID_RE.match(job_id)
@@ -123,7 +167,9 @@ def validate_request(job: Any, job_id: str) -> tuple[int, int, int, str]:
     timeout = job.get("timeout")
     if type(timeout) is not int:
         raise ValueError("timeout harus bilangan bulat")
-    return aid, bid, max(MIN_TIMEOUT, min(MAX_TIMEOUT, timeout)), _expect_sha(job.get("expect_sha256"))
+    expect = _expect_sha(job.get("expect_sha256"))
+    splits = _splits(job["splits"]) if "splits" in job else []
+    return aid, bid, max(MIN_TIMEOUT, min(MAX_TIMEOUT, timeout)), expect, splits
 
 
 class SignSpool(Spool):
@@ -212,8 +258,32 @@ def _int_or_none(value: Any) -> int | None:
     return value if type(value) is int else None
 
 
+def _parse_splits(raw: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Elemen `splits` hasil signer, dinormalkan; `None` bila tidak koheren. Tanpa bidang `splits` (signer gaya 2b / tanpa split) -> `[]`.
+    Koheren: daftar <= MAX_SPLITS, `index` berurutan 1..n (int murni), tiga hash heks-64, ukuran > 0, v2 dan v3 True, tepat satu penanda tangan (butir #13)."""
+    if "splits" not in raw:
+        return []
+    rows = raw["splits"]
+    if type(rows) is not list or len(rows) > MAX_SPLITS:
+        return None
+    out: list[dict[str, Any]] = []
+    for position, row in enumerate(rows, 1):
+        if not isinstance(row, dict) or type(row.get("index")) is not int or row["index"] != position:
+            return None
+        size = _int_or_none(row.get("output_size"))
+        item = {"index": position, "input_sha256": _hex64(row.get("input_sha256")), "output_sha256": _hex64(row.get("output_sha256")),
+                "output_size": size if size is not None else 0, "cert_sha256": _hex64(row.get("cert_sha256")),
+                "v2": row.get("v2") is True, "v3": row.get("v3") is True, "signer_count": _int_or_none(row.get("signer_count"))}
+        if (None in (item["input_sha256"], item["output_sha256"], item["cert_sha256"]) or item["output_size"] <= 0 or not (item["v2"] and item["v3"])
+                or item["signer_count"] != 1):
+            return None
+        out.append(item)
+    return out
+
+
 def parse_result(raw: Any) -> dict[str, Any]:
-    """Normalkan hasil dari signer (TIDAK TEPERCAYA). Tidak pernah melempar. `ok` benar hanya bila `raw["ok"] is True` DAN koheren."""
+    """Normalkan hasil dari signer (TIDAK TEPERCAYA). Tidak pernah melempar. `ok` benar hanya bila `raw["ok"] is True` DAN koheren
+    (termasuk tiap elemen `splits` bila ada). Hasil selalu memuat `splits` (daftar; `[]` bila tidak ok / tanpa split)."""
     if not isinstance(raw, dict):
         raw = {}
     verify_raw = raw.get("verify") if isinstance(raw.get("verify"), dict) else {}
@@ -228,13 +298,15 @@ def parse_result(raw: Any) -> dict[str, Any]:
         "ok": False, "error_code": None, "error_text": "", "output_name": OUTPUT_NAME,
         "output_size": size if size is not None and size > 0 else 0, "output_sha256": out_sha, "input_sha256": _hex64(raw.get("input_sha256")),
         "cert_sha256": cert,
-        "verify": verify, "signer_count": signers,
+        "verify": verify, "signer_count": signers, "splits": [],
         "elapsed": float(elapsed) if type(elapsed) in (int, float) and math.isfinite(elapsed) and 0 <= elapsed <= 1e7 else 0.0,
     }
     coherent = (out_sha is not None and cert is not None and result["input_sha256"] is not None and result["output_size"] > 0 and signers == 1
                 and verify["v2"] and verify["v3"])
-    if raw.get("ok") is True and coherent:
+    splits = _parse_splits(raw) if raw.get("ok") is True and coherent else None
+    if raw.get("ok") is True and coherent and splits is not None:
         result["ok"] = True
+        result["splits"] = splits
         return result
     code = raw.get("error_code") if isinstance(raw.get("error_code"), str) else None
     if raw.get("ok") is True or code not in ERROR_CODES:      # klaim sukses yang tak koheren / kode di luar daftar -> hasil tak bisa dipercaya
@@ -296,9 +368,10 @@ def _cancelled(text: str) -> dict[str, Any]:
     return parse_result({"ok": False, "error_code": "cancelled", "error_text": text})
 
 
-def submit_and_wait(spool: Spool, analysis_id: int, build_id: int, *, timeout: int, expect_sha256: str, cancel: threading.Event | None = None,
+def submit_and_wait(spool: Spool, analysis_id: int, build_id: int, *, timeout: int, expect_sha256: str, splits: Any = (), cancel: threading.Event | None = None,
                     pickup_timeout: float = 30.0, grace: float = 15.0, poll: float = 0.1) -> dict[str, Any]:
-    """Kirim satu job tanda tangan dan tunggu hasilnya (dinormalkan). Memblokir. Melempar SignerUnavailable bila signer mati/keystore bermasalah/diam.
+    """Kirim satu job tanda tangan (base + `splits` opsional, satu set) dan tunggu hasilnya (dinormalkan). Memblokir. Melempar SignerUnavailable bila
+    signer mati/keystore bermasalah/diam.
 
     Ketahanan (meniru shellspool.run_command): signer mati atau keystore != ok -> gagal CEPAT sebelum mengirim; tidak diambil dalam
     `pickup_timeout` -> ditarik; melewati batas waktu + `grace` -> minta batal lalu menyerah; `cancel` -> batal. Berkas job selalu dibersihkan."""
@@ -309,7 +382,7 @@ def submit_and_wait(spool: Spool, analysis_id: int, build_id: int, *, timeout: i
     if ks["state"] != "ok":
         raise SignerUnavailable(f"Keystore signer belum siap (status: {ks['state'] or 'tidak diketahui'}). {ks['detail']}".strip())
     try:
-        job = build_sign_request(analysis_id, build_id, timeout, expect_sha256)
+        job = build_sign_request(analysis_id, build_id, timeout, expect_sha256, splits)
     except ValueError as exc:
         raise SignerUnavailable(f"Permintaan tidak valid: {exc}.") from exc
     wait_timeout = max(MIN_TIMEOUT, min(MAX_TIMEOUT, timeout))          # signer menjepit timeout ke rentang yang sama

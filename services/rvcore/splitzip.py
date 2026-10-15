@@ -60,6 +60,62 @@ def is_signature_entry(name: str) -> bool:
     return rest == "manifest.mf" or rest.startswith("sig-") or rest.endswith(_SIG_EXTS)
 
 
+def unexpected_signature_entries(names: "Iterable[str]") -> list[str]:
+    """Berkas tanda tangan yang MELANGGAR himpunan boleh keluaran apksigner (satu sumber kebenaran signer-daemon dan `signer-selftest --check-bundle`).
+
+    Boleh: `META-INF/MANIFEST.MF` (satu), paling banyak satu `<N>.SF`, paling banyak satu blok `<N>.RSA|DSA|EC`, semuanya dengan SATU `<N>` yang sama.
+    `SIG-*`, dua nama dasar, atau dua blok = pelanggaran. Bila himpunan tidak boleh, SELURUH berkas tanda tangan dikembalikan (urutan asli); himpunan
+    sah -> `[]`. Entri non-tanda-tangan tidak pernah dilaporkan."""
+    sigs = [n for n in names if is_signature_entry(n)]
+    stems: set[str] = set()
+    kinds: dict[str, int] = {"mf": 0, "sf": 0, "block": 0}
+    for name in sigs:
+        rest = name.casefold()[len("meta-inf/"):]
+        if rest == "manifest.mf":
+            kinds["mf"] += 1
+        elif rest.startswith("sig-"):
+            return sigs
+        else:
+            stem, _, ext = rest.rpartition(".")
+            stems.add(stem)
+            kinds["sf" if ext == "sf" else "block"] += 1
+    if len(stems) > 1 or any(count > 1 for count in kinds.values()):
+        return sigs
+    return []
+
+
+class ZipTooBig(zipfile.BadZipFile):
+    """Pindaian dihentikan SEBELUM central directory dibaca karena melampaui batas jumlah/ukuran (bukan salah-baca)."""
+
+
+_EOCD_TAIL = 65557                      # 22 byte rekaman akhir + komentar <= 65535
+
+
+def checked_entry_names(fd: int, max_entries: int) -> list[str]:
+    """Nama entri dari central directory sebuah berkas ZIP biasa (fd, `pread`; offset fd tidak dipakai) dengan pagar DoS: rekaman akhir (EOCD) dibaca LEBIH DULU
+    dan jumlah entri / ukuran central directory dibandingkan batas SEBELUM `zipfile` memuat semuanya ke memori. Zip64, EOCD tidak ada, atau angka tak masuk akal
+    -> `BadZipFile` (`ZipTooBig` bila melampaui batas); gagal-tertutup, tidak pernah 'dilewati'. Nama ganda TIDAK ditolak di sini (pemanggil memutuskan)."""
+    size = os.fstat(fd).st_size
+    tail_len = min(size, _EOCD_TAIL)
+    tail = os.pread(fd, tail_len, size - tail_len) if tail_len else b""
+    at = tail.rfind(b"PK\x05\x06")
+    if at < 0 or len(tail) - at < 22:
+        raise zipfile.BadZipFile("rekaman akhir ZIP tidak ditemukan")
+    total = int.from_bytes(tail[at + 10:at + 12], "little")
+    cd_size = int.from_bytes(tail[at + 12:at + 16], "little")
+    if total == 0xFFFF or cd_size == 0xFFFFFFFF:
+        raise zipfile.BadZipFile("ZIP64 atau rekaman akhir tak lazim tidak diterima")
+    if total > max_entries:
+        raise ZipTooBig(f"jumlah entri {total} melebihi batas {max_entries}")
+    if cd_size > max_entries * 512 or cd_size > size:
+        raise ZipTooBig("ukuran central directory tak masuk akal")
+    with zipfile.ZipFile(os.fdopen(os.dup(fd), "rb")) as zf:
+        names = zf.namelist()
+    if len(names) > max_entries:
+        raise ZipTooBig(f"jumlah entri {len(names)} melebihi batas {max_entries}")
+    return names
+
+
 def list_entry_names(src: "str | os.PathLike[str] | int | zipfile.ZipFile") -> list[str]:
     """Nama entri dari central directory saja (path, fd int, atau ZipFile). `BadZipFile`/`OSError` dilempar ke pemanggil -> gagal-tertutup."""
     if isinstance(src, zipfile.ZipFile):
@@ -246,4 +302,4 @@ def extract_member_at(zf: zipfile.ZipFile, member: str, dest_dirfd: int, dest_na
                 os.unlink(part, dir_fd=dest_dirfd)
 
 
-__all__: Iterable[str] = ("ZipBudget", "is_signature_entry", "list_entry_names", "strip_signatures", "content_digest", "extract_member_at")
+__all__: Iterable[str] = ("ZipBudget", "is_signature_entry", "unexpected_signature_entries", "checked_entry_names", "ZipTooBig", "list_entry_names", "strip_signatures", "content_digest", "extract_member_at")

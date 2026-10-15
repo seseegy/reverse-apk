@@ -32,6 +32,18 @@ Satu mode lagi, HANYA dipanggil `make verify-build` (Tahap 2b, langkah 7):
                      MELAPORKAN; keputusan (cert == keystore pemilik, sha == DB) ada di skrip pemanggil. Kode keluar 0 semua terukur dan alat lulus; 3 galat/penolakan
                      (`kode=<stabil>` + `alasan=`: berkas_tidak_ada, tidak_terbaca, berubah, verify_gagal, zipalign_gagal, alat_waktu_habis, alat_gagal, internal);
                      64 salah pakai. Id = bilangan bulat 1..999999999; nama harus lolos regex nama keluaran store (`^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$`).
+
+Satu mode lagi untuk paket (Tahap 3, `make verify-build` langkah XAPK/APKS):
+  --check-bundle <analysis_id> <build_id> <nama>
+                     verifikasi independen PAKET `/data/builds/<aid>/<bid>/<nama>.xapk|.apks`: dibuka lewat rantai-dirfd (berkas biasa, nlink==1, tanpa symlink,
+                     FIFO tidak menggantung), tiap entri `*.apk` diekstrak ke subfolder privat `/data/signwork/.check-*` (nama keluaran `e001.apk`, ... dibuat SENDIRI,
+                     TIDAK dari nama entri; dibuka O_EXCL|O_NOFOLLOW lewat dir_fd) lalu `zipalign -c` + `apksigner verify --verbose --print-certs` + pindai sisa tanda
+                     tangan (`sisa_ttd` = berkas tanda tangan di luar himpunan boleh apksigner). Pertahanan paket: jumlah entri/APK, ukuran per entri, total, nama
+                     berbahaya (`..`, absolut, `\\`, kontrol) dan nama ganda ditolak (`kode=bukan_paket`) SEBELUM alat apa pun. Keluaran (urutan tetap, `kunci=nilai`):
+                     format (xapk|apks), entri_apk, lalu per entri N=1..: entri.N.nama, entri.N.signers, entri.N.v2, entri.N.v3, entri.N.cert, entri.N.zipalign (ok|gagal),
+                     entri.N.sisa_ttd; kemudian cert_berbeda (jumlah sertifikat berbeda lintas SEMUA entri; harus 1) dan extras_n (entri bukan APK, tanpa direktori).
+                     Selftest hanya MELAPORKAN; keputusan (cert == keystore pemilik, jumlah/nama == fixture) ada di skrip pemanggil. Kode keluar 0/3/64; 3 dengan
+                     `kode=`: berkas_tidak_ada, bukan_paket, verify_gagal, zipalign_gagal, alat_waktu_habis, alat_gagal, internal.
 """
 
 import errno
@@ -50,8 +62,11 @@ import sys
 import tempfile
 import time
 import zipfile
+import zlib
 
-from rvcore.fsutil import open_dir_chain
+from rvcore import splitzip
+from rvcore.bundle import MAX_BUNDLE_APKS, ZIP_MAX_ENTRIES, ZIP_MAX_ENTRY_BYTES, ZIP_MAX_TOTAL_BYTES
+from rvcore.fsutil import DIR_FLAGS, open_dir_chain, rmtree_at
 from rvcore.paths import MAX_PROTO_ID
 from rvcore.signkeys import ALIAS, ToolResult, inspect_key_file, owner_fingerprint, read_small
 
@@ -574,6 +589,198 @@ def run_check_apk(argv: list[str], *, builds_root: str | None = None) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- --check-bundle (Tahap 3): verifikasi independen paket XAPK/APKS
+BUNDLE_FORMATS = {".xapk": "xapk", ".apks": "apks"}
+BUNDLE_ENTRY_KEYS = ("signers", "v2", "v3", "cert", "zipalign", "sisa_ttd")
+_BAD_NAME_CHARS = re.compile(r"[\x00-\x1f\x7f\\]")
+
+
+def _bundle_name_ok(name: str) -> bool:
+    """Nama entri paket aman: bukan mutlak, tanpa kontrol/backslash, tanpa komponen kosong/`.`/`..` (entri direktori berakhiran `/`). Nama TIDAK pernah menjadi path."""
+    if not name or name.startswith("/") or _BAD_NAME_CHARS.search(name):
+        return False
+    parts = name[:-1].split("/") if name.endswith("/") else name.split("/")
+    return all(part not in ("", ".", "..") for part in parts)
+
+
+def _bundle_plan(fd: int) -> tuple[zipfile.ZipFile, list[zipfile.ZipInfo], int]:
+    """Buka paket dari fd yang sama, validasi seluruh central directory SEBELUM mengekstrak: -> (ZipFile, entri APK berurutan, jumlah extras). CheckFail(bukan_paket)."""
+    try:
+        splitzip.checked_entry_names(fd, ZIP_MAX_ENTRIES)           # pagar DoS: jumlah entri/ukuran CD dibatasi sebelum zipfile memuat semuanya
+        zf = zipfile.ZipFile(os.fdopen(os.dup(fd), "rb"))
+        infos = zf.infolist()
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError, RuntimeError, ValueError, NotImplementedError, EOFError) as exc:
+        raise CheckFail("bukan_paket", f"bukan paket ZIP yang sah ({type(exc).__name__}: {_check_line(exc)})") from None
+    try:
+        if len(infos) > ZIP_MAX_ENTRIES:
+            raise CheckFail("bukan_paket", f"jumlah entri {len(infos)} melebihi batas {ZIP_MAX_ENTRIES}")
+        folded: set[str] = set()
+        apks: list[zipfile.ZipInfo] = []
+        extras = 0
+        for info in infos:
+            if not _bundle_name_ok(info.filename):
+                raise CheckFail("bukan_paket", "ada nama entri yang tidak aman (mutlak, '..', backslash, atau karakter kontrol)")
+            key = info.filename.casefold()
+            if key in folded:
+                raise CheckFail("bukan_paket", "ada nama entri ganda (dilipat huruf)")
+            folded.add(key)
+            if info.is_dir():
+                continue
+            if info.flag_bits & 0x1 or info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                raise CheckFail("bukan_paket", "entri terenkripsi atau berkompresi tak umum")
+            if key.endswith(".apk"):
+                apks.append(info)
+            else:
+                extras += 1
+        if not apks:
+            raise CheckFail("bukan_paket", "paket tidak memuat entri .apk")
+        if len(apks) > MAX_BUNDLE_APKS:
+            raise CheckFail("bukan_paket", f"jumlah APK {len(apks)} melebihi batas {MAX_BUNDLE_APKS}")
+        if any(i.file_size > ZIP_MAX_ENTRY_BYTES for i in apks):
+            raise CheckFail("bukan_paket", "ada APK di dalam paket yang melebihi batas ukuran per entri")
+        if sum(i.file_size for i in apks) > ZIP_MAX_TOTAL_BYTES:
+            raise CheckFail("bukan_paket", "total ukuran APK di dalam paket melebihi batas")
+    except BaseException:
+        zf.close()
+        raise
+    return zf, apks, extras
+
+
+def _extract_apk(zf: zipfile.ZipFile, info: zipfile.ZipInfo, sfd: int, ename: str) -> None:
+    """Ekstrak SATU entri APK ke `ename` (nama buatan sendiri) di subfolder privat: O_EXCL|O_NOFOLLOW 0600 lewat dir_fd; byte nyata tidak boleh melebihi ukuran terdeklarasi."""
+    fd = os.open(ename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=sfd)
+    total = 0
+    try:
+        with zf.open(info) as src:
+            while True:
+                chunk = src.read(CHECK_CHUNK)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > info.file_size:
+                    raise CheckFail("bukan_paket", "isi entri APK melebihi ukuran terdeklarasi")
+                view = memoryview(chunk)
+                while view:
+                    view = view[os.write(fd, view):]
+    except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError) as exc:
+        raise CheckFail("bukan_paket", f"entri APK rusak ({type(exc).__name__})") from None
+    finally:
+        os.close(fd)
+    if total != info.file_size:
+        raise CheckFail("bukan_paket", "isi entri APK lebih pendek dari ukuran terdeklarasi")
+
+
+def _leftover_count(sfd: int, ename: str) -> str:
+    """Jumlah berkas tanda tangan di luar himpunan boleh apksigner pada APK yang diekstrak; `-` bila tak terbaca sebagai ZIP."""
+    try:
+        fd = os.open(ename, CHECK_OPEN_FLAGS, dir_fd=sfd)
+    except OSError:
+        return "-"
+    try:
+        return str(len(splitzip.unexpected_signature_entries(splitzip.checked_entry_names(fd, ZIP_MAX_ENTRIES))))
+    except (zipfile.BadZipFile, OSError, RuntimeError, ValueError):
+        return "-"
+    finally:
+        os.close(fd)
+
+
+def run_check_bundle(argv: list[str], *, builds_root: str | None = None, work_root: str | None = None) -> int:
+    """Lihat docstring modul. `builds_root`/`work_root` hanya untuk tes (bawaan `<DATA_DIR>/builds`, `<DATA_DIR>/signwork`)."""
+    try:
+        if len(argv) != 3:
+            raise CheckUsage("pemakaian: signer-selftest --check-bundle <analysis_id> <build_id> <nama>")
+        aid, bid, name = _check_id("analysis_id", argv[0]), _check_id("build_id", argv[1]), argv[2]
+        if not OUTPUT_NAME_RE.fullmatch(name):
+            raise CheckUsage("nama berkas harus lolos ^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")
+    except CheckUsage as exc:
+        print(f"GALAT: {exc}", file=sys.stderr)
+        return 64
+    root = builds_root if builds_root is not None else os.path.join(DATA_DIR, "builds")
+    work = work_root if work_root is not None else os.path.join(DATA_DIR, "signwork")
+    fmt = BUNDLE_FORMATS.get(os.path.splitext(name)[1])
+    dfd = fd = wfd = sfd = -1
+    sub: str | None = None
+    zf: zipfile.ZipFile | None = None
+    header: list[tuple[str, str]] = []
+    entries: list[dict[str, str]] = []
+    tail: list[tuple[str, str]] = []
+    failure: CheckFail | None = None
+    try:
+        if fmt is None:
+            raise CheckFail("bukan_paket", "nama paket harus berakhiran .xapk atau .apks")
+        dfd, fd = _open_apk(root, aid, bid, name)
+        if os.fstat(fd).st_nlink != 1:
+            raise CheckFail("bukan_paket", "paket punya tautan keras lain (nlink != 1)")
+        zf, apks, extras = _bundle_plan(fd)
+        header = [("format", fmt), ("entri_apk", str(len(apks)))]
+        try:
+            wfd = os.open(work, DIR_FLAGS)
+        except OSError as exc:
+            raise CheckFail("internal", f"ruang kerja signwork tidak bisa dibuka ({errno.errorcode.get(exc.errno or 0, 'galat')})") from None
+        fresh = ".check-" + secrets.token_hex(8)
+        try:
+            os.mkdir(fresh, 0o700, dir_fd=wfd)                              # sudah ada (EEXIST, termasuk symlink) -> gagal-tertutup, TIDAK dihapus/dipakai
+        except OSError as exc:
+            raise CheckFail("internal", f"subfolder kerja tidak bisa dibuat ({errno.errorcode.get(exc.errno or 0, 'galat')})") from None
+        sub = fresh
+        try:
+            sfd = os.open(sub, DIR_FLAGS, dir_fd=wfd)
+        except OSError as exc:
+            raise CheckFail("internal", f"subfolder kerja tidak bisa dibuka ({errno.errorcode.get(exc.errno or 0, 'galat')})") from None
+        certs: set[str] = set()
+        for n, info in enumerate(apks, 1):
+            ename = f"e{n:03d}.apk"
+            _extract_apk(zf, info, sfd, ename)
+            path = os.path.join(work, sub, ename)
+            a_rc, _ = _run_tool(["zipalign", "-c", "-P", "16", "4", path])
+            v_rc, v_text = _run_tool(["apksigner", "verify", "--verbose", "--print-certs", path])
+            schemes = {m.group(1): m.group(2) == "true" for m in _CHECK_SCHEME_RE.finditer(v_text)}
+            count = _CHECK_SIGNERS_RE.search(v_text)
+            digests = sorted({m.group(1).lower() for m in _CHECK_DIGEST_RE.finditer(v_text)})
+            certs.update(digests)
+            entries.append({"nama": info.filename, "signers": count.group(1) if count else "-", "v2": "1" if schemes.get("2") else "0",
+                            "v3": "1" if schemes.get("3") else "0", "cert": ",".join(digests) or "-", "zipalign": "ok" if a_rc == 0 else "gagal",
+                            "sisa_ttd": _leftover_count(sfd, ename)})
+            os.unlink(ename, dir_fd=sfd)                                   # puncak disk = satu APK, bukan jumlahnya
+            if failure is None and a_rc != 0:
+                failure = CheckFail("zipalign_gagal", f"zipalign -c kode {a_rc} pada entri {n}")
+            elif failure is None and v_rc != 0:
+                failure = CheckFail("verify_gagal", f"apksigner verify kode {v_rc} pada entri {n}")
+        tail = [("cert_berbeda", str(len(certs))), ("extras_n", str(extras))]
+    except CheckFail as exc:
+        failure = exc
+    except Exception as exc:  # noqa: BLE001 - mode ini tidak boleh menumpahkan traceback; jenis galat saja
+        failure = CheckFail("internal", type(exc).__name__)
+    finally:
+        if zf is not None:
+            zf.close()
+        if sfd >= 0:
+            os.close(sfd)
+        if wfd >= 0:
+            if sub is not None:
+                try:
+                    rmtree_at(wfd, sub)
+                except OSError:
+                    pass
+            os.close(wfd)
+        for h in (fd, dfd):
+            if h >= 0:
+                os.close(h)
+    for key, value in header:
+        print(f"{key}={_check_line(value)}")
+    for n, entry in enumerate(entries, 1):
+        print(f"entri.{n}.nama={_check_line(entry['nama'])}")
+        for key in BUNDLE_ENTRY_KEYS:
+            print(f"entri.{n}.{key}={_check_line(entry[key])}")
+    for key, value in tail:
+        print(f"{key}={_check_line(value)}")
+    if failure is not None:
+        print(f"kode={failure.kode}")
+        print(f"alasan={_check_line(failure.alasan)}")
+        return 3
+    return 0
+
+
 def run_leak_scan(proc_root: str | None = None, pw_path: str | None = None) -> int:
     pattern = load_pattern(pw_path)
     if pattern is None:
@@ -726,10 +933,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if "--check-apk" in args:
         at = args.index("--check-apk")
-        if any(a in args for a in ("--leak-scan", "--watch", "--toolchain-only")):
+        if any(a in args for a in ("--leak-scan", "--watch", "--toolchain-only", "--check-bundle")):
             print("GALAT: --check-apk tidak boleh dipakai bersama mode lain", file=sys.stderr)
             return 64
         return run_check_apk(args[at + 1:])
+
+    if "--check-bundle" in args:
+        at = args.index("--check-bundle")
+        if any(a in args for a in ("--leak-scan", "--watch", "--toolchain-only")):
+            print("GALAT: --check-bundle tidak boleh dipakai bersama mode lain", file=sys.stderr)
+            return 64
+        return run_check_bundle(args[at + 1:])
 
     if "--leak-scan" in args or "--watch" in args:
         if "--leak-scan" in args and "--watch" in args:

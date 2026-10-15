@@ -338,6 +338,8 @@ services:
       DATA_DIR: /data
       SIGN_TIMEOUT: ${SIGN_TIMEOUT:-900}
       SIGN_MAX_MB: ${SIGN_MAX_MB:-1100}
+      # Tahap 3 (XAPK/APKS): batas jumlah byte SEMUA berkas satu permintaan tanda tangan (base + split); SIGN_MAX_MB tetap batas per berkas.
+      SIGN_MAX_TOTAL_MB: ${SIGN_MAX_TOTAL_MB:-3072}
     volumes:
       - builds:/data/builds
       - signspool:/data/signspool
