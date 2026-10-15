@@ -162,3 +162,203 @@ def test_same_matrix_holds_under_a_real_yaml_parser():
     assert sorted(doc["volumes"]) == sorted({v for m in MATRIX.values() for v in m})
     assert doc["services"]["runner"]["tmpfs"] == ["/tmp:rw,size=256m,nosuid", "/opt/aapt-exec:rw,exec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0755"]
     assert doc["services"]["runner"]["network_mode"] == "none" and doc["services"]["runner"]["read_only"] is True
+
+
+# ================================================================================ FEAT F: invarian final (parser YAML, env, Dockerfile, dokumen)
+# Bagian ini MEM-PARSE YAML sungguhan (PyYAML ada di tests/requirements.txt sejak FEAT F; tanpa PyYAML tes dilewati, sehingga CI WAJIB memasangnya). Docker/Compose
+# rusak di sandbox dan tidak dipakai: `docker compose config` BELUM DIUJI; yang dibuktikan di sini hanya isi berkas.
+@pytest.fixture(scope="module")
+def doc():
+    yaml = pytest.importorskip("yaml")
+    return yaml.safe_load(COMPOSE)
+
+
+@pytest.fixture(scope="module")
+def merged():
+    """Compose dasar + berkas tambahan keystore, digabung per layanan seperti Compose (kunci layanan ditimpa/ditambah, secrets top-level digabung)."""
+    yaml = pytest.importorskip("yaml")
+    base = yaml.safe_load(COMPOSE)
+    extra = yaml.safe_load((ROOT / "docker-compose.keystore.yml").read_text(encoding="utf-8"))
+    for svc, over in extra["services"].items():
+        base["services"][svc].update(over)
+    base["secrets"].update(extra["secrets"])
+    return base
+
+
+USER_10001 = ("runner", "bench", "signer")
+# Hardening yang HARUS tetap, per layanan (nilai persis dari berkas; turun/berubah = gagal).
+LIMITS = {
+    "caddy": {"mem_limit": "256m"},
+    "web": {"mem_limit": "512m", "pids_limit": 256},
+    "worker": {"mem_limit": "512m", "pids_limit": 256},
+    "redis": {"mem_limit": "320m"},
+    "runner": {"mem_limit": "3g", "cpus": 2, "pids_limit": 512},
+    "bench": {"mem_limit": "1g", "cpus": 1, "pids_limit": 512},
+    "egress": {"mem_limit": "256m", "cpus": 0.5, "pids_limit": 128},
+    "signer": {"mem_limit": "512m", "cpus": 1, "pids_limit": 128},
+}
+
+
+def test_yaml_hardening_every_service_keeps_its_limits_and_privileges(doc):
+    svcs = doc["services"]
+    assert sorted(svcs) == sorted(LIMITS)
+    for name, s in svcs.items():
+        assert s["init"] is True and s["restart"] == "unless-stopped", name
+        assert s["security_opt"] == ["no-new-privileges:true"], name
+        assert s["cap_drop"] == ["ALL"], name
+        for key, val in LIMITS[name].items():
+            assert s[key] == val, (name, key)
+        assert not {"privileged", "devices", "pid", "ipc", "cgroup_parent", "extra_hosts", "dns", "sysctls", "ulimits", "userns_mode", "uts"} & set(s), name
+        assert s.get("read_only") is (None if name == "redis" else True), name
+        assert ("cap_add" in s) == (name == "caddy"), name
+    assert svcs["caddy"]["cap_add"] == ["NET_BIND_SERVICE"]
+    assert {n: svcs[n]["user"] for n in USER_10001} == {n: "10001:10001" for n in USER_10001}
+    assert svcs["egress"]["user"] == "10003:10003" and svcs["redis"]["user"] == "redis"
+    assert "user" not in svcs["web"] and "user" not in svcs["worker"]  # web/worker: Dockerfile menurunkan ke 10001 sendiri; tidak diubah di 2b
+
+
+def test_yaml_network_isolation(doc):
+    svcs = doc["services"]
+    assert svcs["runner"]["network_mode"] == "none" and svcs["signer"]["network_mode"] == "none"
+    assert "networks" not in svcs["runner"] and "networks" not in svcs["signer"] and "ports" not in svcs["runner"]
+    assert svcs["bench"]["networks"] == ["benchnet"] and svcs["worker"]["networks"] == ["backend"]
+    assert svcs["egress"]["networks"] == ["benchnet", "egressnet"] and svcs["web"]["networks"] == ["edge", "backend"]
+    assert [n for n, s in svcs.items() if "ports" in s] == ["caddy"]
+    assert doc["networks"]["backend"] == {"internal": True} and doc["networks"]["benchnet"] == {"internal": True}
+    assert doc["networks"]["egressnet"] == {} and doc["networks"]["edge"] == {}
+
+
+def test_yaml_no_docker_socket_no_host_binds_beyond_the_two_known_ones(doc):
+    binds = {}
+    for name, s in doc["services"].items():
+        for item in s.get("volumes", []):
+            assert "docker.sock" not in item and not item.startswith("/"), (name, item)
+            if item.startswith("."):
+                binds[name] = item
+    assert binds == {"web": "./config:/config:ro", "caddy": "./deploy/Caddyfile:/etc/caddy/Caddyfile:ro"}
+    assert "docker.sock" not in _code(COMPOSE)
+
+
+def test_yaml_mount_matrix_with_destinations_and_modes(doc):
+    """Tujuan mount tetap /data/<volume> (bench/builds/... tidak dipasang di jalur lain) dan mode persis MATRIX."""
+    for name, expected in MATRIX.items():
+        got = {}
+        for item in doc["services"][name].get("volumes", []):
+            src, dst, *opt = item.split(":")
+            if src.startswith("."):
+                continue
+            assert len(opt) <= 1 and (not opt or opt[0] in ("ro", "rw")), item
+            if name not in ("redis", "caddy"):
+                assert dst == f"/data/{src}", (name, item)
+            got[src] = opt[0] if opt else "rw"
+        assert got == expected, name
+    assert sorted(doc["volumes"]) == sorted({v for m in MATRIX.values() for v in m})
+
+
+def test_yaml_tmpfs_only_runner_aapt_exec_is_exec_and_nothing_new(doc):
+    tm = {n: s["tmpfs"] for n, s in doc["services"].items() if "tmpfs" in s}
+    assert tm == {
+        "caddy": ["/tmp"], "web": ["/tmp"], "worker": ["/tmp"], "bench": ["/tmp:rw,size=256m,nosuid"], "signer": ["/tmp:rw,size=256m,nosuid"],
+        "runner": ["/tmp:rw,size=256m,nosuid", "/opt/aapt-exec:rw,exec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0755"],
+    }
+    execs = [(n, e.split(":")[0]) for n, lst in tm.items() for e in lst if "exec" in e.split(":", 1)[-1].split(",")]
+    assert execs == [("runner", "/opt/aapt-exec")]
+    assert not [e for n, lst in tm.items() for e in lst if n != "runner" and "exec" in e.split(":", 1)[-1].split(",")]
+
+
+def test_yaml_keystore_overlay_gives_secrets_to_signer_only(doc, merged):
+    holders = [n for n, s in merged["services"].items() if s.get("secrets")]
+    assert sorted(holders) == ["signer", "web"]  # web: hanya hash password admin (berkas dasar), bukan kunci
+    assert merged["services"]["signer"]["secrets"] == ["signing_keystore", "signing_keystore_pass"]
+    assert merged["services"]["web"]["secrets"] == ["admin_password_hash"]
+    for key in ("network_mode", "read_only", "user", "cap_drop", "security_opt", "tmpfs", "volumes", "mem_limit", "cpus", "pids_limit"):
+        assert merged["services"]["signer"][key] == doc["services"]["signer"][key], key
+    for name in set(merged["services"]) - {"signer"}:
+        assert merged["services"][name] == doc["services"][name], name
+    assert doc["secrets"] == {"admin_password_hash": {"file": "./secrets/admin_password_hash"}}
+
+
+def test_yaml_runner_has_no_secrets_and_signer_profile_is_the_only_profile(doc):
+    r = doc["services"]["runner"]
+    assert "secrets" not in r and "networks" not in r and "ports" not in r
+    assert [n for n, s in doc["services"].items() if "profiles" in s] == ["signer"] and doc["services"]["signer"]["profiles"] == ["build"]
+
+
+def test_yaml_build_env_is_forwarded_to_worker_and_web_and_listed_in_env_example(doc):
+    """TIMEOUT_BUILD/TIMEOUT_SIGN (pola OP-01): diteruskan ke worker (dibaca run_build) dan web (job_timeout RQ), TIDAK ke runner/bench/signer/egress."""
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    for var, default in (("TIMEOUT_BUILD", 1800), ("TIMEOUT_SIGN", 900), ("BUILD_KEEP", 10)):
+        for svc in ("worker", "web"):
+            assert doc["services"][svc]["environment"][var] == f"${{{var}:-{default}}}", (svc, var)
+        for svc in ("runner", "bench", "signer", "egress", "caddy", "redis"):
+            assert var not in doc["services"][svc].get("environment", {}), (svc, var)
+        assert re.search(rf"(?m)^#{var}={default}$", example), var
+    assert "min(" in example and "SIGN_TIMEOUT" in example and "1-100" in example
+
+
+def test_dockerfiles_final_state_for_2b():
+    def text(name):
+        return (ROOT / "services" / name / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "worker/builds.py" in text("worker")
+    assert "buildstage.py" in text("runner")
+    for name in ("bench", "egress"):
+        assert not re.search(r"builds|signwork|signspool", text(name)), name
+    for name in ("web", "worker", "runner", "bench", "egress"):
+        assert "signwork" not in text(name), name                     # HANYA signer
+        assert ("signspool" in text(name)) == (name == "worker"), name  # worker + signer (signer dicek terpisah di bawah)
+    assert "signwork" in text("signer") and "signspool" in text("signer") and "/data/builds" in text("signer")
+
+
+def test_worker_dockerfile_copies_every_module_the_entry_points_import():
+    worker = ROOT / "services" / "worker"
+    copied = set(re.findall(r"worker/(\w+)\.py", (worker / "Dockerfile").read_text(encoding="utf-8")))
+    assert {"builds", "tasks", "worker", "pipeline", "healthcheck"} <= copied
+
+
+# ---------------------------------------------------------------- dokumen (tes teks; klaim yang belum teruji dilarang)
+def _read(p: str) -> str:
+    return (ROOT / p).read_text(encoding="utf-8")
+
+
+def test_prd09_records_the_deferral_of_fr_9_24_and_9_41_and_the_stage5_download_prerequisite():
+    prd = _read("docs/prd/09-bundles-and-workbench.md")
+    assert "Keputusan tercatat Tahap 2b" in prd
+    note = prd.split("Keputusan tercatat Tahap 2b", 1)[1]
+    for needle in ("FR-9.23", "DIKERJAKAN", "FR-9.24", "FR-9.41", "DITUNDA ke Tahap 5", "menunggu konfirmasi pemilik", "salin-lalu-hash", "BUILD_KEEP"):
+        assert needle in note, needle
+    row = next(ln for ln in prd.splitlines() if ln.startswith("| FR-9.28 |"))
+    assert "usul 5" not in row and "(10 bawaan, `BUILD_KEEP`" in row
+    assert next(ln for ln in prd.splitlines() if ln.startswith("| FR-9.24 |")).count("DITUNDA ke Tahap 5") == 1
+    assert next(ln for ln in prd.splitlines() if ln.startswith("| FR-9.41 |")).count("DITUNDA ke Tahap 5") == 1
+
+
+def test_deploy_doc_covers_2b_matrix_symptoms_and_the_stage5_prerequisite():
+    deploy = _read("docs/deploy.md")
+    assert "Tahap 2b" in deploy and "bench:ro" in deploy and "salin-lalu-hash" in deploy
+    section = deploy.split("### Build APK Tahap 2b", 1)[1].split("\n## ", 1)[0]
+    for needle in ("TIMEOUT_BUILD", "TIMEOUT_SIGN", "SIGN_TIMEOUT", "MIN_UPTIME_BEFORE_RECYCLE", "/opt/aapt-exec", "signwork", "no_space", "workspace_changed",
+                   "BELUM DIUJI", "FR-9.24", "FR-9.41", "app.buildctl", "mem_limit", "R-1"):
+        assert needle in section, needle
+    for volume in ("uploads", "work", "files", "db", "spool", "bench", "benchspool", "builds", "signspool", "signwork"):
+        assert f"| `{volume}` |" in section, volume
+    assert "verify-build" not in section  # skrip itu baru ada di FEAT G
+
+
+def test_docs_do_not_make_the_wrong_runner_recycle_claim():
+    """A-12: tidak ada 'belasan detik'/'jendela 12 dtk'; 12 dtk hanya melindungi runner baru-hidup dari backoff restart Docker."""
+    for p in ("docs/deploy.md", "README.md", "audit.md", "docs/prd/09-bundles-and-workbench.md", ".env.example"):
+        text = _read(p)
+        assert "belasan detik" not in text and "jendela 12 dtk" not in text, p
+    section = _read("docs/deploy.md").split("### Build APK Tahap 2b", 1)[1]
+    assert "keluar SEGERA" in section and "backoff" in section
+
+
+def test_readme_and_audit_state_2b_status_honestly():
+    readme, audit = _read("README.md"), _read("audit.md")
+    assert "Tahap 2b" in readme and "BELUM DIUJI" in readme and "FR-9.24" in readme
+    assert "### 10.18 " in audit
+    entry = audit.split("### 10.18 ", 1)[1]
+    for needle in ("R3", "R10", "R-1", "Belum terbukti", "fakeredis", "RQ nyata", "Docker", "FR-9.24"):
+        assert needle in entry, needle
+    assert "verify-build" not in readme.split("Tahap 2b", 1)[1].split("\n## ", 1)[0] and "verify-build" not in entry

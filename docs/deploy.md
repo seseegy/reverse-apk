@@ -263,6 +263,54 @@ Berkas tambahan `docker-compose.keystore.yml` HANYA menambah secret dan label st
 Tambahan yang juga BELUM DIUJI: pewarisan izin volume bernama baru `builds`/`signspool`; SELinux/ACL/userns-remap/rootless terhadap bind-mount berkas 644 (diagnosis: `ls -lnZ secrets/`, `docker info | grep -i userns`, `getfacl secrets/signing_keystore.p12`); argv alat di kontainer nyata (langkah 18: `argv_apksigner ≥ 1`, bila 0 hasilnya DILEWATI bukan bukti); `pids_limit: 128`/`cpus: 1` pada JVM nyata; `restart: unless-stopped` bersama `run --rm`. `docker compose config` tidak bisa dijalankan di sandbox pengembangan (Docker rusak), jadi semua yang menyangkut Compose nyata ada di daftar ini.
 
 
+### Build APK Tahap 2b: pipeline `bench → runner → signer` (status: terbukti di sandbox, BELUM DIUJI di Docker)
+Tahap 2b menyambung semuanya: AI/pemilik mengubah pohon proyek di ruang kerja `bench`, pemilik **menyetujui secara manual** (selalu lewat CLI; tidak ada rute web, tool AI, atau mode otomatis untuk menyetujui, menandatangani, atau mengunduh), worker membangun lewat `runner` (`apktool b`), `signer` menandatangani dengan keystore pemilik, lalu worker memverifikasi dan memberi nama artefak. Antarmuka pemilik = CLI di kontainer web: `docker compose exec -T web python -m app.buildctl <perintah>` dengan perintah `analyze`, `init`, `shell`, `diff`, `request`, `approve`, `status`, `wait`, `cancel`, `artifact-info`, `delete`. Keluaran skrip-ramah: baris `kunci=nilai` (kode keluar 0 = sesuai harapan, 3 = tidak sesuai/galat operasional, 64 = salah pakai). Skrip uji terpadu satu-perintah untuk pemilik BELUM ada di perubahan ini (menyusul); sampai itu ada, jalankan perintah `buildctl` secara manual.
+
+**`make up` membangun ulang** image `web`, `worker`, `runner`, `bench`, dan `signer` (paket bersama `rvcore` bertambah `treediff.py`, `buildproto.py`, `Layout.bench/signwork`, `shellspool`, `signspool`). Setelah `git pull`, jalankan `make up` (bukan hanya `docker compose up -d`) supaya kode baru masuk ke image.
+
+**Matriks mount final** (satu-satunya yang diizinkan; dijaga `tests/test_build_compose.py` yang mem-parse YAML). `rw`/`ro` = mode di compose, `–` = tidak dipasang:
+
+| Volume | web | worker | runner | bench | signer | redis | caddy | egress |
+|---|---|---|---|---|---|---|---|---|
+| `uploads` | rw | ro | ro | ro | – | – | – | – |
+| `work` | rw | rw | rw | ro | – | – | – | – |
+| `files` | rw | – | – | – | – | – | – | – |
+| `db` | rw | rw | – | – | – | – | – | – |
+| `spool` | – | rw | rw | – | – | – | – | – |
+| `bench` | rw (hanya menghapus) | – | **ro** | rw | – | – | – | – |
+| `benchspool` | rw | – | – | rw | – | – | – | – |
+| `builds` | rw | rw | rw | **–** | rw | – | – | – |
+| `signspool` | – | rw | – | – | rw | – | – | – |
+| `signwork` | – | – | – | – | rw | – | – | – |
+
+Tambahan: keystore hanya ke `signer` (berkas `docker-compose.keystore.yml`); bind `./config` (`ro`) ke web dan `./deploy/Caddyfile` (`ro`) ke caddy. Runner: `bench` hanya `bench:ro` (runner tidak boleh mengubah pekerjaan AI), tanpa `benchspool`/`signspool`/`signwork`/`files`/`db`, tanpa jaringan, tanpa `secrets:`, tanpa Docker socket, uid 10001, `cap_drop: ALL`, `no-new-privileges`, `mem_limit: 3g`, `cpus: 2`, `pids_limit: 512`. Satu-satunya tmpfs `exec` di seluruh stack tetap `/opt/aapt-exec` milik runner (16m); `/tmp` runner `rw,size=256m,nosuid` tanpa `exec`. Volume baru mewarisi izin dari image (`mkdir -p` + `chown 10001` di Dockerfile pemasangnya).
+
+**Penutupan R3/R10 (tingkat kode).** Signer tidak lagi bekerja di folder yang ditulis runner: `unsigned.apk` disalin sekali dari satu fd ke `signwork` (privat, hanya signer), hash dibandingkan dengan `expect_sha256` dari worker SEBELUM `zipalign`, lalu hasil diterbitkan atomik. Ini mencegah penukaran `unsigned.apk` setelah persetujuan; BUKAN jaminan bahwa keluaran `apktool` sama dengan yang disetujui (persetujuan mengikat isi pohon sumber, hash diff). 
+
+**R-1 (sisa risiko, tidak dicegah di 2b).** Runner yang terkompromi (uid sama, `builds` rw) bisa mengubah `signed.apk` SETELAH diterbitkan. Perubahan itu tidak dapat membawa tanda tangan pemilik yang sah, dan hash di DB mendeteksinya. **Prasyarat Tahap 5 (unduh): unduh = salin-lalu-hash-lalu-bandingkan** — rute unduhan harus menyalin berkas ke tempat yang runner tidak bisa tulis, menghitung hash dari salinan itu, lalu membandingkannya dengan hash di DB; membaca langsung dari `builds` lalu mengirim tidak aman. Tahap 2b tidak punya rute unduh, jadi tidak menegakkannya.
+
+**Konfigurasi.** `TIMEOUT_BUILD` (bawaan 1800 dtk, tahap runner) dan `TIMEOUT_SIGN` (bawaan 900 dtk) diteruskan ke `worker` dan `web` (web hanya menghitung `job_timeout` RQ = `TIMEOUT_BUILD + TIMEOUT_SIGN + 600`). Nilai efektif batas tanda tangan = **min(`TIMEOUT_SIGN`, `SIGN_TIMEOUT`)** karena signer juga membatasi dirinya sendiri; menaikkan salah satunya saja tidak memperpanjang batas. `BUILD_KEEP` (bawaan 10, klem 1–100) = jumlah build selesai yang disimpan per analisis; build yang berjalan/menunggu tidak dipangkas. Ketiganya ada di `.env.example`. `scripts/envcheck.sh` tidak perlu diubah: ia mengambil daftar variabel dari `${NAMA` di compose sehingga variabel baru terdeteksi otomatis.
+
+**Konsekuensi satu runner + satu worker.** Build antre FIFO di belakang analisis (dan sebaliknya). Setelah tiap job runner keluar agar Docker memulai kontainer segar (`RUNNER_RECYCLE=1`). Jeda antar-job = waktu restart kontainer runner (hitungan detik). Koreksi klaim lama: `MIN_UPTIME_BEFORE_RECYCLE` (12 dtk, dihitung dari impor modul) hanya melindungi runner yang baru hidup dari backoff restart Docker; runner yang sudah lama menganggur keluar SEGERA setelah hasil ditulis. Premis keamanan tidak berubah: job berikutnya berjalan di kontainer segar.
+
+**Penundaan fitur (menunggu konfirmasi pemilik).** FR-9.23 (berkas jejak `assets/reverse-apk-modified.txt`) DIKERJAKAN di 2b. FR-9.24 (`aapt2 dump badging`, pemeriksaan paket/versi) dan FR-9.41 (peringatan target SDK < 23) DITUNDA ke Tahap 5. Gerbang `done` di 2b = `apksigner verify` + sertifikat sama dengan keystore pemilik + `zipalign` + hash cocok. Alasan, opsi, dan pertanyaan ke pemilik ada di PRD 09 ("Keputusan tercatat Tahap 2b").
+
+**Gejala di VPS yang perlu diwaspadai (semua BELUM DIUJI di Docker).**
+| Gejala | Diagnosis |
+|---|---|
+| Runner gagal membaca `bench` / `Permission denied` pada `/data/bench` | bind `bench:/data/bench:ro` atau izin volume baru: volume lama tanpa `mkdir`/`chown 10001` dari image baru; build ulang image runner (`make up`) lalu periksa `docker compose run --rm --no-deps -T runner ls -ln /data` |
+| Runner BISA menulis ke `/data/bench` | mount `ro` tidak berlaku: periksa `docker compose config` (harus `read_only: true` pada mount itu) — ini pelanggaran isolasi, hentikan stack |
+| `izin ditolak` menulis `builds`/`signwork` | volume baru dibuat sebelum image baru; hapus volume kosong atau perbaiki pemilik ke 10001 lewat kontainer berhak (bukan dari host) |
+| `workspace_changed` berulang | AI/pemilik masih menulis di ruang kerja setelah `request`; ajukan ulang setelah penulisan berhenti (gagal aman, disengaja) |
+| Build lama tidak mulai | runner sibuk dengan analisis/job lain (satu runner); `status` menampilkan alasan antre |
+| `build.log` penuh pesan `No space left` pada `/opt/aapt-exec` | tmpfs exec 16m penuh (aapt2 6,15 MiB; maksimum 2 salinan saat penggantian atomik) |
+| Galat tulis di `/tmp` runner/signer | tmpfs `/tmp` 256m penuh |
+| Runner terbunuh (OOM) / `exit 137` | `mem_limit: 3g` terlampaui; lihat `docker inspect` (`OOMKilled`) |
+| `no_space` dari runner atau signer | disk kurang: runner butuh 2× ukuran + 1 GiB, signer butuh 2× ukuran APK + 16 MiB + 1 GiB di volume `signwork`/`builds`; angka konservatif dan TIDAK diukur pada 1 GiB |
+| Build `timeout` | `build.log`, naikkan `TIMEOUT_BUILD` (ingat min(`TIMEOUT_SIGN`, `SIGN_TIMEOUT`) untuk tanda tangan) |
+
+**Terbukti di sandbox (BUKAN Docker):** tes mem-parse `docker-compose.yml`/`docker-compose.keystore.yml` (matriks mount, mode, hardening, jaringan, tmpfs, env), tes unit/integrasi tiap modul dengan proses uid 10001 nyata (`setpriv`), `unshare -m`, tmpfs `noexec`, berkas milik uid lain; Redis = `fakeredis`. **BELUM DIUJI:** `docker compose config`/`up`/`build` (Docker di sandbox rusak), bind `ro` nyata terhadap runner, izin volume bernama baru, tmpfs dan cgroup (`mem_limit`, `pids_limit`, `cpus`), healthcheck, RQ/Redis nyata (hanya `fakeredis`), Landlock ABI v4 di VPS (sandbox v2), pewarisan izin pada VPS dengan user host `deploy`, serta semua angka memori/disk terhadap cgroup. Jangan mengklaim 2b "berfungsi di VPS" sebelum daftar itu dijalankan.
+
 ## Upload besar dan Cloudflare
 Batas ukuran APK diatur `MAX_UPLOAD_MB` di `.env` (bawaan 200). Nilai yang sama dipakai aplikasi dan Caddy.
 Jika proxy Cloudflare (awan oranye) dinyalakan, paket gratis membatasi body request ~100 MB sehingga APK yang
