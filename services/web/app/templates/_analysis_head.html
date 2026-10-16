@@ -56,6 +56,8 @@
   <a href="/analyses/{{ an.id }}/files"{% if tab == 'files' %} aria-current="page"{% endif %}>Berkas
     {%- if files_count %} <span class="tab-count">{{ files_count }}</span>{% endif %}</a>
   <a href="/analyses/{{ an.id }}/manifest"{% if tab == 'manifest' %} aria-current="page"{% endif %}>Manifes</a>
+  <a href="/analyses/{{ an.id }}/build"{% if tab == 'build' %} aria-current="page"{% endif %}>Build
+    {%- if build_active %} <span class="tab-live" title="Ada build aktif: {{ build_active }}"><span class="sr-only">(ada build aktif: {{ build_active }})</span></span>{% endif %}</a>
 </nav>
 
 {#- Analisis lama (M1) atau analisis statis gagal: tawarkan menjalankannya tanpa dekompilasi ulang. -#}

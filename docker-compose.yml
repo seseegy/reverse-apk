@@ -25,7 +25,7 @@ services:
       - "443:443/udp"
     environment:
       APP_DOMAIN: ${APP_DOMAIN:?isi APP_DOMAIN di .env}
-      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-200}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-1024}
       ATTACH_MAX_MB: ${ATTACH_MAX_MB:-25}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
@@ -54,7 +54,12 @@ services:
       REDIS_HOST: redis
       REDIS_PASSWORD: ${REDIS_PASSWORD:?jalankan `make init`}
       DATA_DIR: /data
-      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-200}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-1024}
+      # Batas bongkar zip: dibaca web, runner, dan worker; bawaan HARUS sama (tes paritas) supaya paket tidak lolos unggah lalu gagal saat build.
+      ZIP_MAX_ENTRIES: ${ZIP_MAX_ENTRIES:-100000}
+      ZIP_MAX_UNCOMPRESSED_MB: ${ZIP_MAX_UNCOMPRESSED_MB:-3072}
+      ZIP_MAX_ENTRY_MB: ${ZIP_MAX_ENTRY_MB:-1024}
+      ZIP_MAX_RATIO: ${ZIP_MAX_RATIO:-100}
       # --- Lampiran chat & berkas buatan AI (volume `files`)
       ATTACH_MAX_MB: ${ATTACH_MAX_MB:-25}
       FILES_QUOTA_MB: ${FILES_QUOTA_MB:-1024}
@@ -65,7 +70,7 @@ services:
       TIMEOUT_BUILD: ${TIMEOUT_BUILD:-1800}
       TIMEOUT_SIGN: ${TIMEOUT_SIGN:-900}
       MIN_FREE_GB: ${MIN_FREE_GB:-15}
-      JOB_TIMEOUT: ${JOB_TIMEOUT:-2700}
+      JOB_TIMEOUT: ${JOB_TIMEOUT:-4500}
       # --- AI (M4). Kunci hanya masuk ke service web; tidak pernah ke browser, worker, atau runner.
       AI_BASE_URL: ${AI_BASE_URL:-}
       AI_API_KEY: ${AI_API_KEY:-}
@@ -88,6 +93,10 @@ services:
       AI_SHELL_MAX_TIMEOUT: ${AI_SHELL_MAX_TIMEOUT:-120}
       AI_SHELL_MAX_CALLS_PER_TURN: ${AI_SHELL_MAX_CALLS_PER_TURN:-200}
       AI_SHELL_MAX_OUTPUT_CHARS: ${AI_SHELL_MAX_OUTPUT_CHARS:-12000}
+      # Batas per giliran untuk alur bengkel (Tahap 6; 0 = tanpa batas) dan batas build baru per sesi chat.
+      AI_SHELL_MAX_SECONDS_PER_TURN: ${AI_SHELL_MAX_SECONDS_PER_TURN:-900}
+      AI_SHELL_MAX_TURN_OUTPUT_CHARS: ${AI_SHELL_MAX_TURN_OUTPUT_CHARS:-400000}
+      AI_BUILD_MAX_PER_SESSION: ${AI_BUILD_MAX_PER_SESSION:-5}
       AI_SHELL_SPOOL: /data/benchspool
       AI_SHELL_NET_ALLOW: ${AI_SHELL_NET_ALLOW:-}
       AI_SHELL_NET_PORTS: ${AI_SHELL_NET_PORTS:-443}
@@ -102,7 +111,7 @@ services:
       - db:/data/db
       - bench:/data/bench          # web hanya MENGHAPUS ruang kerja saat analisis dihapus; tidak pernah membaca isinya (data tak tepercaya)
       - benchspool:/data/benchspool
-      # Artefak build: web menghapusnya saat analisis dihapus dan nanti menyajikannya (Tahap 5). Runner menulis folder ini, jadi akses web SELALU lewat
+      # Artefak build: web menghapusnya saat analisis dihapus dan menyajikannya lewat rute unduhan Tahap 5 (salin-lalu-hash-lalu-bandingkan). Runner menulis folder ini, jadi akses web SELALU lewat
       # fsutil.open_dir_chain/rmtree_at (rantai O_NOFOLLOW), bukan jalur string.
       - builds:/data/builds
       - ./config:/config:ro
@@ -135,13 +144,18 @@ services:
       REDIS_HOST: redis
       REDIS_PASSWORD: ${REDIS_PASSWORD:?jalankan `make init`}
       DATA_DIR: /data
-      TIMEOUT_APKTOOL: ${TIMEOUT_APKTOOL:-300}
-      TIMEOUT_JADX: ${TIMEOUT_JADX:-900}
-      TIMEOUT_ANALYZE: ${TIMEOUT_ANALYZE:-300}
+      TIMEOUT_APKTOOL: ${TIMEOUT_APKTOOL:-600}
+      TIMEOUT_JADX: ${TIMEOUT_JADX:-2400}
+      TIMEOUT_ANALYZE: ${TIMEOUT_ANALYZE:-600}
       TIMEOUT_BUILD: ${TIMEOUT_BUILD:-1800}
       TIMEOUT_SIGN: ${TIMEOUT_SIGN:-900}
-      JOB_TIMEOUT: ${JOB_TIMEOUT:-2700}
+      JOB_TIMEOUT: ${JOB_TIMEOUT:-4500}
       BUILD_KEEP: ${BUILD_KEEP:-10}
+      # Batas bongkar zip: dibaca web, runner, dan worker; bawaan HARUS sama (tes paritas) supaya paket tidak lolos unggah lalu gagal saat build.
+      ZIP_MAX_ENTRIES: ${ZIP_MAX_ENTRIES:-100000}
+      ZIP_MAX_UNCOMPRESSED_MB: ${ZIP_MAX_UNCOMPRESSED_MB:-3072}
+      ZIP_MAX_ENTRY_MB: ${ZIP_MAX_ENTRY_MB:-1024}
+      ZIP_MAX_RATIO: ${ZIP_MAX_RATIO:-100}
     volumes:
       - uploads:/data/uploads:ro
       - work:/data/work
@@ -214,7 +228,13 @@ services:
     environment:
       DATA_DIR: /data
       RUNNER_RECYCLE: ${RUNNER_RECYCLE:-1}
-      MAX_OUTPUT_MB: ${MAX_OUTPUT_MB:-3072}
+      MAX_OUTPUT_MB: ${MAX_OUTPUT_MB:-6144}
+      MAX_BASE_APK_MB: ${MAX_BASE_APK_MB:-1024}
+      # Batas bongkar zip: dibaca web, runner, dan worker; bawaan HARUS sama (tes paritas) supaya paket tidak lolos unggah lalu gagal saat build.
+      ZIP_MAX_ENTRIES: ${ZIP_MAX_ENTRIES:-100000}
+      ZIP_MAX_UNCOMPRESSED_MB: ${ZIP_MAX_UNCOMPRESSED_MB:-3072}
+      ZIP_MAX_ENTRY_MB: ${ZIP_MAX_ENTRY_MB:-1024}
+      ZIP_MAX_RATIO: ${ZIP_MAX_RATIO:-100}
     volumes:
       - uploads:/data/uploads:ro
       - work:/data/work
@@ -263,8 +283,8 @@ services:
       BENCH_NET_PROXY: ${AI_SHELL_NET_ALLOW:+egress:3128}
       BENCH_CMD_MAX_TIMEOUT: ${AI_SHELL_MAX_TIMEOUT:-120}
       BENCH_CMD_MAX_OUTPUT_KB: ${BENCH_CMD_MAX_OUTPUT_KB:-64}
-      BENCH_WORKSPACE_MAX_MB: ${BENCH_WORKSPACE_MAX_MB:-2048}
-      BENCH_FILE_MAX_MB: ${BENCH_FILE_MAX_MB:-256}
+      BENCH_WORKSPACE_MAX_MB: ${BENCH_WORKSPACE_MAX_MB:-4096}
+      BENCH_FILE_MAX_MB: ${BENCH_FILE_MAX_MB:-1024}
       BENCH_NPROC: ${BENCH_NPROC:-2048}
       BENCH_IDLE_EXIT: ${BENCH_IDLE_EXIT:-900}
     volumes:
@@ -337,7 +357,7 @@ services:
     environment:
       DATA_DIR: /data
       SIGN_TIMEOUT: ${SIGN_TIMEOUT:-900}
-      SIGN_MAX_MB: ${SIGN_MAX_MB:-1100}
+      SIGN_MAX_MB: ${SIGN_MAX_MB:-1280}
       # Tahap 3 (XAPK/APKS): batas jumlah byte SEMUA berkas satu permintaan tanda tangan (base + split); SIGN_MAX_MB tetap batas per berkas.
       SIGN_MAX_TOTAL_MB: ${SIGN_MAX_TOTAL_MB:-3072}
     volumes:

@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_parts.html" import notice_box, time_el %}
+{% from "_build_parts.html" import build_badge, not_promised %}
+{% set title = an.app_label or an.filename_display %}
+{% block title %}Build · {{ title }} · reverse-apk{% endblock %}
+
+{% block header %}{% include "_header.html" %}{% endblock %}
+
+{% block content %}
+<div class="container page container-wide"{% if poll_url %} data-build-poll="{{ poll_url }}" data-build-status="{{ poll_status }}"{% endif %}>
+  <a class="back-link" href="/">{{ icon('arrow-left', 16) }}<span>Semua APK</span></a>
+  {% include "_analysis_head.html" %}
+  {{ notice_box(notice) }}
+
+  <section class="card" aria-labelledby="build-title">
+    <div class="card-head">
+      <h2 id="build-title">Build APK</h2>
+    </div>
+    <p class="muted hint">
+      Ubah berkas di ruang kerja (lewat asisten atau CLI), ajukan build dari perubahan itu, lalu <strong>Anda</strong> meninjau diff dan menyetujuinya.
+      Tanpa persetujuan Anda tidak ada yang dibangun atau ditandatangani. Hasilnya ditandatangani dengan <strong>kunci uji milik instalasi ini</strong>, bukan kunci penerbit asli.
+    </p>
+    {% if not can_build %}
+    <div class="alert alert-info" role="status">{{ icon('info') }}<span>Build butuh analisis yang sudah selesai dengan hasil apktool.</span></div>
+    {% else %}
+    <div class="btn-row">
+      <form method="post" action="/analyses/{{ an.id }}/build/init" data-submit-lock>
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="btn btn-ghost">{{ icon('upload', 16) }}<span>Siapkan ruang kerja</span></button>
+      </form>
+      <form method="post" action="/analyses/{{ an.id }}/build/request" data-submit-lock>
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="btn btn-primary"{% if active %} disabled{% endif %}>{{ icon('play', 16) }}<span>Ajukan build dari ruang kerja</span></button>
+      </form>
+    </div>
+    <p class="muted hint">“Siapkan ruang kerja” menyalin hasil apktool asli ke ruang kerja bila belum ada (tidak pernah menimpa pekerjaan yang sudah ada).
+      “Ajukan build” membandingkan ruang kerja dengan hasil apktool asli lalu membuat permintaan yang menunggu persetujuan Anda.</p>
+    {% endif %}
+    {% if active %}
+    <div class="alert alert-warn" role="status">
+      {{ icon('alert-triangle') }}
+      <span>Ada build aktif: <a href="/analyses/{{ an.id }}/build/{{ active.id }}">build #{{ active.id }} ({{ active.label }})</a>. Hanya satu build aktif per analisis.</span>
+    </div>
+    {% endif %}
+  </section>
+
+  <section class="card" aria-labelledby="blist-title">
+    <div class="card-head"><h2 id="blist-title">Daftar build <span class="count-pill">{{ builds|length }}</span></h2></div>
+    {% if builds %}
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Daftar build (gulir horizontal bila perlu)">
+      <table class="table">
+        <thead><tr><th>Build</th><th>Status</th><th>Format</th><th>Diminta oleh</th><th>Dibuat</th><th>Hasil</th></tr></thead>
+        <tbody>
+        {% for b in builds %}
+          <tr>
+            <th scope="row"><a href="/analyses/{{ an.id }}/build/{{ b.id }}">#{{ b.id }}</a></th>
+            <td>{{ build_badge(b) }}</td>
+            <td class="mono">{{ b.source_kind }}</td>
+            <td>{% if b.ai %}<span class="chip">diminta oleh AI</span> {% endif %}{{ b.requested_label }}</td>
+            <td>{{ time_el(b.created_at) }}</td>
+            <td>
+              {% if b.status == 'done' %}<span class="mono break">{{ b.output_name }}</span> · {{ b.output_size|bytes }}
+              {% elif b.status == 'failed' or b.status == 'cancelled' %}<span class="mono">{{ b.error_code or '–' }}</span>
+              {% else %}–{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="files-empty">
+      <span class="empty-icon">{{ icon('archive', 28) }}</span>
+      <p><strong>Belum ada build.</strong></p>
+      <p class="muted">Siapkan ruang kerja, minta asisten mengubahnya di Percakapan (atau ubah lewat CLI), lalu ajukan build.</p>
+    </div>
+    {% endif %}
+  </section>
+
+  {{ not_promised(limits_list, limit_notice) }}
+</div>
+{% endblock %}
+
+{% block scripts %}{% if poll_url %}<script src="/static/js/build.js" defer></script>{% endif %}{% endblock %}

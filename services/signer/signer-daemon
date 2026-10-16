@@ -78,7 +78,7 @@ KS_NAME = "signing_keystore"
 PASS_NAME = "signing_keystore_pass"
 
 SIGN_TIMEOUT = _int_env("SIGN_TIMEOUT", 900, 30, 3600)
-SIGN_MAX_MB = _int_env("SIGN_MAX_MB", 1100, 1, 4096)
+SIGN_MAX_MB = _int_env("SIGN_MAX_MB", 1280, 1, 4096)
 SIGN_MAX_TOTAL_MB = _int_env("SIGN_MAX_TOTAL_MB", 3072, 1, 16384)       # Tahap 3: jumlah byte SEMUA masukan satu permintaan (base + split)
 
 RESERVE = 1024 * MIB           # cadangan disk: volume builds satu filesystem dengan db/uploads/work

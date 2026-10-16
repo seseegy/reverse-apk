@@ -129,12 +129,12 @@ def test_defaults_without_env(monkeypatch, tmp_path):
     for var in ("SIGN_TIMEOUT", "SIGN_MAX_MB"):
         monkeypatch.delenv(var, raising=False)
     mod = load_daemon(monkeypatch, tmp_path)
-    assert (mod.SIGN_TIMEOUT, mod.SIGN_MAX_MB) == (900, 1100)
+    assert (mod.SIGN_TIMEOUT, mod.SIGN_MAX_MB) == (900, 1280)
     assert 'os.environ.get("SIGNER_SECRETS_DIR", "/run/secrets")' in SCRIPT.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("raw,timeout,max_mb", [
-    ("abc", 900, 1100), ("", 900, 1100), ("1.5", 900, 1100), ("-", 900, 1100),
+    ("abc", 900, 1280), ("", 900, 1280), ("1.5", 900, 1280), ("-", 900, 1280),
     ("5", 30, 5), ("99999", 3600, 4096), ("0", 30, 1), ("-7", 30, 1), ("1200", 1200, 1200), (" 60 ", 60, 60),
 ])
 def test_sign_env_invalid_values_fall_back_and_valid_values_are_clamped(monkeypatch, tmp_path, raw, timeout, max_mb):

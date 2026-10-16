@@ -18,7 +18,7 @@
 # awaiting_approval (hash sama), 14f hash salah / permintaan sama dipakai ulang / perubahan baru -> build_tertunda, 14g get_build_status menunggu, 14h build id analisis lain ditolak
 # (pesan identik dengan id ngawur), 14i tak ada tool approve/cancel/download + gerbang `--shell 0`, 14j persetujuan PEMILIK lewat buildctl lalu get_build_status sampai done dengan
 # verifikasi tanda tangan, 14k permintaan XAPK (tanpa menyetujui), 14l keluaran tool tanpa path rahasia/URL/nama keystore/nilai artefak, 14m tool tidak pernah menyetujui (audit
-# via=cli), 14n kebersihan. Persetujuan masih HANYA lewat CLI pemilik sampai Tahap 5. Analisis uji tambahan (B, paket) dibersihkan oleh trap seperti analisis utama.
+# via=cli), 14n kebersihan. Skrip ini menyetujui lewat CLI pemilik (via=cli); persetujuan web Tahap 5 TIDAK diuji di sini (lihat docs/deploy.md "Build web Tahap 5": runbook manual dengan app.webcheck). Analisis uji tambahan (B, paket) dibersihkan oleh trap seperti analisis utama.
 #
 # Prinsip: bash di host TIDAK PERNAH mem-parse JSON. Semua keputusan bergantung isi dibuat DI DALAM kontainer (app.buildctl, signer-selftest --check-apk, tamu
 # python di runner) dan dilaporkan sebagai kode keluar 0/3/64 plus baris `kunci=nilai`; skrip ini hanya membaca baris itu dengan sed. Host tidak menulis/menghapus

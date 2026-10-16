@@ -329,8 +329,10 @@ def test_prd09_records_the_deferral_of_fr_9_24_and_9_41_and_the_stage5_download_
         assert needle in note, needle
     row = next(ln for ln in prd.splitlines() if ln.startswith("| FR-9.28 |"))
     assert "usul 5" not in row and "(10 bawaan, `BUILD_KEEP`" in row
-    assert next(ln for ln in prd.splitlines() if ln.startswith("| FR-9.24 |")).count("DITUNDA ke Tahap 5") == 1
-    assert next(ln for ln in prd.splitlines() if ln.startswith("| FR-9.41 |")).count("DITUNDA ke Tahap 5") == 1
+    # Catatan 2b tetap menyebut penundaan (riwayat); baris FR kini menyatakan terpenuhi di Tahap 5 (bukan lagi ditunda).
+    for fr in ("FR-9.24", "FR-9.41"):
+        row = next(ln for ln in prd.splitlines() if ln.startswith(f"| {fr} |"))
+        assert "TERPENUHI di Tahap 5" in row and "DITUNDA" not in row, fr
 
 
 def test_deploy_doc_covers_2b_matrix_symptoms_and_the_stage5_prerequisite():

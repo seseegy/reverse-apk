@@ -19,6 +19,7 @@ ini (hasil_ai/): path divalidasi ketat, hanya ekstensi teks, berkas tidak pernah
 from __future__ import annotations
 
 import json
+import math
 import re
 import threading
 import time
@@ -65,6 +66,9 @@ class ToolContext:
     session_id: int | None = None              # sesi chat ini (untuk `requested_by` build); diisi chat.run_in_thread, BUKAN dari model; None = tool build ditolak
     build_requests: int = 0                    # build baru yang dibuat pada giliran ini (batas 1)
     status_calls: int = 0                      # get_build_status pada giliran ini (batas STATUS_CALLS_MAX)
+    shell_seconds: float = 0.0                 # total WAKTU shell_run pada giliran ini (batas: cfg.shell_max_seconds_per_turn)
+    shell_out_chars: int = 0                   # total KELUARAN shell_run yang sudah dikirim ke model pada giliran ini (batas: cfg.shell_max_turn_output_chars)
+    limit_hit: str | None = None               # stop reason ("shell_budget" | "build_limit") bila sebuah batas giliran/sesi tercapai; agent lalu berhenti rapi (Tahap 6)
     _written_seen: int = 0
 
     def take_detail(self) -> dict[str, Any] | None:
@@ -884,11 +888,40 @@ def shell_run(ctx: ToolContext, args: dict) -> dict:
                         "atau pecah menjadi beberapa perintah")
     timeout = min(_int(args, "timeout", cfg.shell_timeout_s, 1), cfg.shell_max_timeout_s)
     if cfg.shell_max_calls_per_turn and ctx.shell_calls >= cfg.shell_max_calls_per_turn:
+        ctx.limit_hit = "shell_budget"
         raise ToolError(f"batas {cfg.shell_max_calls_per_turn} perintah per giliran tercapai; rangkum yang sudah Anda ketahui dan tanyakan "
                         "kepada pengguna bila perlu lanjut")
+    timeout = _shell_turn_guard(ctx, timeout)
     ctx.shell_calls += 1
     spool = shellspool.make_spool(cfg.shell_spool_dir)
     started = time.monotonic()
+    try:
+        return _shell_run_bench(ctx, command, timeout, spool, started)
+    finally:
+        ctx.shell_seconds += time.monotonic() - started       # waktu dinding semua jalur (termasuk bench mati/timeout), bukan hanya yang sukses
+
+
+def _shell_turn_guard(ctx: ToolContext, timeout: int) -> int:
+    """Batas WAKTU dan KELUARAN total shell per giliran (FR-9.36). Melewati batas = galat tool berbahasa Indonesia untuk model (bukan exception ke agent) dan agent
+    berhenti rapi (stopped=shell_budget). Mengembalikan timeout efektif: perintah terakhir tidak boleh melewati sisa waktu giliran (minimal 1 dtk)."""
+    cfg = ctx.cfg
+    limit_s = cfg.shell_max_seconds_per_turn
+    if limit_s and ctx.shell_seconds >= limit_s:
+        ctx.limit_hit = "shell_budget"
+        raise ToolError(f"batas total waktu shell {limit_s} detik per giliran tercapai ({ctx.shell_seconds:.0f} detik terpakai); jangan memanggil shell_run lagi. "
+                        "Rangkum yang sudah selesai dan yang tersisa, lalu tawarkan kepada pengguna untuk melanjutkan di giliran berikutnya.")
+    limit_c = cfg.shell_max_turn_output_chars
+    if limit_c and ctx.shell_out_chars >= limit_c:
+        ctx.limit_hit = "shell_budget"
+        raise ToolError(f"batas total keluaran shell {limit_c} karakter per giliran tercapai ({ctx.shell_out_chars} karakter sudah dikirim ke Anda); jangan memanggil shell_run lagi. "
+                        "Rangkum yang sudah selesai dan yang tersisa, lalu tawarkan kepada pengguna untuk melanjutkan di giliran berikutnya.")
+    if limit_s:
+        timeout = min(timeout, max(1, math.ceil(limit_s - ctx.shell_seconds)))
+    return timeout
+
+
+def _shell_run_bench(ctx: ToolContext, command: str, timeout: int, spool: Any, started: float) -> dict:
+    cfg = ctx.cfg
     try:
         # analysis_id dan sha256 HANYA dari konteks sesi, tidak pernah dari argumen model.
         res = shellspool.run_command(spool, ctx.analysis_id, command, timeout=timeout, sha256=ctx.bench_sha256, cancel=ctx.cancel)
@@ -900,6 +933,7 @@ def shell_run(ctx: ToolContext, args: dict) -> dict:
     red = ctx.redactor.text
     budget = max(500, cfg.shell_max_output_chars)
     out, err = _clip_tail(red(res["stdout"]), budget * 2 // 3), _clip_tail(red(res["stderr"]), budget - budget * 2 // 3)
+    ctx.shell_out_chars += len(out) + len(err)
     _shell_audit(ctx, {"status": status, "exit_code": res["exit_code"], "command_chars": len(command), "ms": res["duration_ms"] or ms,
                        "out_chars": len(res["stdout"]) + len(res["stderr"]), "truncated": res["truncated"], "timeout_s": timeout})
     # Rincian untuk kartu langkah di UI. Perintah juga diredaksi (bisa memuat nilai dari APK). Dibatasi: tersimpan di DB per pesan.
@@ -962,6 +996,7 @@ def _count_bench_call(ctx: ToolContext) -> None:
     """Penghitung YANG SAMA dengan shell_run (`ctx.shell_calls`, batas AI_SHELL_MAX_CALLS_PER_TURN; 0 = tanpa batas). Dipanggil hanya sebelum bench benar-benar disentuh."""
     limit = ctx.cfg.shell_max_calls_per_turn
     if limit and ctx.shell_calls >= limit:
+        ctx.limit_hit = "shell_budget"
         raise BuildToolError("batas_giliran", f"batas {limit} operasi ruang kerja per giliran tercapai; rangkum yang sudah Anda ketahui dan tanyakan kepada pengguna bila perlu lanjut.")
     ctx.shell_calls += 1
 
@@ -1004,11 +1039,33 @@ def bench_diff(ctx: ToolContext, args: dict) -> dict:
     return _build_guard(ctx, "bench_diff", work)
 
 
+def session_build_count(conn: Any, session_id: int) -> int:
+    """Berapa build BARU yang pernah diajukan AI di sesi chat ini. Dihitung dari audit_log (`build_requested`, ditulis `store.create_build` dalam transaksi yang sama),
+    bukan dari tabel build: pemangkasan retensi (BUILD_KEEP) tidak boleh mengosongkan hitungan. Kecocokan `"ai:<id>"` memakai tanda kutip penutup agar sesi 7 tidak
+    ikut menghitung sesi 70. Dijaga tes yang membuat build lewat store.create_build sungguhan."""
+    return int(conn.execute("SELECT COUNT(*) FROM audit_log WHERE action = 'build_requested' AND detail LIKE ?",
+                            (f'%"requested_by": "ai:{int(session_id)}"%',)).fetchone()[0])
+
+
+def _session_build_limit(ctx: ToolContext) -> None:
+    """Dipanggil aibuild.request tepat sebelum build baru dibuat (setelah semua pemeriksaan murah; permintaan yang dipakai ulang tidak sampai sini)."""
+    limit = ctx.cfg.build_max_per_session
+    if not limit or ctx.session_id is None:
+        return
+    with closing(ctx.db()) as conn:
+        used = session_build_count(conn, ctx.session_id)
+    if used >= limit:
+        ctx.limit_hit = "build_limit"
+        raise BuildToolError("batas_sesi", f"batas {limit} permintaan build per sesi chat sudah tercapai ({used} terpakai); jangan mengajukan build lagi di sesi ini. "
+                                           "Rangkum hasil build yang ada dan yang tersisa; pemilik dapat memulai sesi baru atau menaikkan AI_BUILD_MAX_PER_SESSION.")
+
+
 def request_build(ctx: ToolContext, args: dict) -> dict:
     scope = _build_scope(ctx)
 
     def work() -> dict:
-        res = aibuild.request(scope, args.get("diff_sha256"), ctx.redactor.text, build_requests=ctx.build_requests, count_bench=lambda: _count_bench_call(ctx))
+        res = aibuild.request(scope, args.get("diff_sha256"), ctx.redactor.text, build_requests=ctx.build_requests, count_bench=lambda: _count_bench_call(ctx),
+                              before_create=lambda: _session_build_limit(ctx))
         if not res["dipakai_ulang"]:
             ctx.build_requests += 1
         return res

@@ -27,6 +27,7 @@ from rvcore.fsutil import open_dir_chain, read_json_under, rmtree_at, safe_rmtre
 from . import codeindex, decompile
 from . import status as system_status
 from .ai import budget as ai_budget
+from .ai import agent as ai_agent
 from .ai import chat as ai_chat
 from .ai.config import ConfigError, load_ai_config
 from .ai.pricing import PriceTable
@@ -280,6 +281,7 @@ def _detail(analysis_id: int) -> dict[str, Any] | None:
         artifacts = [dict(a) for a in store.get_artifacts(conn, analysis_id)]
         counts = store.finding_counts(conn, analysis_id)
         files_count = store.count_files(conn, analysis_id)
+        active_build = store.active_build(conn, analysis_id)
     def _loads(raw: str | None) -> dict[str, Any]:
         try:
             data = json.loads(raw) if raw else {}
@@ -288,6 +290,7 @@ def _detail(analysis_id: int) -> dict[str, Any] | None:
             return {}
 
     return {"an": dict(an), "snap": snap, "artifacts": artifacts, "counts": counts, "files_count": files_count,
+            "build_active": store.BUILD_STATUS_LABEL.get(active_build["status"]) if active_build is not None else None,
             "versions": _loads(an["tool_versions"]), "options": _loads(an["options"])}
 
 
@@ -542,7 +545,8 @@ def _allowed_models(cfg, prices) -> list[dict[str, str]]:
     return out
 
 
-def _chat_state(analysis_id: int, session_id: int | None):
+def _chat_state(analysis_id: int, session_id: int | None, with_stop: bool = False):
+    """(sesi, pesan). Dengan `with_stop=True` mengembalikan tiga nilai: ditambah kartu "berhenti karena batas" untuk pesan terakhir (atau None)."""
     from .routes_files import describe     # impor lokal: routes_files mengimpor routes_apk (hindari impor melingkar)
     with closing(db()) as conn:
         sessions = [dict(r) for r in store.list_chat_sessions(conn, analysis_id)]
@@ -561,6 +565,8 @@ def _chat_state(analysis_id: int, session_id: int | None):
                 d["attachments"] = [describe(analysis_id, f) for f in fl if f["role"] == "attachment"]
                 d["outputs"] = [describe(analysis_id, f) | {"link_revision": f["link_revision"]} for f in fl if f["role"] == "output"]
                 messages.append(d)
+        if with_stop:
+            return sessions, messages, (ai_chat.stop_card_for(conn, session_id, messages) if messages and session_id is not None else None)
         return sessions, messages
 
 
@@ -574,7 +580,7 @@ async def analysis_chat(request: Request, analysis_id: AnalysisId, s: int | None
     # pesan terakhir di DB masih milik pengguna, halaman menyambung ke aliran yang berjalan. Bila jawaban sudah tersimpan, tampilkan itu saja.
     turn = ai_chat.REGISTRY.get(s) if s else None
     was_active = bool(turn is not None and not turn.done)
-    sessions, messages = await run_in_threadpool(_chat_state, analysis_id, s)
+    sessions, messages, stop_card = await run_in_threadpool(_chat_state, analysis_id, s, True)
     resume = was_active and bool(messages) and messages[-1]["role"] == "user"
     snap = None
     if cfg and cfg.enabled:
@@ -584,6 +590,7 @@ async def analysis_chat(request: Request, analysis_id: AnalysisId, s: int | None
     return render(request, "chat.html", {
         **ctx, "ai_enabled": bool(cfg and cfg.enabled), "ai_error": cfg_error, "sessions": sessions, "messages": messages,
         "session_id": s if messages or any(x["id"] == s for x in sessions) else None, "budget": snap,
+        "stop_card": None if resume else stop_card, "continue_text": ai_agent.CONTINUE_TEXT,
         "models": _allowed_models(cfg, prices) if cfg and cfg.enabled else [], "has_index": has_index, "cfg": cfg,
         "suggestions": _suggestions(ctx), "file_limits": file_store.limits,
         "resume_stream": f"/analyses/{analysis_id}/chat/stream?s={s}" if resume else None,
@@ -624,12 +631,20 @@ async def chat_send(request: Request, analysis_id: AnalysisId) -> Response:
         model = body.get("model")
         session_id = body.get("session_id")
         att_ids = body.get("attachment_ids") or []
+        cont = body.get("continue", False)
     except (ValueError, AttributeError, RecursionError):   # RecursionError: JSON bersarang sangat dalam (bukan ValueError)
         return _json(400, error="Format permintaan tidak valid.")
+    if cont is not False and cont is not True:
+        return _json(422, error="continue harus true atau false.")
     # Klien resmi selalu mengirim string; tipe lain ditolak, bukan diubah diam-diam jadi teks ("None", "123", "['a']").
     if not isinstance(text, str) or "\x00" in text:
         return _json(422, error="text harus berupa teks tanpa karakter NUL.")
     text = text.strip()
+    if cont:
+        # Tombol "Lanjutkan" (Tahap 6): pesannya TETAP dari server, bukan dari klien atau model. Tidak boleh disertai teks/lampiran, dan wajib pada sesi yang sudah ada.
+        if text or att_ids or session_id is None:
+            return _json(422, error="Lanjutkan hanya untuk sesi yang sudah ada dan tidak boleh disertai teks atau lampiran.")
+        text = ai_agent.CONTINUE_TEXT
     if model is not None and not isinstance(model, str):
         return _json(422, error="model tidak valid.")
     if (not isinstance(att_ids, list) or any(isinstance(i, bool) or not isinstance(i, int) or not 0 < i < 2**31 for i in att_ids)):
@@ -797,7 +812,7 @@ async def chat_delete(request: Request, analysis_id: AnalysisId, session_id: Apk
 async def chat_export(request: Request, analysis_id: AnalysisId, session_id: ApkId) -> Response:
     if not current_session(request):
         return PlainTextResponse("auth", status_code=401)
-    sessions, messages = await run_in_threadpool(_chat_state, analysis_id, session_id)
+    sessions, messages, stop_card = await run_in_threadpool(_chat_state, analysis_id, session_id, True)
     if not messages:
         return PlainTextResponse("tidak ditemukan", status_code=404)
     lines = [f"# Percakapan analisis #{analysis_id}", ""]
@@ -814,6 +829,8 @@ async def chat_export(request: Request, analysis_id: AnalysisId, session_id: Apk
             lines += ["<details><summary>Langkah tool</summary>", ""]
             lines += [f"- `{t.get('name')}` {t.get('summary', '')}" for t in m["tool_calls"]]
             lines += ["", "</details>", ""]
+        if m is messages[-1] and stop_card and stop_card["note"]:
+            lines += [f"> Giliran berhenti karena batas ({stop_card['stopped']}): {stop_card['note']}", ""]
     # text/plain + attachment: tidak pernah dirender sebagai HTML oleh browser.
     return PlainTextResponse("\n".join(lines), media_type="text/markdown; charset=utf-8", headers={
         "Content-Disposition": f'attachment; filename="chat-{analysis_id}-{session_id}.md"', "X-Content-Type-Options": "nosniff"})

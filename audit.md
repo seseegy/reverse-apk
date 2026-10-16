@@ -680,3 +680,46 @@ Ruang lingkup: `services/web/app/aibuild.py`, tiga tool di `ai/tools.py`, blok p
 **Belum terbukti.** Docker/Compose nyata, bench/Landlock nyata dalam loop chat, RQ nyata, dan model nyata (apakah ia mengikuti alur, tidak mengarang "selesai"); langkah 14 hanya diuji dengan `docker` palsu + bench palsu di sandbox. Cek live opsional/manual.
 
 **Tes lama yang sengaja diubah** (rincian di PR): `test_web_builds` (`build_diff_request` kini dipakai `builds.py` dan `aibuild.py`; `build_init_request` tetap hanya `builds.py`), `test_build_nb` (registri tool bertambah tepat tiga; asersi nama diperketat jadi daftar eksak), `test_verify_build_script` (docker palsu per-analisis, hitungan analisis/penghapusan/`sed`). Tidak ada tes isolasi yang dilonggarkan.
+
+### 10.21 Tahap 5: tab Build di web — persetujuan, unduhan, badging (Okt 2026)
+
+Ruang lingkup: `services/web/app/routes_build.py` (+ template `build*.html`, `static/js/build.js`), `builds.open_download`, badging di `runner/buildstage.py`/`rvcore/buildproto.py`/`worker/builds.py`, `app.webcheck`. Detail: `docs/prd/09-bundles-and-workbench.md` "Status Tahap 5", `docs/deploy.md` "Build web Tahap 5".
+
+**Permukaan baru.** (1) Sebelas rute di balik sesi login: 5 GET (daftar, halaman build/layar persetujuan, status JSON, unduh, skrip) dan 6 POST (init, request, approve, requeue, reject, cancel), semua POST dengan CSRF. (2) **Persetujuan lewat web** — sebelumnya hanya CLI. (3) **Unduhan APK hasil modifikasi** — sebelumnya tidak ada jalur sama sekali. (4) Runner menjalankan `aapt2 dump badging` pada `unsigned.apk` dan mengembalikan teks terstruktur ke worker. (5) `app.webcheck` membuat sesi pemilik dari `SECRET_KEY` (hanya lewat `docker compose exec`).
+
+**Risiko dan mitigasi.**
+| Risiko | Mitigasi | Bukti |
+|----|----|----|
+| AI/isi APK menyetujui sendiri | tidak ada tool/impor dari `app/ai/*` ke `builds`/`routes_build` (AST + impor transitif; `app.routes_build` masuk daftar terlarang); persetujuan = sesi pemilik + CSRF + pernyataan + hash diff | `test_ai_no_approve_invariant.py`, `test_web_build_ui.py` |
+| CSRF / klik tanpa sadar | field `csrf` dibandingkan `tokens_equal`, cookie `SameSite=Strict`; persetujuan butuh kotak pernyataan dicentang DAN hash diff yang cocok; tanpa pernyataan = tidak dicatat | tes 403 untuk tiap POST, pernyataan, hash salah |
+| XSS dari path diff / galat / alasan tolak / nilai `q` | autoescape Jinja, tanpa filter safe, CSP `script-src 'self'` tanpa inline; notifikasi hanya kode tetap | tes XSS di path, galat, `q`, `notice` |
+| Persetujuan basi (diff berubah setelah diajukan) | hash tersimpan dibandingkan di `builds.approve_build` dan CAS `store.approve_build`; runner menghitung ulang hash atas snapshot (`workspace_changed`) | tes lama + tes UI |
+| Artefak diganti runner terkompromi SESUDAH terbit (R-1) | **salin-lalu-hash-lalu-bandingkan**: hash dari SALINAN anonim di volume yang tidak dipasang di runner == hash DB, baru dialirkan; tidak cocok 409 tanpa byte | tes flip/grow/shrink/empty, symlink, FIFO, direktori, symlink pada folder build |
+| Penyajian berkas berbahaya | hanya `done` milik analisis di path; nama dari DB lolos `OUTPUT_NAME_RE`; `attachment` + `nosniff` + `no-store` + CSP `sandbox`; MIME tetap | tes header |
+| Disk/slot habis oleh unduhan | maks. 2 salinan serentak (503), cek ruang +512 MiB (507), salinan anonim ditutup saat selesai/terputus | tes slot, disk, putus di tengah |
+| Audit | `build_download` (analisis, build, hash hasil, hash diff, ukuran, IP) hanya untuk unduhan yang lulus verifikasi; `build_approved` `via=ui` | tes audit |
+| Runner jahat berbohong soal badging | normalisasi ketat (`normalize_badging`); badging tidak pernah dipakai untuk keputusan keamanan (hanya tampilan dan peringatan); wajib terbaca agar build tidak terbit buta | `test_build_badging.py` |
+| aapt2 diganti penyerang di tmpfs runner | memakai `/opt/apktool/aapt2` (rootfs read-only, root, hash terpin), bukan `/opt/aapt-exec` | tes default Env |
+
+**Risiko sisa (jujur).** (a) Prompt-injection tetap dapat memengaruhi *apa yang diminta AI untuk diubah*; layar persetujuan hanya menampilkan berkas dari `diff_summary` (<= 8 KiB) dan **tidak bisa membuka isi berkas** — pemilik harus memakai `buildctl diff`/`shell` untuk perubahan yang meragukan. Orang cenderung menyetujui tanpa membaca; pengamannya hanya pernyataan, penanda “diminta oleh AI”, dan kelompok/urutan berkas. (b) Persetujuan berlaku atas diff base; runner terkompromi tetap bisa menyisipkan isi saat membangun (R-2, tidak berubah) — hasil bertanda tangan kunci uji pemilik, jangan dipasang di perangkat utama tanpa kehati-hatian. (c) Unduhan sampai 1 GiB: salin + hash ganda memakan waktu dan I/O (belum diukur). (d) `app.webcheck` dan CLI berarti siapa pun dengan `docker exec` ke web sudah berdaulat penuh (sudah demikian lewat `SECRET_KEY`). (e) Unduhan dicatat sebelum byte pertama; unduhan yang terputus tetap tercatat.
+
+**Belum terbukti.** Docker/VPS, `aapt2 dump badging` nyata (format keluaran 3.0.3), browser nyata, Redis/RQ nyata, unduhan besar, perilaku Starlette pada putus-sambung klien nyata, pemasangan di perangkat Android.
+
+### 10.22 Tahap 6: limit AI, berhenti rapi, anggaran, batas 1 GB (Okt 2026)
+
+**Permukaan baru dan keputusan.**
+- *Limit alur bengkel*: waktu total shell, keluaran total shell, dan build per sesi (bawaan 900 dtk / 400000 karakter / 5; 0 = tanpa batas). Pelanggaran = hasil tool galat (bukan exception) + giliran ditutup tanpa tool. Risiko yang ditutup: loop shell yang membengkakkan konteks (`AI_MAX_TURN_TOOL_CHARS` bawaan 0) dan AI yang terus mengajukan build di satu sesi.
+- *Pesan lanjutan*: dikirim server dari konstanta (`continue: true`), bukan dari klien/model; request dengan teks/lampiran/tanpa sesi ditolak. Tidak membuka jalur baru bagi prompt injection: teks yang dikirim identik dengan yang bisa diketik pemilik sendiri, dan rute tetap CSRF + sesi login.
+- *Penanda berhenti*: baris `ai_call` berbiaya nol menggantikan kolom baru agar tidak bertabrakan dengan migrasi skema tahap build. Dampak: baris itu tampak di tabel `ai_call` (purpose `chat_stop`); tidak memengaruhi total anggaran (`SUM(cost_credits)`).
+- *Anggaran*: penutupan rapi pada >= 90% (mulai langkah ke-2). Sisa risiko: satu panggilan penutup bisa melewati batas keras (konservatif, dicatat di `budget.py`).
+- *Batas ukuran*: lihat PRD 09 "Status Tahap 6" D. Menaikkan `ZIP_MAX_ENTRY_MB`, `MAX_OUTPUT_MB`, `BENCH_*`, `SIGN_MAX_MB`, dan tenggat memperlebar permukaan zip-bomb/DoS pada runner (tanpa jaringan, `mem_limit` tidak berubah); pengaman rasio, jumlah entri, dan batas pohon tetap.
+
+**Temuan selama pengerjaan.**
+1. Ringkasan galat tool (`_summarize`) menampilkan "galat: gagal" untuk pesan > 160 karakter; pesan batas baru termasuk yang panjang. Diperbaiki (dipotong 160, bukan dibuang).
+2. `ZIP_MAX_*` tidak diteruskan compose ke satu layanan pun, jadi mengubahnya di `.env` tidak berpengaruh; kini diteruskan ke web, runner, worker dengan tes paritas.
+3. Salinan memfd upload paket (`UPLOAD_COPY_MAX_WORKER_MB` 256, `mem_limit: 512m`) membuat build XAPK/APKS > 256 MiB tetap ditolak; dicatat sebagai batas yang diketahui, bukan disamarkan dengan menaikkan memori.
+4. Kalimat tes Tahap 4 "tidak ada env `AI_BUILD*`" dilonggarkan sadar (hanya `AI_BUILD_MAX_PER_SESSION`).
+
+**Terbukti (sandbox, klien dan bench palsu):** `tests/test_tahap6_limits.py` (48 tes): bawaan/klem konfigurasi, tiga limit (galat jelas, `limit_hit`, tidak menyentuh bench, 0 = nonaktif), penutupan rapi per alasan di loop agent, ringkasan server saat model diam, kartu tanpa tombol untuk anggaran/build, penanda dan muat ulang, `continue` tetap dari server, snapshot anggaran, anggaran dicek sebelum tiap panggilan di loop shell, putaran tool build dihitung ke anggaran sesi, konsistensi angka kode/compose/.env.example dan urutan rantai batas ukuran, `mem_limit` tidak naik.
+
+**BELUM terbukti.** Model nyata (apakah ia mematuhi pesan penutup dan tidak menawarkan lanjut saat anggaran habis), UI di browser nyata (hanya tes string/DOM sederhana dan `node --check`), Docker/Compose, seluruh angka ukuran terhadap APK/XAPK 1 GB sungguhan (ASUMSI), dan memori JVM di cgroup.

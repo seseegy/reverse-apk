@@ -127,7 +127,7 @@ def test_signer_service_is_isolated_secretless_and_profiled():
     assert _list_items(block, "tmpfs") == ["/tmp:rw,size=256m,nosuid"]
     assert _list_items(block, "security_opt") == ["no-new-privileges:true"]
     env = re.search(r"(?m)^    environment:\n((?:      \w+: .*\n?)+)", block).group(1)
-    assert [ln.strip() for ln in env.splitlines()] == ["DATA_DIR: /data", "SIGN_TIMEOUT: ${SIGN_TIMEOUT:-900}", "SIGN_MAX_MB: ${SIGN_MAX_MB:-1100}",
+    assert [ln.strip() for ln in env.splitlines()] == ["DATA_DIR: /data", "SIGN_TIMEOUT: ${SIGN_TIMEOUT:-900}", "SIGN_MAX_MB: ${SIGN_MAX_MB:-1280}",
                                                   "SIGN_MAX_TOTAL_MB: ${SIGN_MAX_TOTAL_MB:-3072}"]
 
 
@@ -232,7 +232,7 @@ def test_sign_env_read_by_the_daemon_is_forwarded_by_compose_and_listed_in_env_e
     assert "DATA_DIR" in src and "      DATA_DIR: /data" in block
     # Bawaan di compose/.env.example sama dengan bawaan kode.
     assert '_int_env("SIGN_TIMEOUT", 900,' in src and "SIGN_TIMEOUT: ${SIGN_TIMEOUT:-900}" in block and "#SIGN_TIMEOUT=900" in example
-    assert '_int_env("SIGN_MAX_MB", 1100,' in src and "SIGN_MAX_MB: ${SIGN_MAX_MB:-1100}" in block and "#SIGN_MAX_MB=1100" in example
+    assert '_int_env("SIGN_MAX_MB", 1280,' in src and "SIGN_MAX_MB: ${SIGN_MAX_MB:-1280}" in block and "#SIGN_MAX_MB=1280" in example
     assert '_int_env("SIGN_MAX_TOTAL_MB", 3072,' in src and "SIGN_MAX_TOTAL_MB: ${SIGN_MAX_TOTAL_MB:-3072}" in block and "#SIGN_MAX_TOTAL_MB=3072" in example
 
 

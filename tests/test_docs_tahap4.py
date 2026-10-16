@@ -1,6 +1,6 @@
 """Konsistensi dokumen Tahap 4 (tool AI build): docs/deploy.md, PRD 05/09, README, audit.md, .env.example dan `scripts/verify-build.sh`.
 
-Yang dijaga: tiap langkah 14a-14n punya baris gejala di deploy.md DENGAN nama persis seperti di skrip; persetujuan ditulis masih CLI-only sampai Tahap 5; cek live dengan model nyata
+Yang dijaga: tiap langkah 14a-14n punya baris gejala di deploy.md DENGAN nama persis seperti di skrip; bagian Tahap 4 jujur bahwa persetujuan CLI-only sampai Tahap 5 dan AI tidak bisa menyetujui (sejak Tahap 5 ada juga tombol web, dijaga test_docs_tahap5.py); cek live dengan model nyata
 (`make ai-check`) ditulis opsional/manual; BELUM DIUJI tetap ada; tidak ada env baru (jadi `.env.example` tidak perlu entri baru).
 """
 
@@ -39,7 +39,7 @@ def test_deploy_has_a_symptom_row_for_every_step_with_the_exact_script_name():
         assert len(cells) == 3 and all(cells), rows[name]
 
 
-def test_deploy_says_approval_is_cli_only_until_stage_5_and_the_ai_cannot_approve():
+def test_deploy_stage4_section_says_approval_was_cli_until_stage_5_and_the_ai_cannot_approve():
     sec = deploy_section()
     assert "buildctl approve" in sec and "Tahap 5" in sec and "CLI" in sec
     assert re.search(r"tidak punya tool untuk menyetujui", sec)
@@ -58,7 +58,7 @@ def test_deploy_documents_the_helper_commands_and_the_unproven_parts():
         assert needle in sec, needle
 
 
-def test_prd_readme_and_audit_mention_the_tools_and_cli_only_approval():
+def test_prd_readme_and_audit_mention_the_tools_and_the_owner_approval_paths():
     for path in ("docs/prd/05-chat-agent.md", "docs/prd/09-bundles-and-workbench.md", "README.md", "audit.md"):
         text = read(path)
         for tool in ("bench_diff", "request_build", "get_build_status"):
@@ -67,9 +67,11 @@ def test_prd_readme_and_audit_mention_the_tools_and_cli_only_approval():
     assert "### 10.20 Tahap 4" in read("audit.md") and "## Status Tahap 4" in read("docs/prd/09-bundles-and-workbench.md")
 
 
-def test_no_new_env_means_env_example_is_untouched_by_this_stage():
+def test_stage_4_itself_added_no_env_but_stage_6_added_the_documented_build_limit():
+    """Tahap 4 tidak menambah env. Kalimat lama ("AI_BUILD tidak ada") dilonggarkan SADAR di Tahap 6: AI_BUILD_MAX_PER_SESSION sah, selain itu tetap tidak ada env AI_BUILD*."""
     env = read(".env.example")
-    assert "AI_SHELL_ENABLED" in env and "AI_BUILD" not in env and "AITOOL" not in env
+    assert "AI_SHELL_ENABLED" in env and "AITOOL" not in env
+    assert set(re.findall(r"AI_BUILD[A-Z_]*", env)) == {"AI_BUILD_MAX_PER_SESSION"}
 
 
 def test_the_dropped_diff_preview_is_stated_explicitly_in_every_owner_document():

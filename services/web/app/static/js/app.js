@@ -1397,6 +1397,7 @@
     var attBox = $("[data-atts]", root), attBtn = $("[data-attach]", root), fileInput = $("[data-file]", root), attWarn = $("[data-att-warn]", root);
     var dz = $("[data-dropzone]", root), chatMain = $(".chat-main", root);
     var maxFile = parseInt(root.getAttribute("data-max-file") || "0", 10) || 0;
+    var continueText = root.getAttribute("data-continue-text") || "Lanjutkan.";      // teks TETAP dari server; server juga menggantinya sendiri bila `continue: true`
     var es = null, busy = false, lastUserText = "", peekToken = 0, peekOpener = null, peekDir = "";
     var atts = [], attSeq = 0;
     function setPeekNote(t) { peekNote.textContent = (peekDir ? peekDir + "  ·  " : "") + t; }
@@ -1516,17 +1517,47 @@
       }
       scrollDown(true);
     }
+    // Cadangan teks kartu bila server tidak mengirim d.stop (galat internal). Kuncinya HARUS sama dengan agent.STOPPED_VALUES kecuali "done" (dijaga tes).
+    var STOP_NOTES = { max_steps: "Berhenti di batas langkah (AI_MAX_STEPS).", tool_budget: "Batas total data tool giliran ini tercapai.", shell_budget: "Batas shell giliran ini tercapai.",
+                       repeat: "Berhenti karena panggilan yang sama berulang.", budget: "Anggaran habis atau hampir habis. Naikkan anggaran di .env, tunggu besok, atau mulai sesi baru.",
+                       build_limit: "Batas permintaan build per sesi tercapai (AI_BUILD_MAX_PER_SESSION).", cancelled: "Dihentikan.", error: "Terjadi galat." };
+    function continueButton() {                                    // pesan lanjutan TETAP (teks server), dikirim sebagai giliran baru; tombol Berhenti tidak berubah
+      var cb = document.createElement("button"); cb.type = "button"; cb.className = "btn btn-ghost btn-sm"; cb.textContent = "Lanjutkan"; cb.setAttribute("data-continue", "");
+      cb.addEventListener("click", function () { cb.disabled = true; sendContinue(); });
+      return cb;
+    }
+    function meterClass(pct) { return "meter" + (pct >= 90 ? " is-bad" : pct >= 70 ? " is-warn" : ""); }
+    function budgetWarning(b) {                                    // teks peringatan dini (>= 80%) atau habis; "" = tidak ada
+      if (b.daily_exhausted) return "Anggaran harian habis. Naikkan AI_DAILY_BUDGET_CREDITS atau tunggu besok.";
+      if (b.session_exhausted) return "Anggaran sesi habis. Mulai sesi baru atau naikkan AI_SESSION_BUDGET_CREDITS.";
+      if (b.warn === "session") return "Anggaran sesi ini hampir habis (80% atau lebih).";
+      if (b.warn === "today") return "Anggaran harian hampir habis (80% atau lebih).";
+      return "";
+    }
     function updateBudget(b) {
       if (!b) return;
       var set = function (sel, t) { var el = $(sel, root); if (el) el.textContent = t; };
       set("[data-b-today]", fmtNum(b.today, 3));
       set("[data-b-idr]", fmtNum(b.today_idr));
+      if (typeof b.today_remaining === "number") set("[data-b-today-left]", fmtNum(b.today_remaining, 3));
       var bar = $("[data-b-bar]", root), meter = $("[data-b-meter]", root);
       if (bar && b.today_limit) {
         var pct = Math.min(100, b.today / b.today_limit * 100);
         bar.style.width = pct.toFixed(1) + "%";
-        if (meter) meter.className = "meter" + (pct >= 90 ? " is-bad" : pct >= 70 ? " is-warn" : "");
+        if (meter) meter.className = meterClass(pct);
       }
+      if (b.session_limit) {                                       // anggaran SESI + sisa (baris ini hanya ada bila AI_SESSION_BUDGET_CREDITS diisi)
+        set("[data-b-session]", fmtNum(b.session || 0, 3));
+        if (typeof b.session_remaining === "number") set("[data-b-session-left]", fmtNum(b.session_remaining, 3));
+        var sbar = $("[data-b-session-bar]", root), smeter = $("[data-b-session-meter]", root);
+        if (sbar) {
+          var spct = Math.min(100, (b.session || 0) / b.session_limit * 100);
+          sbar.style.width = spct.toFixed(1) + "%";
+          if (smeter) smeter.className = meterClass(spct);
+        }
+      }
+      var warn = $("[data-b-warn]", root);
+      if (warn) { var wt = budgetWarning(b); warn.textContent = wt; warn.hidden = !wt; }
     }
 
     // --- pratinjau kode untuk sitasi (tanpa meninggalkan percakapan)
@@ -1812,15 +1843,13 @@
         var meta = document.createElement("div"); meta.className = "msg-meta";
         meta.textContent = d.steps + " langkah · giliran ≈ Rp" + fmtNum(d.turn_idr, 2) + " · sesi ≈ Rp" + fmtNum(d.session_idr, 2);
         foot.appendChild(meta);
-        var notes = { max_steps: "Berhenti di batas langkah (AI_MAX_STEPS).", budget: "Anggaran habis.", cancelled: "Dihentikan.", error: "Terjadi galat.",
-                      tool_budget: "Batas total data tool giliran ini tercapai; jawaban disusun dari yang sudah dibaca." };
-        if (d.stopped !== "done" && notes[d.stopped]) {
-          var n = document.createElement("div"); n.className = "msg-note";
-          var nt = document.createElement("span"); nt.textContent = notes[d.stopped] + (d.error ? " " + d.error : ""); n.appendChild(nt);
-          if (d.stopped === "max_steps" || d.stopped === "tool_budget") {
-            var cb = document.createElement("button"); cb.type = "button"; cb.className = "btn btn-ghost btn-sm"; cb.textContent = "Lanjutkan";
-            cb.addEventListener("click", function () { cb.disabled = true; send("lanjutkan", []); });
-            n.appendChild(cb);
+        // Kartu "berhenti": teks dan boleh-tidaknya tombol Lanjutkan datang dari SERVER (d.stop); STOP_NOTES hanya cadangan (mis. galat internal tanpa d.stop).
+        var stop = d.stop || {}, noteText = stop.note || STOP_NOTES[d.stopped];
+        if (d.stopped !== "done" && noteText) {
+          var n = document.createElement("div"); n.className = "msg-note stop-card"; n.setAttribute("data-stop-card", ""); n.setAttribute("data-stopped", d.stopped);
+          var nt = document.createElement("span"); nt.textContent = noteText + (d.error && d.stopped !== "budget" ? " " + d.error : ""); n.appendChild(nt);
+          if (stop.can_continue) {
+            n.appendChild(continueButton());
           } else if (d.stopped === "error") {
             var rb = document.createElement("button"); rb.type = "button"; rb.className = "btn btn-ghost btn-sm"; rb.textContent = "Coba lagi";
             rb.addEventListener("click", function () { rb.disabled = true; send(lastUserText || "Lanjutkan", []); });   // lampiran pesan itu sudah tersimpan di riwayat
@@ -1863,11 +1892,13 @@
       };
     }
 
-    function send(text, retryAtts) {
+    function sendContinue() { send(continueText, [], true); }
+    function send(text, retryAtts, cont) {
       text = String(text || "").trim();
-      var sent = retryAtts || readyAtts();
+      var sent = cont ? [] : (retryAtts || readyAtts());
       if ((!text && !sent.length) || busy) return;
       if (!retryAtts && (uploading() || visionBlocked())) return;
+      if (cont && !sessionId) return;                                // Lanjutkan butuh sesi yang sudah ada
       lastUserText = text;
       if (sugg) sugg.hidden = true;
       var u = addMsg("user", "Anda");
@@ -1875,7 +1906,7 @@
       if (text) { var ub = document.createElement("div"); ub.className = "msg-body msg-plain"; ub.textContent = text; u.appendChild(ub); }
       input.value = ""; grow(); setBusy(true); statusEl.textContent = "Mengirim…"; scrollDown(true);
 
-      var payload = { text: text, session_id: sessionId ? parseInt(sessionId, 10) : null };
+      var payload = cont ? { "continue": true, session_id: parseInt(sessionId, 10) } : { text: text, session_id: sessionId ? parseInt(sessionId, 10) : null };
       if (sent.length) payload.attachment_ids = sent.map(function (a) { return a.id; });
       if (modelEl && modelEl.value) payload.model = modelEl.value;
       var v = newAssistantView(payload.model || root.getAttribute("data-default-model") || "");     // nama model langsung tampil (tidak menunggu jawaban selesai)
@@ -1923,6 +1954,7 @@
     input.addEventListener("input", function () { grow(); updateSend(); });
     input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(input.value); } });
     $all("[data-suggest]", root).forEach(function (b) { b.addEventListener("click", function () { send(b.getAttribute("data-suggest"), []); }); });
+    $all("[data-continue]", root).forEach(function (b) { b.addEventListener("click", function () { b.disabled = true; sendContinue(); }); });    // kartu hasil render server (muat ulang)
     function stop() {
       if (!sessionId) return;
       stopBtn.disabled = true; statusEl.textContent = "Menghentikan…";

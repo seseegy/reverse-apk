@@ -2,7 +2,7 @@
 
 Prinsip (mengikat; dijaga tes AST di tests/test_aibuild_helpers.py):
   * Modul ini TIDAK mengimpor `app.builds`/`app.buildctl`/`app.jobs`/RQ/Redis/signspool dan tidak memanggil persetujuan, tanda tangan, unduh, atau pembacaan artefak.
-    Jalur AI hanya bisa membuat build `awaiting_approval` (`store.create_build`); `approved` hanya lewat `store.approve_build` milik pemilik (CLI).
+    Jalur AI hanya bisa membuat build `awaiting_approval` (`store.create_build`); `approved` hanya lewat `store.approve_build` milik pemilik (tab Build web dengan sesi + CSRF, atau CLI).
   * `analysis_id` dan `session_id` datang dari `Scope` (dibuat server dari konteks chat), TIDAK PERNAH dari argumen model. `build_id` dari model divalidasi dan dicek milik analisis ini.
   * Hash diff SELALU dihitung ulang dari bench (`shellspool` op `diff`). Hash dari model hanya pembanding dan tidak pernah disimpan.
   * Hasil bench/DB/runner = data tak tepercaya: pesan galat disusun dari tabel teks tetap (tanpa teks bench/DB), teks lain disaring `sanitize_status`/`sanitize_content`.
@@ -72,8 +72,8 @@ _MESSAGES = {
     "pohon_terlalu_besar": "Ruang kerja terlalu besar atau terlalu dalam untuk dihitung diff-nya.",
     "diff_kosong": "Ruang kerja tidak berbeda dari baseline; tidak ada yang perlu dibangun.",
     "hash_tidak_cocok": "Hash diff yang diberikan tidak sama dengan diff ruang kerja saat ini; periksa lagi dengan bench_diff.",
-    "build_tertunda": "Sudah ada build aktif #{bid} ({label}) untuk analisis ini; AI tidak dapat menggantinya. Pemilik bisa membatalkan lewat CLI.",
-    "baseline_tidak_utuh": "Hampir seluruh proyek terhapus dari baseline; permintaan ditolak. Pemilik tetap bisa memeriksa lewat CLI.",
+    "build_tertunda": "Sudah ada build aktif #{bid} ({label}) untuk analisis ini; AI tidak dapat menggantinya. Pemilik bisa membatalkan lewat tab Build atau CLI.",
+    "baseline_tidak_utuh": "Hampir seluruh proyek terhapus dari baseline; permintaan ditolak. Pemilik tetap bisa memeriksa lewat tab Build atau CLI.",
     "build_bukan_milik_analisis": "Build tidak ditemukan untuk analisis ini.",
     "ringkasan_terlalu_besar": "Ringkasan diff terlalu besar untuk disimpan.",
     "gagal": "Permintaan gagal diproses.",
@@ -223,7 +223,7 @@ def _requested(row: Any, reused: bool, counts: dict[str, int] | None) -> dict[st
 
 
 def request(scope: Scope, expected_sha256: object, redactor: Redactor | None = None, *, build_requests: int = 0,
-            count_bench: Callable[[], None] | None = None) -> dict[str, Any]:
+            count_bench: Callable[[], None] | None = None, before_create: Callable[[], None] | None = None) -> dict[str, Any]:
     """Ajukan build dari diff SAAT INI (status `awaiting_approval`). Urutan fail-closed, murah dulu:
     gerbang -> argumen -> analisis/apktool/source_kind -> tolak murah bila ada build aktif non-awaiting (tanpa bench) -> hitung ulang diff dari bench ->
     kosong / baseline rusak / hash model beda -> pakai ulang awaiting berhash sama atau tolak -> batas 1 build baru per giliran -> `store.create_build`.
@@ -260,6 +260,8 @@ def request(scope: Scope, expected_sha256: object, redactor: Redactor | None = N
         raise _tertunda(active)
     if build_requests >= 1:
         raise BuildScopeError("batas_giliran")
+    if before_create is not None:
+        before_create()                 # batas per SESI (Tahap 6): hanya untuk build yang benar-benar akan dibuat; melempar galat tool sendiri
     summary = build_summary(diff)
     with closing(scope.db()) as conn:
         try:

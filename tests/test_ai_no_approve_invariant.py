@@ -1,5 +1,5 @@
 """Tahap 4, sub-area 2: invarian AST/impor. Kode tool AI (app/ai/*.py + app/aibuild.py, beserta dependensi TRANSITIFNYA) tidak punya jalur ke
-persetujuan/penandatanganan/unduh/pembacaan artefak. Analisis statis: simpul `ast.Name`/`ast.Attribute`/`ast.alias`, BUKAN string atau docstring.
+persetujuan/penandatanganan/unduh/pembacaan artefak (termasuk rute web `app.routes_build` Tahap 5: persetujuan web hanya lewat sesi pemilik + CSRF). Analisis statis: simpul `ast.Name`/`ast.Attribute`/`ast.alias`, BUKAN string atau docstring.
 
 Batas jujur: ini menjaga jalur yang tampak di kode; perilaku diuji di test_ai_build_tools.py (tool persetujuan tidak ada, store.approve_build dipatahkan tidak terpanggil).
 """
@@ -15,7 +15,7 @@ WEB = ROOT / "services" / "web"
 RVCORE = ROOT / "services" / "rvcore"
 AI_DIR = WEB / "app" / "ai"
 # Modul tempat jalur terlarang hidup. `rvcore.store` boleh diimpor (tool memakai get/create), tetapi atributnya diperiksa lewat daftar nama terlarang di bawah.
-FORBIDDEN_MODULES = {"app.builds", "app.buildctl", "app.jobs", "rvcore.signspool", "rvcore.bundleout", "rq", "redis", "worker", "runner"}
+FORBIDDEN_MODULES = {"app.builds", "app.buildctl", "app.routes_build", "app.jobs", "rvcore.signspool", "rvcore.bundleout", "rq", "redis", "worker", "runner"}
 BANNED_NAMES = {"approve_build", "queue_build", "reject_build", "claim_build", "mark_signing", "finish_build", "fail_build", "request_cancel_build", "cancel_build",
                 "delete_build", "artifact_info", "enqueue_build", "sign_build", "download_artifact", "open_artifact", "build_init_request", "parse_init_result"}
 BANNED_RE = re.compile(r"^(approve|enqueue_|sign_|download_)\w*$")

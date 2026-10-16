@@ -112,10 +112,40 @@ class TurnRegistry:
 REGISTRY = TurnRegistry()
 
 
+# --- penanda "berhenti karena batas" (Tahap 6). Tabel chat_message tidak punya kolom `stopped` dan migrasi sengaja dihindari (skema v5 dipakai bersama tahap build),
+# jadi alasan berhenti dicatat sebagai baris ai_call BERBIAYA NOL (purpose=chat_stop, error="stopped:<alasan>:<id pesan asisten>"). Ia tidak ikut anggaran (cost 0), tidak
+# punya klien lain, dan hanya berlaku bila id pesan itu masih pesan TERAKHIR sesi: begitu pengguna melanjutkan, kartunya hilang sendiri.
+STOP_PURPOSE = "chat_stop"
+MARKED_STOPS = agent.CONTINUABLE | agent.NEEDS_OWNER        # hanya yang punya kartu bermakna setelah muat ulang (cancelled/error tidak)
+
+
+def mark_stop(conn: Any, *, analysis_id: int, session_id: int, message_id: int, stopped: str, model: str = "") -> None:
+    if stopped in MARKED_STOPS:
+        store.record_ai_call(conn, purpose=STOP_PURPOSE, model=model or "-", ok=True, error=f"stopped:{stopped}:{int(message_id)}", analysis_id=analysis_id, session_id=session_id)
+
+
+def stop_card_for(conn: Any, session_id: int, messages: list[Any]) -> dict[str, Any] | None:
+    """Kartu berhenti untuk pesan terakhir sesi (muat ulang halaman, ekspor), atau None. Penanda harus menunjuk PESAN TERAKHIR dan pesan itu milik asisten."""
+    if not messages or messages[-1]["role"] != "assistant":
+        return None
+    row = conn.execute("SELECT error FROM ai_call WHERE session_id = ? AND purpose = ? ORDER BY id DESC LIMIT 1", (session_id, STOP_PURPOSE)).fetchone()
+    parts = str(row[0] or "").split(":") if row else []
+    if len(parts) != 3 or parts[0] != "stopped" or parts[1] not in MARKED_STOPS or parts[2] != str(messages[-1]["id"]):
+        return None
+    return agent.stop_info(parts[1])
+
+
 def file_view(f: dict[str, Any]) -> dict[str, Any]:
     """Bentuk ringkas berkas untuk UI (peristiwa SSE 'file' / 'final')."""
     return {"id": f["id"], "path": f.get("path"), "name": f["name"], "size": f["size"], "revision": f.get("link_revision", f.get("revision", 1)),
             "created": bool(f.get("created")), "media": f.get("media", "text")}
+
+
+def budget_view(snap: dict[str, Any]) -> dict[str, Any]:
+    """Bagian snapshot anggaran yang dikirim ke browser (peristiwa final) dan dirender template: pemakaian, batas, sisa, persen, peringatan dini."""
+    keys = ("today", "today_limit", "today_idr", "today_remaining", "today_pct", "session", "session_limit", "session_remaining", "session_pct",
+            "daily_exhausted", "session_exhausted", "warn", "wrapup")
+    return {k: snap[k] for k in keys}
 
 
 def run_in_thread(turn: Turn, *, cfg: AIConfig, prices: PriceTable, analysis_id: int, work, db, session_id: int,
@@ -150,13 +180,15 @@ def run_in_thread(turn: Turn, *, cfg: AIConfig, prices: PriceTable, analysis_id:
                 mid = store.add_chat_message(conn, session_id, "assistant", content, tool_calls=res.tool_calls,
                                              citations=res.citations, model=res.model)
                 store.link_outputs(conn, mid, [(o["id"], o["revision"]) for o in outputs])
+                mark_stop(conn, analysis_id=analysis_id, session_id=session_id, message_id=mid, stopped=res.stopped, model=res.model)
                 spent = store.ai_spent(conn, session_id=session_id)
                 snap = ai_budget.snapshot(conn, cfg, session_id)
             emit("final", {"content": content, "stopped": res.stopped, "error": res.error, "steps": res.steps, "model": res.model,
                            "citations": res.citations, "cost_credits": res.cost_credits, "session_credits": spent,
                            "session_idr": cfg.idr(spent), "turn_idr": cfg.idr(res.cost_credits),
                            "tools": len(res.tool_calls), "files": [file_view(o) for o in outputs],
-                           "budget": {"today": snap["today"], "today_limit": snap["today_limit"], "today_idr": snap["today_idr"]}})
+                           "stop": agent.stop_info(res.stopped), "message_id": mid,
+                           "budget": budget_view(snap)})
         except Exception as exc:  # noqa: BLE001 - giliran tidak boleh meninggalkan klien menunggu selamanya
             ai_log.error("giliran chat gagal: session=%s analysis=%s model=%s: %s", session_id, analysis_id, turn.model, describe(exc, cfg))
             emit("final", {"content": "", "stopped": "error", "error": f"Galat internal ({type(exc).__name__}).",

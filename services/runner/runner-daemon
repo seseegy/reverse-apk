@@ -55,7 +55,7 @@ LAYOUT = Layout(DATA_DIR)
 SPOOL = Spool(LAYOUT.spool)
 
 RECYCLE = os.environ.get("RUNNER_RECYCLE", "1").strip().lower() in {"1", "true", "yes", "on"}
-MAX_OUTPUT_BYTES = int(os.environ.get("MAX_OUTPUT_MB", "3072")) * MIB
+MAX_OUTPUT_BYTES = int(os.environ.get("MAX_OUTPUT_MB", "6144")) * MIB
 MAX_OUTPUT_FILES = int(os.environ.get("MAX_OUTPUT_FILES", "600000"))
 MAX_LOG_BYTES = 5 * MIB
 MAX_BASE_APK_BYTES = int(os.environ.get("MAX_BASE_APK_MB", "1024")) * MIB   # batas byte NYATA yang ditulis saat mengekstrak base dari paket XAPK/APKS

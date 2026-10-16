@@ -1,7 +1,8 @@
 """Lapisan web pipeline build (Tahap 2b, FEAT E): fungsi murni di atas store/shellspool/jobs. TANPA FastAPI, TANPA rute, TANPA tool AI.
 
-Satu-satunya pemanggil adalah `app.buildctl` (CLI pemilik di kontainer web, lewat `docker compose exec`). Persetujuan build HANYA terjadi di `approve_build` dan terikat pada
-`diff_sha256` yang tercatat; tidak ada modul di `app/ai/` yang mengimpor modul ini (dijaga tes).
+Pemanggil hanya dua, keduanya milik pemilik: `app.buildctl` (CLI di kontainer web, lewat `docker compose exec`; `via='cli'`) dan `app.routes_build` (halaman web Tahap 5 di
+balik sesi login + CSRF; `via='ui'`). Persetujuan build HANYA terjadi di `approve_build` dan terikat pada `diff_sha256` yang tercatat; tidak ada modul di `app/ai/` yang
+mengimpor modul ini atau `routes_build` (dijaga tes AST/impor transitif).
 
 Semua kebergantungan masuk lewat `Deps` (tes menyuntik bench/Redis palsu). Galat selalu `BuildsError(kode, pesan)` dengan `kode` yang stabil; CLI mencetaknya sebagai `kode=`.
 Semua id divalidasi 1..MAX_PROTO_ID SEBELUM menyentuh bench/runner (id lebih besar akan dibuang diam-diam oleh spool: "pickup timeout" yang menyesatkan).
@@ -10,18 +11,23 @@ Akses ke `builds/<aid>/<bid>` HANYA lewat `fsutil.open_dir_chain` (rantai O_NOFO
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import hmac
 import json
 import math
 import os
 import re
+import shutil
 import stat
+import tempfile
 import time
+import weakref
 import zipfile
 from contextlib import closing
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from pathlib import Path
+from typing import Any, BinaryIO, Callable
 
 import redis
 from rq import Queue
@@ -445,7 +451,8 @@ BUNDLE_MAX_APKS = 200
 BUNDLE_MAX_BYTES = 8 * 1024 * 1024 * 1024         # batas sabuk pengaman total byte APK yang dibaca ulang (zip-bomb di folder yang bisa ditulis runner)
 LIMIT_NOTICE = ("Tidak bisa dijanjikan 100%: aplikasi dengan anti-tamper, packer, Play Integrity, atau pemeriksaan hash .so dapat menolak berjalan setelah "
                 "ditandatangani ulang dengan kunci pemilik.")
-NO_DOWNLOAD_NOTICE = "Tidak ada tautan unduh atau tombol web (baru Tahap 5); salin berkas dari folder build di server oleh pemilik."
+NO_DOWNLOAD_NOTICE = ("Unduhan lewat web: tab Build pada halaman analisis (hanya sesi login; berkas disalin dan di-hash ulang sebelum dikirim). "
+                      "Tanpa web, pemilik dapat menyalin berkas dari folder build di server.")
 BUNDLE_HINTS = {
     "bundle_changed": "Paket unggahan berubah atau hilang sejak dianalisis; ajukan build baru.",
     "bundle_invalid": "Susunan paket XAPK/APKS tidak valid; periksa berkas asal.",
@@ -610,3 +617,134 @@ def artifact_info(d: Deps, build_id: int) -> dict[str, Any]:
         report["skrip_lokasi"] = f"builds/{row['analysis_id']}/{build_id}/{report.get('skrip', '')}" if report.get("skrip") else ""
         return {**info, "disk_sha256": disk, "cocok": True, "bundle": report}
     return {**info, "disk_sha256": disk, "cocok": True}
+
+
+# ---------------------------------------------------------------------------------------------------- unduhan (Tahap 5, FR-9.25)
+APK_MIME, ZIP_MIME, SCRIPT_MIME = "application/vnd.android.package-archive", "application/zip", "text/plain; charset=utf-8"
+DOWNLOAD_RESERVE = 512 * 1024 * 1024        # ruang bebas minimal di atas ukuran salinan sementara
+DOWNLOAD_MAX_BYTES = BUNDLE_MAX_BYTES       # batas sabuk pengaman satu salinan unduhan
+DOWNLOAD_KINDS = ("artifact", "script")
+
+
+def _close_copy(fh: Any, release: Callable[[], None] | None) -> None:
+    try:
+        fh.close()
+    finally:
+        if release is not None:
+            release()
+
+
+class DownloadCopy:
+    """Salinan ANONIM (tanpa nama di disk) artefak yang SUDAH diverifikasi: dibuat milik proses web di direktori yang tidak dipasang di runner, hash SALINAN == hash di DB.
+    `fh` terbuka di awal berkas; `close()` idempoten dan juga dijalankan saat objek dibuang (klien terputus, respons dibatalkan) lewat `weakref.finalize`."""
+
+    def __init__(self, fh: BinaryIO, *, name: str, size: int, sha256: str, media_type: str, which: str, release: Callable[[], None] | None = None) -> None:
+        self.fh, self.name, self.size, self.sha256, self.media_type, self.which = fh, name, size, sha256, media_type, which
+        self._fin = weakref.finalize(self, _close_copy, fh, release)
+
+    def close(self) -> None:
+        self._fin()
+
+    def __enter__(self) -> "DownloadCopy":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+def _download_target(row: Any, which: str) -> tuple[str, str, int | None, str, int]:
+    """(nama, hash dicatat DB, ukuran dicatat atau None, media type, batas ukuran) untuk `artifact` atau `script`. Nama divalidasi OUTPUT_NAME_RE (dipakai di header)."""
+    if which == "artifact":
+        name, sha = row["output_name"] or "", row["output_sha256"] or ""
+        if not OUTPUT_NAME_RE.fullmatch(name) or not HEX64_RE.fullmatch(sha) or type(row["output_size"]) is not int or row["output_size"] < 1:
+            raise BuildsError("berkas_tidak_ada", "Catatan artefak build di basis data tidak valid.")
+        media = APK_MIME if row["output_format"] == "apk" else ZIP_MIME
+        return name, sha, row["output_size"], media, DOWNLOAD_MAX_BYTES
+    if which == "script" and row["output_format"] in BUNDLE_KINDS:
+        found = INSTALL_SCRIPT_RE.search(row["stage_log"] or "")
+        if found is not None and OUTPUT_NAME_RE.fullmatch(found.group(1)):
+            return found.group(1), found.group(2), None, SCRIPT_MIME, SCRIPT_MAX_BYTES
+    raise BuildsError("skrip_tidak_ada", "Build ini tidak punya skrip install-multiple.")
+
+
+def open_download(d: Deps, build_id: int, *, analysis_id: int, which: str, tmp_dir: Path, reserve: int = DOWNLOAD_RESERVE,
+                  release: Callable[[], None] | None = None) -> DownloadCopy:
+    """SALIN-LALU-HASH-LALU-BANDINGKAN (PRD 09 prasyarat Tahap 5; runner yang terkompromi bisa mengubah artefak SESUDAH terbit).
+
+    Urutan: baris build harus milik `analysis_id` dan `done` -> buka artefak lewat rantai O_NOFOLLOW (`builds/<aid>/<bid>/<nama dari DB>`; FIFO/symlink/direktori ditolak)
+    -> cek ukuran dan ruang disk -> salin ke berkas ANONIM di `tmp_dir` (volume milik web, tidak dipasang di runner) -> hitung SHA-256 dari SALINAN (baca ulang) -> bandingkan
+    dengan DB (hmac.compare_digest). Tidak cocok -> `BuildsError('hash_tidak_cocok')` dan TIDAK ADA byte yang dikirim. Skrip: ditambah lint allowlist. `release` dipanggil
+    saat salinan ditutup. Memblokir (I/O besar): panggil lewat threadpool. Galat apa pun menutup salinan dan memanggil `release`."""
+    fh: BinaryIO | None = None
+    try:
+        _check_id("analysis_id", analysis_id)
+        _check_id("build_id", build_id)
+        if which not in DOWNLOAD_KINDS:
+            raise BuildsError("argumen_salah", "Jenis unduhan tidak dikenal.")
+        with closing(d.db()) as conn:
+            row = store.get_build(conn, build_id, analysis_id=analysis_id)
+        if row is None:
+            raise BuildsError("build_tidak_ada", f"Build #{build_id} tidak ditemukan pada analisis ini.")
+        if row["status"] != store.B_DONE:
+            raise BuildsError("belum_selesai", f"Build #{build_id} berstatus {row['status']}; belum ada artefak.")
+        name, expect, expect_size, media, limit = _download_target(row, which)
+        try:
+            bfd = open_dir_chain(d.layout.builds, str(analysis_id), str(build_id))
+        except OSError:
+            raise BuildsError("berkas_tidak_ada", "Folder build tidak ada atau tidak aman.") from None
+        try:
+            try:
+                src = os.open(name, OPEN_ARTIFACT, dir_fd=bfd)
+            except OSError:
+                raise BuildsError("berkas_tidak_ada", "Berkas tidak ada atau bukan berkas biasa.") from None
+        finally:
+            os.close(bfd)
+        try:
+            st = os.fstat(src)
+            if not stat.S_ISREG(st.st_mode):
+                raise BuildsError("berkas_tidak_ada", "Berkas bukan berkas biasa.")
+            if st.st_size < 1 or st.st_size > limit or (expect_size is not None and st.st_size != expect_size):
+                raise BuildsError("hash_tidak_cocok", "Ukuran berkas di disk TIDAK sama dengan yang dicatat saat build (berkas berubah setelah terbit).")
+            try:
+                if shutil.disk_usage(tmp_dir).free < st.st_size + reserve:
+                    raise BuildsError("ruang_disk", "Ruang disk server tidak cukup untuk menyiapkan unduhan.")
+                fh = tempfile.TemporaryFile("w+b", buffering=0, dir=tmp_dir)          # tanpa nama di disk: tidak ada sisa bila proses mati
+                copied = 0
+                while copied <= st.st_size:                                           # sampai 1 byte LEBIH: berkas yang membesar saat disalin terdeteksi
+                    block = os.read(src, min(HASH_BLOCK, st.st_size + 1 - copied))
+                    if not block:
+                        break
+                    fh.write(block)
+                    copied += len(block)
+            except OSError as exc:
+                raise BuildsError("ruang_disk" if exc.errno == errno.ENOSPC else "berkas_tidak_ada",
+                                  "Ruang disk server tidak cukup untuk menyiapkan unduhan." if exc.errno == errno.ENOSPC else "Berkas tidak bisa dibaca.") from None
+        finally:
+            os.close(src)
+        assert fh is not None
+        fh.seek(0)
+        digest, total = hashlib.sha256(), 0
+        while True:
+            block = fh.read(HASH_BLOCK)
+            if not block:
+                break
+            digest.update(block)
+            total += len(block)
+        if total != st.st_size or not hmac.compare_digest(digest.hexdigest(), expect):
+            raise BuildsError("hash_tidak_cocok", "Hash berkas TIDAK sama dengan yang dicatat saat build (berkas berubah setelah terbit); unduhan dibatalkan, tidak ada byte yang dikirim.")
+        if which == "script":
+            fh.seek(0)
+            try:
+                bad = installscript.lint(fh.read().decode("utf-8"))
+            except UnicodeDecodeError:
+                bad = ["bukan UTF-8"]
+            if bad:
+                raise BuildsError("skrip_tidak_lolos_lint", "Skrip memuat baris di luar allowlist; unduhan dibatalkan.")
+        fh.seek(0)
+        return DownloadCopy(fh, name=name, size=total, sha256=expect, media_type=media, which=which, release=release)
+    except BaseException:
+        if fh is not None:
+            fh.close()
+        if release is not None:
+            release()
+        raise

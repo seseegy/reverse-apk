@@ -27,6 +27,7 @@ Ringkasan keputusan:
 | ├ *Kode* | Pohon package/class, penampil Java/smali dengan highlight, pencarian FTS, lompat ke xref | P0 |
 | ├ *Jaringan* | Endpoint, domain, pinning, konfigurasi cleartext | P0 |
 | ├ *Chat* | Percakapan dengan agent (05) | P0 |
+| ├ *Build* (Tahap 5) | Daftar build, ruang kerja, layar persetujuan diff (kelompok per jenis, saringan, penanda “diminta oleh AI”, pernyataan wewenang, Setujui/Tolak/Batalkan), hasil: badging + unduh, “Hal yang tidak dijanjikan” (detail: 09) | P1 |
 | ├ *Biaya & Log* | Panggilan AI, token, biaya, log job | P0 |
 | └ *Diff* | Bandingkan dengan versi lain | P1 |
 | **Pengaturan** | Model, anggaran harian, retensi, kunci API (status saja) | P0 |
@@ -46,6 +47,7 @@ Ringkasan keputusan:
 | FR-6.10 | Upload tidak bergantung pada drag: selalu ada tombol "Pilih berkas" | P0 |
 | FR-6.11 | Login mengizinkan password manager dan paste, ada tombol tampilkan password | P0 |
 | FR-6.12 | Tahap pipeline tampil sebagai stepper dengan teks status, bukan spinner polos | P0 |
+| FR-6.13 | Tab Build (Tahap 5): aksi yang mengubah state memakai POST + token CSRF; teks dari AI/diff/log selalu di-escape (tanpa filter safe); status memperbarui diri lewat polling JS statis yang patuh CSP (tanpa skrip/gaya inline); galat ditampilkan sebagai pesan Indonesia tetap lewat kode `?notice=`, tanpa detail internal. **BELUM DIUJI di browser nyata** | P1 |
 
 ## Alur utama
 1. Upload → centang otorisasi → (opsional) lihat estimasi biaya → mulai.
