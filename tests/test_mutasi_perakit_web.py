@@ -319,10 +319,14 @@ def test_paket_ditukar_inode_setelah_rename_artifact_changed(rig, B, monkeypatch
     def swap_after(bfd, src, dst):
         real(bfd, src, dst)
         if dst.endswith(".xapk"):                                                                     # pihak lain menukar paket yang baru terbit dengan berkas baru (inode lain)
-            os.unlink(dst, dir_fd=bfd)
-            fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644, dir_fd=bfd)
-            os.write(fd, b"pengganti")
-            os.close(fd)
+            lama = os.open(dst, os.O_RDONLY, dir_fd=bfd)                                              # tahan inode lama: tanpa ini FS (tmpfs/ext4 CI) boleh memakai ulang nomor inode yang baru dibebaskan
+            try:
+                os.unlink(dst, dir_fd=bfd)
+                fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644, dir_fd=bfd)
+                os.write(fd, b"pengganti")
+                os.close(fd)
+            finally:
+                os.close(lama)
 
     monkeypatch.setattr(B, "_rename_over", swap_after)
     rig.start()
