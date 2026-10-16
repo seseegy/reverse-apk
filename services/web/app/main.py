@@ -30,6 +30,7 @@ from .context import (
     settings,
 )
 from .routes_apk import router as apk_router
+from .routes_build import router as build_router
 from .routes_files import router as files_router
 from .routes_storage import router as storage_router
 from .security import (
@@ -51,6 +52,7 @@ app = FastAPI(title="reverse-apk", docs_url=None, redoc_url=None, openapi_url=No
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 app.include_router(apk_router)
 app.include_router(files_router)
+app.include_router(build_router)
 app.include_router(storage_router)
 
 if settings.load_password_hash() is None:

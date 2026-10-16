@@ -73,6 +73,7 @@ SIGN_TEXT = {
     "assemble_failed": "Perakitan paket akhir gagal (berkas sementara, ruang disk, atau verifikasi); hasil dibuang.",
     "assemble_timeout": "Perakitan paket akhir melewati batas waktu; hasil dibuang.",
     "no_space": "Ruang disk tidak cukup untuk merakit paket akhir; hasil dibuang.",
+    "badging_unreadable": "Paket, versi, dan SDK APK hasil tidak terbaca (aapt2 dump badging gagal); build dihentikan sebelum ditandatangani (FR-9.24).",
 }
 
 
@@ -233,6 +234,7 @@ def _build(run: _Run) -> None:
     if result["source_kind"] != kind:                           # runner melaporkan format lain dari yang diminta: tidak dipercaya
         raise _Fail("bundle_changed", SIGN_TEXT["bundle_changed"])
     run.lines.append(_summary(result))
+    run.lines.extend(_badging_lines(run, result))              # FR-9.24: badging WAJIB terbaca sebelum tanda tangan/`done` (gagal CEPAT, signer tidak dipanggil)
     t_sign = store.now()
     run.lines.append(f"signing_mulai={t_sign:.6f}")
     try:
@@ -391,6 +393,18 @@ def _summary(result: dict[str, Any]) -> str:
         if result["warnings"]:
             line += "\nperingatan=" + ",".join(result["warnings"])
     return line
+
+
+# ------------------------------------------------------------------ badging (Tahap 5)
+def _badging_lines(run: _Run, result: dict[str, Any]) -> list[str]:
+    """Baris stage_log dari badging `unsigned.apk` (dinormalkan ketat oleh `parse_build_result`; runner tidak tepercaya). Tidak terbaca -> build GAGAL `badging_unreadable`
+    (PRD FR-9.24: terbaca sebelum `done`). Perbandingan dengan paket/versi analisis asal dan peringatan target SDK < 23 (FR-9.41) TIDAK memblokir."""
+    badging = result.get("badging")
+    if badging is None:
+        raise _Fail("badging_unreadable", SIGN_TEXT["badging_unreadable"])
+    a = run.analysis
+    origin = {"package": a["package"], "version_code": a["version_code"], "version_name": a["version_name"]}
+    return buildproto.badging_stage_lines(badging, origin)
 
 
 # ------------------------------------------------------------------ signer

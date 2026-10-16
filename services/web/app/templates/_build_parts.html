@@ -1,0 +1,25 @@
+{#- Komponen tab Build. Semua nilai dari data (path diff, galat, log, nama) di-escape otomatis oleh Jinja; JANGAN memakai |safe di sini. -#}
+{% from "_icons.html" import icon %}
+
+{% macro build_badge(b) -%}
+<span class="badge badge-{{ b.status }}">
+  {%- if b.status == 'done' %}{{ icon('check-circle', 14) }}
+  {%- elif b.status in ('failed', 'rejected') %}{{ icon('x-circle', 14) }}
+  {%- elif b.status in ('building', 'signing') %}{{ icon('loader', 14) }}
+  {%- elif b.status == 'cancelled' %}{{ icon('slash', 14) }}
+  {%- elif b.status == 'awaiting_approval' %}{{ icon('alert-triangle', 14) }}
+  {%- else %}{{ icon('clock', 14) }}{% endif -%}
+  <span>{{ b.label }}</span>
+</span>
+{%- endmacro %}
+
+{#- "Hal yang tidak dijanjikan" (PRD 09) + batas jujur: tampil di daftar build dan di layar persetujuan. -#}
+{% macro not_promised(items, limit_notice) -%}
+<section class="card" aria-labelledby="np-title">
+  <h2 id="np-title">Hal yang tidak dijanjikan</h2>
+  <ul class="build-limits">
+    {% for t in items %}<li>{{ t }}</li>{% endfor %}
+  </ul>
+  <p class="muted hint">{{ limit_notice }}</p>
+</section>
+{%- endmacro %}

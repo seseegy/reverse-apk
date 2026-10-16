@@ -28,6 +28,7 @@ from rvcore.spool import Spool  # noqa: E402
 
 OWNER = hashlib.sha256(b"sertifikat pemilik").hexdigest()
 OTHER = hashlib.sha256(b"sertifikat lain").hexdigest()
+BADGING = {"package": "com.contoh.app", "version_code": 7, "version_name": "1.2.3", "min_sdk": 21, "target_sdk": 34}      # badging palsu hasil runner (Tahap 5)
 HANG = object()        # `behave` mengembalikan ini = daemon mengambil job tetapi tidak pernah menjawab
 
 
@@ -64,7 +65,7 @@ class FakeRunner:
         data = b"PK-unsigned-" + job_id.encode()
         (bdir / "unsigned.apk").write_bytes(data)
         res = {"status": "ok", "output_size": len(data), "output_sha256": sha(data), "elapsed": 1.5, "peak_mem_mib": 123,
-               "apktool_log_tail": "I: Building apk file...", "files": 10, "bytes": 100}
+               "apktool_log_tail": "I: Building apk file...", "files": 10, "bytes": 100, "badging": dict(BADGING)}
         kind = job.get("source_kind", "apk")
         if kind != "apk":
             res.update(FakeRunner.bundle_fields(runner.layout, job, bdir, kind))
@@ -363,5 +364,5 @@ def victim_intact(v: Path) -> bool:
     return (v / "5" / "penting").read_text() == "jangan disentuh" and (v / "marker").read_text() == "jangan disentuh"
 
 
-__all__ = ["Rig", "FakeRunner", "FakeSigner", "HANG", "OWNER", "OTHER", "sha", "bm", "signed_result", "failure_result", "plant_symlink", "victim",
+__all__ = ["Rig", "FakeRunner", "FakeSigner", "BADGING", "HANG", "OWNER", "OTHER", "sha", "bm", "signed_result", "failure_result", "plant_symlink", "victim",
            "victim_intact"]

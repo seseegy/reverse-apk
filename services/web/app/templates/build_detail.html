@@ -1,0 +1,220 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_parts.html" import notice_box, time_el %}
+{% from "_build_parts.html" import build_badge, not_promised %}
+{% set title = an.app_label or an.filename_display %}
+{% block title %}Build #{{ b.id }} · {{ title }} · reverse-apk{% endblock %}
+
+{% block header %}{% include "_header.html" %}{% endblock %}
+
+{#- Layar persetujuan (FR-9.18/9.40). Path berkas, galat, dan log berasal dari APK/AI: tak tepercaya, selalu di-escape (tanpa |safe). -#}
+{% block content %}
+<div class="container page container-wide"{% if poll_url %} data-build-poll="{{ poll_url }}" data-build-status="{{ b.status }}"{% endif %}>
+  <a class="back-link" href="/analyses/{{ an.id }}/build">{{ icon('arrow-left', 16) }}<span>Semua build</span></a>
+  {% include "_analysis_head.html" %}
+  {{ notice_box(notice) }}
+
+  <section class="card" aria-labelledby="bd-title">
+    <div class="card-head">
+      <h2 id="bd-title">Build #{{ b.id }}</h2>
+      <div role="status" aria-atomic="true">{{ build_badge(b) }}</div>
+    </div>
+    <dl class="dl dl-wide">
+      <div><dt>Format</dt><dd class="mono">{{ b.source_kind }}</dd></div>
+      <div><dt>Diminta oleh</dt><dd>{% if b.ai %}<span class="chip">diminta oleh AI</span> {% endif %}{{ b.requested_label }}</dd></div>
+      <div><dt>Dibuat</dt><dd>{{ time_el(b.created_at) }}</dd></div>
+      {% if b.approved_at %}<div><dt>Disetujui</dt><dd>{{ time_el(b.approved_at) }}</dd></div>{% endif %}
+      {% if b.finished_at %}<div><dt>Selesai</dt><dd>{{ time_el(b.finished_at) }}</dd></div>{% endif %}
+      <div><dt>Hash diff (SHA-256)</dt><dd class="build-hash">{{ b.diff_sha256 }}</dd></div>
+    </dl>
+    {% if b.ai %}
+    <div class="alert alert-warn" role="note">
+      {{ icon('alert-triangle') }}
+      <span><strong>Permintaan ini dibuat oleh asisten AI.</strong> Perubahannya mungkin dipengaruhi isi APK yang tidak tepercaya. Periksa daftar berkas di bawah dengan teliti;
+        teks apa pun di dalam APK atau percakapan tidak pernah menyetujui build, hanya klik Anda di halaman ini.</span>
+    </div>
+    {% endif %}
+    {% if b.status == 'rejected' %}
+    <p class="muted">Ditolak. Alasan: {{ b.rejected_reason or '–' }}</p>
+    {% endif %}
+    {% if b.status in ('approved', 'queued') %}
+    <p class="muted hint">Disetujui dan menunggu giliran di antrean. Halaman ini memperbarui status otomatis. Bila macet (mis. antrean sempat mati), kirim ulang:</p>
+    <form method="post" action="/analyses/{{ an.id }}/build/{{ b.id }}/requeue" class="btn-row" data-submit-lock>
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit" class="btn btn-ghost btn-sm">{{ icon('refresh', 16) }}<span>Kirim ulang ke antrean</span></button>
+    </form>
+    {% elif b.status in ('building', 'signing') %}
+    <p class="muted hint" role="status">{% if b.status == 'building' %}Runner sedang membangun APK (apktool).{% else %}APK sedang ditandatangani dan diverifikasi.{% endif %}
+      Halaman ini memperbarui status otomatis.{% if b.cancel_requested %} Pembatalan sudah diminta.{% endif %}</p>
+    {% endif %}
+    {% if b.status in ('awaiting_approval', 'approved', 'queued', 'building', 'signing') %}
+    <form method="post" action="/analyses/{{ an.id }}/build/{{ b.id }}/cancel" class="btn-row" data-confirm="Batalkan build ini?" data-submit-lock>
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit" class="btn btn-danger btn-sm"{% if b.cancel_requested %} disabled{% endif %}>{{ icon('x', 16) }}<span>Batalkan build</span></button>
+    </form>
+    {% endif %}
+  </section>
+
+  {% if b.status == 'failed' or b.status == 'cancelled' %}
+  <section class="card" aria-labelledby="bf-title">
+    <h2 id="bf-title">{{ 'Build dibatalkan' if b.status == 'cancelled' else 'Build gagal' }}</h2>
+    <p><span class="mono">{{ b.error_code or '–' }}</span>{% if b.error_text %} · {{ b.error_text }}{% endif %}</p>
+    {% if b.hint %}<p class="muted">{{ b.hint }}</p>{% endif %}
+  </section>
+  {% endif %}
+
+  {% if b.badging or b.warnings %}
+  <section class="card" aria-labelledby="bg-title">
+    <h2 id="bg-title">Verifikasi APK hasil (badging)</h2>
+    {% if b.badging %}
+    <dl class="dl dl-wide">
+      <div><dt>Paket</dt><dd class="mono break">{{ b.badging.package }}</dd></div>
+      <div><dt>versionCode</dt><dd class="mono">{{ b.badging.version_code or '–' }}</dd></div>
+      <div><dt>versionName</dt><dd class="mono break">{{ b.badging.version_name or '–' }}</dd></div>
+      <div><dt>minSdkVersion</dt><dd class="mono">{{ b.badging.min_sdk or '–' }}</dd></div>
+      <div><dt>targetSdkVersion</dt><dd class="mono">{{ b.badging.target_sdk or '–' }}</dd></div>
+      {% if b.banding %}
+      <div><dt>Dibanding APK asal</dt><dd>paket: {{ b.banding.paket }} · versionCode: {{ b.banding.versionCode }} · versionName: {{ b.banding.versionName }}</dd></div>
+      {% endif %}
+    </dl>
+    {% endif %}
+    {% for w in b.warnings %}
+    <div class="alert alert-warn" role="note">{{ icon('alert-triangle') }}<span><span class="mono">{{ w.kode }}</span> · {{ w.teks }}</span></div>
+    {% endfor %}
+    <p class="muted hint">Dibaca dari APK hasil build (aapt2 dump badging) sebelum ditandatangani. Perbandingan dan peringatan hanya informasi: tidak memblokir unduhan.</p>
+  </section>
+  {% endif %}
+
+  {% if b.status == 'done' %}
+  <section class="card" aria-labelledby="br-title">
+    <h2 id="br-title">Hasil build</h2>
+    <dl class="dl dl-wide">
+      <div><dt>Berkas</dt><dd class="mono break">{{ b.output_name }}</dd></div>
+      <div><dt>Ukuran</dt><dd>{{ b.output_size|bytes }}</dd></div>
+      <div><dt>SHA-256</dt><dd class="build-hash">{{ b.output_sha256 }}</dd></div>
+      <div><dt>Sertifikat (SHA-256)</dt><dd class="build-hash">{{ b.cert_sha256 }}</dd></div>
+      <div><dt>Verifikasi tanda tangan</dt><dd>{{ 'lulus (v2 + v3, satu penanda tangan)' if b.verify_ok == 1 else 'tidak lulus' }}</dd></div>
+    </dl>
+    {% if b.can_download %}
+    <div class="btn-row">
+      <a class="btn btn-primary" href="/analyses/{{ an.id }}/build/{{ b.id }}/download" download>{{ icon('download', 16) }}<span>Unduh {{ b.output_format|upper }}</span></a>
+      {% if b.has_script %}<a class="btn btn-ghost" href="/analyses/{{ an.id }}/build/{{ b.id }}/script" download>{{ icon('file-code', 16) }}<span>Unduh skrip adb install-multiple</span></a>{% endif %}
+    </div>
+    <p class="muted hint">Sebelum dikirim, server menyalin berkas ke tempat yang tidak bisa diubah runner, menghitung ulang SHA-256 dari salinan, dan membandingkannya dengan hash di atas.
+      Bila tidak cocok, unduhan ditolak (tidak ada byte yang dikirim). Setiap unduhan dicatat di audit log.</p>
+    {% endif %}
+    {% if b.bundle %}<p class="muted hint">Paket {{ b.output_format|upper }}: semua APK di dalamnya ditandatangani ulang dengan kunci yang sama. Aplikasi asli harus dicopot dulu sebelum memasang hasil.</p>{% endif %}
+  </section>
+  {% endif %}
+
+  {% if b.stage_log %}
+  <section class="card" aria-labelledby="bl-title">
+    <details>
+      <summary id="bl-title">Catatan tahap build</summary>
+      <pre class="build-log">{{ b.stage_log }}</pre>
+    </details>
+  </section>
+  {% endif %}
+
+  <section class="card" aria-labelledby="df-title">
+    <div class="card-head">
+      <h2 id="df-title">Ringkasan perubahan (diff)</h2>
+      <p class="muted hint">Dihitung sistem dari perbandingan ruang kerja dengan hasil apktool asli, bukan dilaporkan AI.</p>
+    </div>
+    <dl class="build-stats">
+      <div><dt>Berkas baru</dt><dd class="build-plus">{{ diff.counts.added|num }}</dd></div>
+      <div><dt>Berkas diubah</dt><dd>{{ diff.counts.modified|num }}</dd></div>
+      <div><dt>Berkas dihapus</dt><dd class="build-minus">{{ diff.counts.removed|num }}</dd></div>
+      <div><dt>Baris ditambah</dt><dd class="build-plus">+{{ diff.lines.plus|num }}</dd></div>
+      <div><dt>Baris dihapus</dt><dd class="build-minus">−{{ diff.lines.minus|num }}</dd></div>
+      <div><dt>Ukuran baru / ubah / hapus</dt><dd>{{ diff.bytes.added|bytes }} / {{ diff.bytes.modified|bytes }} / {{ diff.bytes.removed|bytes }}</dd></div>
+    </dl>
+    <p class="muted hint">Per jenis:
+      {% for k in kind_order %}{% if diff.kinds[k] %}<a class="chip" href="?kind={{ k }}">{{ kind_label[k] }}: {{ diff.kinds[k]|num }}</a> {% endif %}{% endfor %}
+      {% if diff.lines.skipped_files %}· {{ diff.lines.skipped_files|num }} berkas tidak dihitung barisnya (biner atau terlalu besar){% endif %}
+    </p>
+    {% for key, n in diff.skipped.items() %}{% if n %}
+    <div class="alert alert-info" role="note">{{ icon('info') }}<span>{{ n|num }} entri “{{ key }}” dilewati saat membandingkan dan <strong>tidak ikut dibangun</strong>.</span></div>
+    {% endif %}{% endfor %}
+
+    <form method="get" class="filters" role="search" aria-label="Saring daftar berkas">
+      <div class="field">
+        <label for="f-kind">Jenis</label>
+        <select id="f-kind" name="kind">
+          <option value="">Semua</option>
+          {% for k in kind_order %}<option value="{{ k }}"{% if k == f_kind %} selected{% endif %}>{{ kind_label[k] }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field field-grow">
+        <label for="f-q">Cari path</label>
+        <input id="f-q" name="q" type="search" value="{{ f_q }}" maxlength="80" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field field-btn">
+        <button type="submit" class="btn btn-ghost">{{ icon('search', 16) }}<span>Terapkan</span></button>
+        {% if diff.filtered %}<a class="link-quiet" href="/analyses/{{ an.id }}/build/{{ b.id }}">Reset</a>{% endif %}
+      </div>
+    </form>
+
+    <p class="muted hint" role="status" aria-atomic="true">
+      Daftar memuat {{ diff.matched|num }} berkas{% if diff.filtered %} (hasil saringan){% endif %}, diurutkan dari yang paling banyak berubah.
+      {% if diff.truncated %}Ringkasan menyimpan {{ diff.shown_of }} perubahan terbesar; <strong>daftar lengkap ada di CLI</strong>: <span class="mono">docker compose exec -T web python -m app.buildctl diff {{ an.id }}</span>.{% endif %}
+    </p>
+    {% for g in diff.groups %}
+    <div class="build-group">
+      <h3>{{ g.label }} <span class="count-pill">{{ g.files|length }}</span></h3>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="Berkas {{ g.label }} (gulir horizontal bila perlu)">
+        <table class="table table-compact">
+          <thead><tr><th>Jenis perubahan</th><th>Path</th><th class="num">Ukuran</th><th class="num">+ baris</th><th class="num">− baris</th></tr></thead>
+          <tbody>
+          {% for i in g.files %}
+            <tr>
+              <td>{{ i.op_label }}{% if i.dir %} (folder){% endif %}</td>
+              <td class="build-path">{{ i.path }}</td>
+              <td class="num">{{ i.size|bytes }}</td>
+              <td class="num build-plus">{{ ('+' ~ i.plus) if i.plus is not none else '–' }}</td>
+              <td class="num build-minus">{{ ('−' ~ i.minus) if i.minus is not none else '–' }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% else %}
+    <p class="muted">Tidak ada berkas yang cocok dengan saringan.</p>
+    {% endfor %}
+  </section>
+
+  {% if b.status == 'awaiting_approval' %}
+  <section class="approve-box" aria-labelledby="ap-title">
+    <h2 id="ap-title">Setujui build ini?</h2>
+    <p class="muted">Persetujuan terikat pada hash diff di atas. Bila ruang kerja berubah lagi setelah diajukan, persetujuan ini tidak berlaku (runner menghitung ulang hash dan menolak dengan <span class="mono">workspace_changed</span>).</p>
+    <form method="post" action="/analyses/{{ an.id }}/build/{{ b.id }}/approve" data-submit-lock>
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="diff_sha256" value="{{ b.diff_sha256 }}">
+      <input type="hidden" name="statement_version" value="{{ statement_version }}">
+      <label class="check" for="stmt">
+        <input id="stmt" type="checkbox" name="statement" value="1" required>
+        <span class="statement">{{ statement }}</span>
+      </label>
+      <div class="btn-row">
+        <button type="submit" class="btn btn-primary">{{ icon('check-circle', 16) }}<span>Setujui dan bangun</span></button>
+      </div>
+    </form>
+    <form method="post" action="/analyses/{{ an.id }}/build/{{ b.id }}/reject" class="filters" data-confirm="Tolak build ini? Tidak ada yang dibangun." data-submit-lock>
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <div class="field field-grow">
+        <label for="rej">Alasan penolakan (opsional)</label>
+        <input id="rej" name="reason" type="text" maxlength="200" autocomplete="off">
+      </div>
+      <div class="field field-btn">
+        <button type="submit" class="btn btn-danger">{{ icon('x-circle', 16) }}<span>Tolak</span></button>
+      </div>
+    </form>
+  </section>
+  {% endif %}
+
+  {{ not_promised(limits_list, limit_notice) }}
+</div>
+{% endblock %}
+
+{% block scripts %}{% if poll_url %}<script src="/static/js/build.js" defer></script>{% endif %}{% endblock %}

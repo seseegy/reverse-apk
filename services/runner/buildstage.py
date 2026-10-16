@@ -12,6 +12,10 @@ Urutan (design.md 6.2 + adendum A-07; setiap langkah menghormati SATU tenggat `s
   5. jejak       : tulis `src/assets/reverse-apk-modified.txt` SETELAH hash cocok (FR-9.23; ditambahkan sistem, di luar diff yang disetujui)
   6. apktool b   : lewat wrapper produksi (`b` argumen pertama), argv dari allowlist, grup proses sendiri
   7. hasil       : `unsigned.apk` dibuka O_NOFOLLOW|O_NONBLOCK, harus berkas biasa, hash + ukuran dari fd itu
+  7a. badging    : `aapt2 dump badging unsigned.apk` (Tahap 5, FR-9.24/9.41): package, versionCode, versionName, minSdk, targetSdk dikembalikan sebagai bidang `badging`.
+                   Hasil runner TIDAK tepercaya (worker menormalkan ulang); runner TIDAK punya hak atas hasil bertanda tangan, jadi yang dibaca `unsigned.apk`
+                   (manifest tidak berubah oleh zipalign/apksigner). aapt2 yang dipakai = salinan rootfs terpin (root, read-only), BUKAN salinan di tmpfs /opt/aapt-exec
+                   yang dimiliki uid runner. Tidak terbaca -> `badging: null` (worker yang memutuskan; runner tidak menggagalkan build karenanya).
   8. pembersihan : (di `finally`, SEBELUM `Spool.finish`) `src/`, HOME job, dan `unsigned.apk` bila hasilnya bukan ok. `build.log` (<= 64 KiB) tinggal.
 Paket XAPK/APKS (Tahap 3; `req.source_kind` xapk|apks; langkah tambahan HANYA untuk paket, APK tunggal tidak membuka uploads/): setelah langkah 1,
   1b. upload       : `bundle.begin_upload` (buka-sekali nofollow/nonblock, hash dari fd == sha) -> `plan_from_zip` -> format turunan == `source_kind`, sebelum cek disk
@@ -29,6 +33,7 @@ import hashlib
 import hmac
 import os
 import re
+import select
 import stat
 import subprocess
 import threading
@@ -59,6 +64,9 @@ SPLIT_RE = re.compile(r"split-\d{3}\.apk(?:\.part)?\Z")
 SPLIT_SCRATCH = (".split-", ".alias-")
 YML_CAP, MANIFEST_CAP = 64 * 1024, 256 * 1024
 _ZIP_ERRORS = (zipfile.BadZipFile, zipfile.LargeZipFile, NotImplementedError, EOFError, RuntimeError, zlib.error)
+BADGING_TIMEOUT = 30.0                    # detik; aapt2 dump badging atas APK besar paling lama beberapa detik
+BADGING_MAX_BYTES = 4 * MIB               # keluaran dibaca paling banyak ini lalu proses dihentikan (kepala keluaran memuat package/sdk)
+BADGING_FIELD_MAX = 300
 OPEN_FILE = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _ERROR_LINE = re.compile(r"(?i)(exception|error|fatal|failed|cannot|unable)")
 # Kode TreeLimitError -> kode galat build.
@@ -95,6 +103,7 @@ class Env:
     cgroup_peak: str = "/sys/fs/cgroup/memory.peak"
     upload_cap_bytes: int = bundle.UPLOAD_COPY_MAX_RUNNER_MB * MIB      # batas salinan memfd upload (paket)
     max_split_bytes: int = 1024 * MIB                                  # byte nyata maksimum satu APK bersarang yang diekstrak
+    aapt2: str = field(default_factory=lambda: os.environ.get("AAPT2_PATH", "/opt/apktool/aapt2"))      # aapt2 terpin di rootfs (tes menyuntik skrip palsu)
 
 
 class _Ticker:
@@ -398,6 +407,81 @@ def _peak_mem_mib(path: str) -> int | None:
 
 
 
+# ------------------------------------------------------------------ badging (Tahap 5)
+_BADGING_ATTR = re.compile(r"(\w+)='([^']*)'")
+_BADGING_SDK = re.compile(r"^(sdkVersion|minSdkVersion|targetSdkVersion):'([^']*)'\s*$", re.M)
+
+
+def _int_or_none(value: str | None) -> int | None:
+    return int(value) if value is not None and value.isascii() and value.isdigit() and len(value) <= 12 else None
+
+
+def parse_badging_text(text: str) -> dict[str, Any] | None:
+    """Keluaran `aapt2 dump badging` (teks; DATA tak tepercaya) -> {package, version_code, version_name, min_sdk, target_sdk} atau None bila baris `package:`
+    tidak ada. Hanya baris `package:`, `sdkVersion:`/`minSdkVersion:` dan `targetSdkVersion:` yang dibaca; angka non-numerik (nama kode pratinjau) -> None.
+    Panjang dibatasi di sini; kepercayaan penuh tetap ada di `buildproto.normalize_badging` (worker)."""
+    line = next((ln for ln in text.splitlines() if ln.startswith("package:")), None)
+    if line is None:
+        return None
+    attrs = dict(_BADGING_ATTR.findall(line))
+    if not attrs.get("name"):
+        return None
+    sdk: dict[str, str] = {}
+    for key, value in _BADGING_SDK.findall(text):
+        sdk.setdefault(key, value)
+    return {"package": attrs["name"][:BADGING_FIELD_MAX], "version_code": _int_or_none(attrs.get("versionCode")),
+            "version_name": attrs.get("versionName", "")[:BADGING_FIELD_MAX],
+            "min_sdk": _int_or_none(sdk.get("minSdkVersion", sdk.get("sdkVersion"))), "target_sdk": _int_or_none(sdk.get("targetSdkVersion"))}
+
+
+def read_badging(env: Env, job_id: str, unsigned: Path, home: Path, deadline: float) -> dict[str, Any] | None:
+    """Langkah 7a. Jalankan aapt2 (argv tetap; satu-satunya argumen dari data adalah jalur unsigned.apk yang dihitung sistem), baca paling banyak BADGING_MAX_BYTES,
+    batas waktu min(BADGING_TIMEOUT, sisa tenggat build). Gagal apa pun (tidak ada, timeout, keluaran rusak) -> None; tidak pernah melempar."""
+    limit = min(BADGING_TIMEOUT, max(1.0, deadline - env.clock()))
+    cmd = [env.aapt2, "dump", "badging", str(unsigned)]
+    run_env = {"PATH": env.path_env, "HOME": str(home), "LANG": "C.UTF-8"}
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=home, env=run_env,
+                                start_new_session=True, close_fds=True)
+    except OSError as exc:
+        env.say(f"[{job_id}] WARN aapt2 tidak dapat dijalankan ({_errno(exc)}); badging tidak terbaca")
+        return None
+    buf = bytearray()
+    start = env.clock()
+    try:
+        out_fd = proc.stdout.fileno()                              # type: ignore[union-attr]
+        while len(buf) < BADGING_MAX_BYTES:
+            left = limit - (env.clock() - start)
+            if left <= 0 or env.stop.is_set():
+                break
+            ready, _w, _x = select.select([out_fd], [], [], min(left, env.tick))
+            if not ready:
+                if proc.poll() is not None:
+                    break
+                continue
+            chunk = os.read(out_fd, 64 * 1024)
+            if not chunk:
+                break
+            buf += chunk
+        timed_out = proc.poll() is None
+    except OSError:
+        timed_out = True
+    finally:
+        if proc.poll() is None:
+            env.kill_group(proc)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        env.sweep_group(proc)
+        if proc.stdout is not None:
+            proc.stdout.close()
+    if timed_out and not buf:
+        env.say(f"[{job_id}] WARN aapt2 dump badging melewati batas waktu; badging tidak terbaca")
+        return None
+    return parse_badging_text(bytes(buf).decode("utf-8", errors="replace"))
+
+
 # ------------------------------------------------------------------ paket XAPK/APKS (Tahap 3)
 def _bundle_finish(exc: BundleError) -> _Finish:
     """BundleError -> hasil akhir. Kode di luar daftar build (mis. `bundle_unsafe_entry`, `bad_bundle`, `duplicate_entry`) -> `bundle_invalid`."""
@@ -616,7 +700,8 @@ def run(env: Env, job_id: str, req: BuildRequest) -> dict[str, Any]:
                 reason = _last_error_line(log_text)
                 raise _failed("build_failed", reason if reason else f"apktool keluar dengan kode {rc}")
             sha, size = _open_unsigned(bfd)
-            result = {"status": "ok", "output_size": size, "output_sha256": sha, "apktool_log_tail": log_text[-LOG_TAIL_MAX:]}
+            result = {"status": "ok", "output_size": size, "output_sha256": sha, "apktool_log_tail": log_text[-LOG_TAIL_MAX:],
+                      "badging": read_badging(env, job_id, unsigned, home, deadline)}
             if is_bundle and plan is not None and handle is not None:
                 try:
                     warnings = _version_warnings(base, src)              # sebelum src/ dihapus (adendum #5)

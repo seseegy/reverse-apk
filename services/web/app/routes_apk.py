@@ -281,6 +281,7 @@ def _detail(analysis_id: int) -> dict[str, Any] | None:
         artifacts = [dict(a) for a in store.get_artifacts(conn, analysis_id)]
         counts = store.finding_counts(conn, analysis_id)
         files_count = store.count_files(conn, analysis_id)
+        active_build = store.active_build(conn, analysis_id)
     def _loads(raw: str | None) -> dict[str, Any]:
         try:
             data = json.loads(raw) if raw else {}
@@ -289,6 +290,7 @@ def _detail(analysis_id: int) -> dict[str, Any] | None:
             return {}
 
     return {"an": dict(an), "snap": snap, "artifacts": artifacts, "counts": counts, "files_count": files_count,
+            "build_active": store.BUILD_STATUS_LABEL.get(active_build["status"]) if active_build is not None else None,
             "versions": _loads(an["tool_versions"]), "options": _loads(an["options"])}
 
 

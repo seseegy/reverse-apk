@@ -35,6 +35,9 @@ MAX_ALIASES = 8
 MAX_WARNINGS = 32
 WARNING_RE = re.compile(r"[a-z][a-z0-9_]{0,63}(?:=[0-9]{1,9})?\Z")
 HEX64_RE = re.compile(r"[0-9a-f]{64}\Z")
+PACKAGE_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*\Z")      # nama paket Android yang sah; di luar ini = badging dianggap tidak terbaca
+PACKAGE_MAX, VERSION_NAME_MAX, VERSION_CODE_MAX, SDK_MAX = 255, 64, 2 ** 63 - 1, 10 ** 6
+TARGET_SDK_MIN = 23                    # Android 14+ menolak memasang APK dengan targetSdkVersion di bawah 23 (FR-9.41)
 
 BUILD_ERROR_CODES = (
     "bad_request", "no_workspace", "baseline_missing", "tree_too_large", "tree_unreadable", "no_space", "workspace_changed", "snapshot_failed",
@@ -147,7 +150,7 @@ def parse_build_result(raw: Any) -> dict[str, Any]:
     result: dict[str, Any] = {
         "status": "failed", "ok": False, "error_code": None, "error_text": "", "output_size": 0, "output_sha256": None, "elapsed": 0.0,
         "peak_mem_mib": None, "apktool_log_tail": "", "files": 0, "bytes": 0,
-        "source_kind": "apk", "plan_sha256": None, "aliases": [], "splits": [], "warnings": [],
+        "source_kind": "apk", "plan_sha256": None, "aliases": [], "splits": [], "warnings": [], "badging": None,
     }
     if not isinstance(raw, dict):
         return _fail(result, "bad_result", "")
@@ -168,7 +171,7 @@ def parse_build_result(raw: Any) -> dict[str, Any]:
             extra = _parse_bundle_fields(raw)
             if extra is None:
                 return _fail(result, "bad_result", "")
-            result.update(status="ok", ok=True, output_size=size, output_sha256=sha, **extra)
+            result.update(status="ok", ok=True, output_size=size, output_sha256=sha, badging=normalize_badging(raw.get("badging")), **extra)
             return result
         return _fail(result, "bad_result", "")          # klaim sukses tanpa hash/ukuran yang koheren
     if status in _STATUS_CODE:
@@ -212,9 +215,87 @@ def _parse_bundle_fields(raw: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _fail(result: dict[str, Any], code: str, text: str, *, status: str = "failed") -> dict[str, Any]:
-    result.update(status=status, ok=False, error_code=code, output_size=0, output_sha256=None, source_kind="apk", plan_sha256=None, aliases=[], splits=[], warnings=[])
+    result.update(status=status, ok=False, error_code=code, output_size=0, output_sha256=None, source_kind="apk", plan_sha256=None, aliases=[], splits=[], warnings=[],
+                  badging=None)
     result["error_text"] = text if text and code != "bad_result" else ERROR_TEXT[code]
     return result
+
+
+# ------------------------------------------------------------------------------------------------ badging (FR-9.24 / FR-9.41; Tahap 5)
+def _sdk(value: Any) -> int | None:
+    """Level SDK numerik; nama kode pratinjau ('VanillaIceCream') atau nilai di luar batas -> None (tidak diketahui, bukan galat)."""
+    return value if type(value) is int and 0 <= value <= SDK_MAX else None
+
+
+def normalize_badging(raw: Any) -> dict[str, Any] | None:
+    """Normalkan badging dari runner (TIDAK TEPERCAYA) menjadi {package, version_code, version_name, min_sdk, target_sdk} atau None (tidak terbaca).
+
+    Hanya `package` yang wajib dan harus nama paket Android yang sah (<= 255); selain itu seluruh badging dianggap tidak terbaca. versionName hanya boleh
+    [A-Za-z0-9._+~:-] (karakter lain -> `_`, dipotong 64) agar satu baris teks tetap-format di stage_log bisa dibaca ulang tanpa ambiguitas. Tidak pernah melempar."""
+    if not isinstance(raw, dict):
+        return None
+    package = raw.get("package")
+    if not isinstance(package, str) or len(package) > PACKAGE_MAX or not PACKAGE_RE.match(package):
+        return None
+    code = raw.get("version_code")
+    name = raw.get("version_name")
+    name = re.sub(r"[^A-Za-z0-9._+~:-]", "_", name)[:VERSION_NAME_MAX] if isinstance(name, str) else ""
+    return {"package": package, "version_code": code if type(code) is int and 0 <= code <= VERSION_CODE_MAX else None, "version_name": name,
+            "min_sdk": _sdk(raw.get("min_sdk")), "target_sdk": _sdk(raw.get("target_sdk"))}
+
+
+def badging_warnings(badging: dict[str, Any]) -> list[str]:
+    """Peringatan tetap dari badging (tidak memblokir). targetSdkVersion yang tidak tertulis berlaku sama dengan minSdkVersion (aturan Android)."""
+    target = badging["target_sdk"] if badging["target_sdk"] is not None else badging["min_sdk"]
+    if target is None:
+        return ["target_sdk_tidak_diketahui"]
+    return ["target_sdk_di_bawah_23"] if target < TARGET_SDK_MIN else []
+
+
+def _val(value: Any) -> str:
+    return "-" if value is None or value == "" else str(value)
+
+
+def badging_stage_lines(badging: dict[str, Any], origin: dict[str, Any] | None = None) -> list[str]:
+    """Baris teks TETAP untuk stage_log: `badging: ...`, `banding: ...` (dengan paket/versi analisis asal), dan satu `peringatan: <kode>` per peringatan.
+    `origin` = {package, version_code, version_name} dari analisis (apa adanya; kosong/None = tidak diketahui). Perbandingan TIDAK memblokir."""
+    lines = [f"badging: paket={badging['package']} versionCode={_val(badging['version_code'])} versionName={_val(badging['version_name'])} "
+             f"minSdk={_val(badging['min_sdk'])} targetSdk={_val(badging['target_sdk'])}"]
+    warnings = badging_warnings(badging)
+
+    def compare(mine: Any, theirs: Any) -> str:
+        theirs = str(theirs).strip() if theirs is not None else ""
+        return "tidak_diketahui" if not theirs or mine in (None, "") else ("sama" if str(mine) == theirs else "beda")
+
+    o = origin or {}
+    pkg, code, name = (compare(badging["package"], o.get("package")), compare(badging["version_code"], o.get("version_code")),
+                       compare(badging["version_name"], o.get("version_name")))
+    lines.append(f"banding: paket={pkg} versionCode={code} versionName={name}")
+    if pkg == "beda":
+        warnings.append("paket_beda_dari_analisis")
+    if code == "beda":
+        warnings.append("version_code_beda_dari_analisis")
+    lines.extend(f"peringatan: {w}" for w in warnings)
+    return lines
+
+
+BADGING_LINE_RE = re.compile(r"^badging: paket=(\S+) versionCode=(\S+) versionName=(\S+) minSdk=(\S+) targetSdk=(\S+)$", re.M)
+BANDING_LINE_RE = re.compile(r"^banding: paket=(\w+) versionCode=(\w+) versionName=(\w+)$", re.M)
+WARNING_LINE_RE = re.compile(r"^peringatan: ([a-z][a-z0-9_]{0,63})$", re.M)
+
+
+def parse_badging_stage_log(stage_log: Any) -> dict[str, Any]:
+    """Baca ulang baris badging dari stage_log (DB; ditulis worker). Mengembalikan {'badging': dict|None, 'banding': dict|None, 'peringatan': [kode]}; tidak melempar."""
+    text = stage_log if isinstance(stage_log, str) else ""
+    out: dict[str, Any] = {"badging": None, "banding": None, "peringatan": []}
+    m = BADGING_LINE_RE.search(text)
+    if m:
+        out["badging"] = dict(zip(("package", "version_code", "version_name", "min_sdk", "target_sdk"), (None if g == "-" else g for g in m.groups())))
+    m = BANDING_LINE_RE.search(text)
+    if m:
+        out["banding"] = dict(zip(("paket", "versionCode", "versionName"), m.groups()))
+    out["peringatan"] = WARNING_LINE_RE.findall(text)
+    return out
 
 
 def dump_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -235,4 +316,4 @@ def dump_result(result: dict[str, Any]) -> dict[str, Any]:
 
 
 __all__ = ["STAGE", "MAX_PROTO_ID", "SOURCE_KINDS", "BUILD_ERROR_CODES", "ERROR_TEXT", "BuildRequest", "build_build_request", "validate_build_request",
-           "parse_build_result", "dump_result"]
+           "parse_build_result", "dump_result", "normalize_badging", "badging_stage_lines", "badging_warnings", "parse_badging_stage_log", "TARGET_SDK_MIN"]
