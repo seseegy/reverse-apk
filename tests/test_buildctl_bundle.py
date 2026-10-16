@@ -121,8 +121,19 @@ def test_artifact_info_skrip_di_luar_allowlist_dilaporkan(ctl, env):
     assert r.code == 3 and r["kode"] == "skrip_tidak_lolos_lint" and r["skrip_cocok"] == "1", r.text
 
 
+def test_artifact_info_split_bertanda_tangan_apksigner_sah_tidak_dianggap_sisa(ctl, env):
+    """Regresi e2e fase 3: paket hasil signer NYATA membawa v1 milik apksigner (MANIFEST.MF + REVERSE-.SF + REVERSE-.RSA) di tiap split; itu bukan sisa tanda tangan
+    lama (himpunan yang sama dipakai signer-daemon dan signer-selftest --check-bundle). Sebelumnya semua split dilaporkan `ttd_lama` dan buildctl keluar kode 3."""
+    legit = {"META-INF/MANIFEST.MF": b"Manifest-Version: 1.0\n", "META-INF/REVERSE-.SF": b"sf", "META-INF/REVERSE-.RSA": b"rsa"}
+    _aid, bid, _meta = _done_bundle("ai-legit-v1", split_extra=legit)
+    r = ctl("artifact-info", str(bid))
+    assert r.code == 0, r.text
+    assert "verifikasi=ok" in r["split.2"] and "ttd_lama" not in r.text and r.kv.get("kode") in (None, "")
+
+
 def test_artifact_info_split_dengan_sisa_tanda_tangan_lama_disebut_namanya(ctl, env):
-    _aid, bid, meta = _done_bundle("ai-stale", split_extra={"META-INF/CERT.RSA": b"x"})
+    # Sisa lama + tanda tangan baru = dua nama dasar (CERT dan REVERSE-): di luar himpunan boleh apksigner. (Dahulu cukup satu CERT.RSA; lihat changed-tests.md.)
+    _aid, bid, meta = _done_bundle("ai-stale", split_extra={"META-INF/CERT.RSA": b"x", "META-INF/REVERSE-.RSA": b"y"})
     r = ctl("artifact-info", str(bid))
     assert r.code == 3 and r["kode"] == "split_bermasalah", r.text
     assert "verifikasi=ttd_lama" in r["split.2"] and r["split.2"].startswith("config.arm64_v8a.apk")

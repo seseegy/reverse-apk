@@ -519,7 +519,7 @@ def _read_script(bfd: int, name: str, logged: str | None, problems: list[tuple[s
 
 def _inspect_splits(fd: int, problems: list[tuple[str, str]], info: dict[str, Any]) -> None:
     """Buka ulang paket dari fd yang sama (hash sudah dicocokkan) dan hitung hash/ukuran tiap APK di dalamnya; verifikasi = zip utuh (CRC), ada AndroidManifest.xml,
-    tanpa sisa tanda tangan lama (`splitzip.is_signature_entry`)."""
+    tanpa sisa tanda tangan lama (`splitzip.unexpected_signature_entries`: v1 milik apksigner sah)."""
     os.lseek(fd, 0, os.SEEK_SET)
     rows: list[str] = []
     total = 0
@@ -548,7 +548,8 @@ def _inspect_splits(fd: int, problems: list[tuple[str, str]], info: dict[str, An
                         names = inner.namelist()
                     if "AndroidManifest.xml" not in names:
                         status = "tanpa_manifest"
-                    elif any(splitzip.is_signature_entry(x) for x in names):
+                    elif splitzip.unexpected_signature_entries(names):
+                        # Himpunan yang SAMA dengan signer-daemon/--check-bundle: v1 milik apksigner (MANIFEST.MF + satu .SF + satu .RSA) pada paket hasil BUKAN sisa.
                         status = "ttd_lama"
                 except OverflowError:
                     status = "terlalu_besar"
