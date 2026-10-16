@@ -77,7 +77,7 @@ signer-selftest: ## Uji signer: zipalign + apksigner (keystore sementara -> sign
 signer-verify: ## Bukti end-to-end signer: APK uji ditandatangani dengan keystore pemilik lewat spool + verifikasi independen + negatif + kebocoran sandi (BIG_MB=1000 menambah uji APK besar & memori)
 	@COMPOSE="$(COMPOSE)" ./scripts/signer-verify.sh
 
-verify-build: ## Bukti end-to-end pipeline build (Tahap 2b): analisis uji -> bench -> diff -> persetujuan -> build -> tanda tangan -> verifikasi independen + negatif TOCTOU/batal + retensi + kebersihan; satu tabel OK/GAGAL
+verify-build: ## Bukti end-to-end pipeline build (Tahap 2b + 3): analisis uji -> bench -> diff -> persetujuan -> build -> tanda tangan -> verifikasi independen + negatif TOCTOU/batal + retensi + kebersihan; lalu XAPK/APKS sampel (per split, satu sertifikat, format asli, skrip install-multiple, negatif split diganti/hilang/META-INF basi); satu tabel OK/GAGAL
 	@COMPOSE="$(COMPOSE)" ./scripts/verify-build.sh
 
 tools-check: ## Tabel versi semua alat build (java, apktool, jadx, keytool, zipalign, apksigner) dari image runner & signer, dibandingkan dengan pin

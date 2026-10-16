@@ -11,6 +11,7 @@ volume, healthcheck, `exec -T` meneruskan EOF stdin, buildctl/signer/runner/work
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -19,6 +20,7 @@ import signal
 import subprocess
 import sys
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -31,8 +33,10 @@ OTHER = hashlib.sha256(b"sertifikat lain").hexdigest()
 PW = "Pw-Uji-Verify-Build-0123456789-abcdef"
 AID = 77
 
+NEW_STEPS = ["12a prasyarat paket", "12b XAPK build", "12c XAPK verifikasi", "12d XAPK isi", "12e APKS build+verifikasi", "12f negatif set"]
 STEPS = ["1 prasyarat", "2 analisis uji", "3 init + diff kosong", "4 ubah string via shell", "5 negatif persetujuan", "6 build nyata", "7 verifikasi independen (signer)",
-         "7b deteksi ubah-pasca-terbit", "8 isi artefak", "9 negatif TOCTOU", "10 negatif pembatalan", "11 retensi", "12 kebersihan", "13 ringkasan"]
+         "7b deteksi ubah-pasca-terbit", "8 isi artefak", "9 negatif TOCTOU", "10 negatif pembatalan", "11 retensi", "12 kebersihan", *NEW_STEPS, "13 ringkasan"]
+BASE_AID = 77
 
 FAKE_DOCKER = r'''#!@PY@
 import hashlib, json, os, re, sys, time
@@ -49,10 +53,14 @@ NAME = "app-modified-%d.apk"
 def load():
     if os.path.exists(SP):
         return json.load(open(SP))
-    return {"ws": 0, "marker": "", "next": 40, "builds": {}, "deleted": False, "flips": 0}
+    return {"ws": 0, "marker": "", "next": 40, "builds": {}, "deleted": False, "flips": 0, "aid": 77, "kind": "apk", "sc": {}}
 
 
 S = load()
+
+
+def cur_aid():
+    return S.get("aid", 77)
 
 
 def save():
@@ -101,8 +109,15 @@ def settle(b):
     if b["hash"] != wsh() and not (sc.get("toctou_done") and b["hold"]):
         b.update(status="failed", error_code="workspace_changed", error_text="pohon berubah", dir=bool(sc.get("failed_keeps_dir")))
         return
-    b.update(status="done", dir=True, name=NAME % b["id"], sha=hashlib.sha256(("apk%d" % b["id"]).encode()).hexdigest(), size=4321,
+    ext = b.get("kind", "apk")
+    b.update(status="done", dir=True, name=(NAME % b["id"]).replace(".apk", "." + ext), sha=hashlib.sha256(("apk%d" % b["id"]).encode()).hexdigest(), size=4321,
              cert=OWNER, verify_ok=1, flipped=False)
+    if ext != "apk":
+        b["install_script"] = "app-modified-%d-install.sh" % b["id"]
+        if sc.get("bundle_build_fail"):
+            b.update(status="failed", error_code="split_invalid", error_text="split config.id.apk rusak", dir=False)
+        elif sc.get("bundle_unverified"):
+            b["verify_ok"] = 0
     S["flips_for_%d" % b["id"]] = 0
 
 
@@ -113,7 +128,7 @@ def status_lines(b):
         sg = 999.0
     if stamps == "equal":
         sg = st
-    out = dict(build_id=b["id"], analysis_id=AID, status=b["status"], alasan="", diff_sha256=b["hash"], error_code=b.get("error_code", ""),
+    out = dict(build_id=b["id"], analysis_id=cur_aid(), status=b["status"], alasan="", diff_sha256=b["hash"], error_code=b.get("error_code", ""),
                error_text=b.get("error_text", ""), cancel_requested=0, output_name=b.get("name", ""), output_size=b.get("size", ""), output_sha256=b.get("sha", ""),
                cert_sha256=b.get("cert", ""), verify_ok=b.get("verify_ok", ""), approved_at="%.3f" % ap, started_at="%.3f" % st,
                signing_mulai="" if stamps == "missing" else "%.3f" % sg, finished_at="%.3f" % fin, waktu_antre="1.000", waktu_build="9.000", waktu_tanda_tangan="10.000")
@@ -121,20 +136,41 @@ def status_lines(b):
         out.update(approved_at="", started_at="", signing_mulai="", finished_at="")
     if sc.get("output_name") == "salah" and b["status"] == "done":
         out["output_name"] = "../evil.apk"
-    return kv(**out) + "\nl| signing_mulai=1010\n" + ("l| peak_mem_mib=812\n" if sc.get("peak") else "")
+    extra = ""
+    if b.get("kind", "apk") != "apk":
+        extra = "\n" + kv(source_kind=b["kind"], output_format=sc.get("output_format", b["kind"]))
+        if b.get("install_script"):
+            extra += "\n" + kv(install_script=b["install_script"], install_script_lokasi="builds/%d/%d/%s" % (cur_aid(), b["id"], b["install_script"]))
+        if b["status"] == "failed":
+            extra += "\n" + kv(petunjuk="Ada split yang rusak.", split_gagal="config.id.apk")
+    return kv(**out) + extra + "\nl| signing_mulai=1010\n" + ("l| peak_mem_mib=812\n" if sc.get("peak") else "")
 
 
 def buildctl(a):
     sub, rest = a[0], a[1:]
     if sub == "analyze":
         data = sys.stdin.buffer.read()
-        log("analyze", stdin=len(data))
-        if sc.get("analyze_fail"):
+        name = rest[rest.index("--name") + 1] if "--name" in rest else ""
+        kind = "xapk" if name.endswith(".xapk") else "apks" if name.endswith(".apks") else "apk"
+        log("analyze", stdin=len(data), name=name, fmt=kind)
+        if kind != "apk" and sc.get("bundle_analyze_fail"):
+            done(3, kv(kode="analisis_gagal", alasan="x"))
+        if kind == "apk" and sc.get("analyze_fail"):
             done(3, kv(kode="analisis_gagal", alasan="x"))
         if sc.get("dup"):
             done(0, kv(duplicate=1, apk_id=5, analysis_id=9, sha256="a" * 64, status="done", elapsed="0.1"))
+        if S.get("analyzed") and S["deleted"]:                       # analisis baru sesudah analisis sebelumnya dihapus: keadaan per-analisis dikosongkan
+            S.update(ws=0, marker="", builds={}, deleted=False, inited=False, aid=cur_aid() + 1)
+        S["kind"] = kind
+        if kind != "apk":
+            import zipfile as _zf, io as _io
+            with _zf.ZipFile(_io.BytesIO(data)) as z:
+                nm = [n for n in z.namelist() if not n.endswith("/")]
+            S["apk_names"] = [n for n in nm if n.endswith(".apk")]
+            S["extras_n"] = len([n for n in nm if not n.endswith(".apk")]) + (1 if "--uniq" in rest else 0)      # --uniq menambah satu entri assets/uniq-*
+            S["bundle_sha"] = {n: hashlib.sha256(n.encode()).hexdigest() for n in S["apk_names"]}
         S["analyzed"] = True
-        done(0, kv(duplicate=0, apk_id=12, analysis_id=AID, sha256=hashlib.sha256(data).hexdigest(), status="done", elapsed="12.3"))
+        done(0, kv(duplicate=0, apk_id=12, analysis_id=cur_aid(), sha256=hashlib.sha256(data).hexdigest(), status="done", elapsed="12.3"))
     if sub == "init":
         first = not S.get("inited")
         S["inited"] = True
@@ -163,7 +199,7 @@ def buildctl(a):
             done(3, kv(kode="build_aktif", alasan="ada build aktif"))
         i = S["next"]
         S["next"] += 1
-        S["builds"][str(i)] = {"id": i, "n": len(S["builds"]) + 1, "status": "awaiting_approval", "hash": wsh(), "released": False, "hold": False, "dir": False}
+        S["builds"][str(i)] = {"id": i, "n": len(S["builds"]) + 1, "status": "awaiting_approval", "hash": wsh(), "released": False, "hold": False, "dir": False, "kind": S.get("kind", "apk")}
         done(0, kv(build_id=i, diff_sha256=wsh(), status="awaiting_approval", added=0, modified=1, removed=0))
     if sub == "approve":
         i, h, hold = int(rest[0]), rest[rest.index("--diff-sha256") + 1], "--hold" in rest
@@ -185,6 +221,9 @@ def buildctl(a):
         b = bget(i)
         trace = "--trace" in rest
         log("wait", build=i, timeout=rest[rest.index("--timeout") + 1] if "--timeout" in rest else "")
+        if sc.get("hang_bundle") and b.get("kind", "apk") != "apk" and not os.path.exists(cfg["hang_marker"]):
+            open(cfg["hang_marker"], "w").write("mulai")
+            time.sleep(60)
         if sc.get("hang_wait") == b["n"] and not os.path.exists(cfg["hang_marker"]):
             open(cfg["hang_marker"], "w").write("mulai")
             time.sleep(60)
@@ -225,7 +264,7 @@ def buildctl(a):
                 done(3, kv(kode="analisis_tidak_ada", alasan="x"))
             bs = sorted(S["builds"].values(), key=lambda b: b["id"])
             dirs = [str(b["id"]) for b in bs if b.get("dir")]
-            done(0, kv(analysis_id=AID, builds=",".join("%d:%s" % (b["id"], b["status"]) for b in bs), build_dirs=",".join(dirs), build_dirs_n=len(dirs)))
+            done(0, kv(analysis_id=cur_aid(), builds=",".join("%d:%s" % (b["id"], b["status"]) for b in bs), build_dirs=",".join(dirs), build_dirs_n=len(dirs)))
         b = bget(int(rest[0]))
         if b is None:
             done(3, kv(kode="build_tidak_ada", alasan="x"))
@@ -242,7 +281,20 @@ def buildctl(a):
             done(3, kv(kode="hash_tidak_cocok", alasan="x", disk_sha256="f" * 64, cocok=0, build_id=i, output_name=b["name"], output_size=b["size"], output_sha256=b["sha"]))
         if b["flipped"] and sc.get("flip_undetected"):
             done(0, kv(build_id=i, output_name=b["name"], output_size=b["size"], output_sha256=b["sha"], cert_sha256=b["cert"], disk_sha256=b["sha"], cocok=1))
-        done(0, kv(build_id=i, output_name=b["name"], output_size=b["size"], output_sha256=b["sha"], cert_sha256=b["cert"], disk_sha256=b["sha"], cocok=1))
+        base = kv(build_id=i, output_name=b["name"], output_size=b["size"], output_sha256=b["sha"], cert_sha256=b["cert"], disk_sha256=b["sha"], cocok=1)
+        if b.get("kind", "apk") != "apk":
+            bi = sc.get("bundle_info", {})
+            lines = [base, kv(format=b["kind"], split_n=len(S["apk_names"]))]
+            for n, nm in enumerate(S["apk_names"], 1):
+                lines.append("split.%d=%s sha256=%s ukuran=100 verifikasi=%s" % (n, nm, S["bundle_sha"][nm], bi.get("verifikasi", "ok") if n == 2 else "ok"))
+            lines.append(kv(skrip=b["install_script"], skrip_lokasi="builds/%d/%d/%s" % (cur_aid(), i, b["install_script"]), skrip_sha256="c" * 64,
+                            skrip_cocok=bi.get("skrip_cocok", 1), skrip_lint=bi.get("skrip_lint", "ok"), sertifikat="sama untuk semua berkas", batas="Tidak bisa dijanjikan 100%",
+                            unduh="Tidak ada tautan unduh"))
+            if bi.get("kode"):
+                lines.append(kv(kode=bi["kode"], alasan="x"))
+                done(3, "\n".join(lines))
+            done(0, "\n".join(lines))
+        done(0, base)
     if sub == "delete":
         log("delete", analysis=int(rest[0]))
         if active():
@@ -252,6 +304,79 @@ def buildctl(a):
         left = 1 if sc.get("delete_left") else 0
         done(3 if left else 0, kv(hasil="deleted", builds_ada=left, bench_ada=0, work_ada=0) + (("\n" + kv(kode="sisa_direktori", alasan="x")) if left else ""))
     done(64, "")
+
+
+def signcheck(a):
+    """Penanda tangan palsu yang menalar dari BYTE nyata: hash split, slot hilang, sisa tanda tangan (nama OLD.RSA di dalam ZIP split)."""
+    sub, rest = a[0], a[1:]
+    st = S.setdefault("sc", {})
+    log("signcheck", sub=sub, argv_sc=a, stdin=0)
+    key = "%s/%s" % (rest[0], rest[1]) if len(rest) > 1 else ""
+    if sub == "clean":
+        st.clear()
+        done(0, "dibersihkan=1")
+    if sub == "ls":
+        slot = st.get(key, {})
+        names = ([] if "base" not in slot else ["unsigned.apk"]) + ["split-%03d.apk" % n for n in sorted(map(int, slot.get("splits", {})))]
+        names += slot.get("signed", [])
+        done(0, "\n".join(names))
+    if sub == "put":
+        data = sys.stdin.buffer.read()
+        st.setdefault(key, {})["base"] = hashlib.sha256(data).hexdigest()
+        log("sc-put", size=len(data))
+        done(0, "ditulis=%d\nsha256=%s" % (len(data), hashlib.sha256(data).hexdigest()))
+    if sub == "put-split":
+        data = sys.stdin.buffer.read()
+        n = rest[2]
+        slot = st.setdefault(key, {})
+        slot.setdefault("splits", {})[n] = {"sha": hashlib.sha256(data).hexdigest(), "stale": b"OLD.RSA" in data}
+        log("sc-put-split", n=n, size=len(data))
+        done(0, "ditulis=%d\nsha256=%s" % (len(data), hashlib.sha256(data).hexdigest()))
+    if sub == "sign":
+        if sc.get("hang_sc") and not os.path.exists(cfg["hang_marker"]):
+            open(cfg["hang_marker"], "w").write("mulai")
+            time.sleep(60)
+        slot = st.get(key, {})
+        expect_err = rest[rest.index("--expect-error") + 1] if "--expect-error" in rest else ""
+        want = rest[rest.index("--splits") + 1].split(",") if "--splits" in rest and rest[rest.index("--splits") + 1] else []
+        code = ""
+        if "base" not in slot:
+            code = "input_missing"
+        for i, h in enumerate(want, 1):
+            got = slot.get("splits", {}).get(str(i))
+            if code:
+                break
+            if got is None:
+                code = "input_missing"
+            elif got["sha"] != h:
+                code = "input_unsafe"
+        if not code:
+            for got in slot.get("splits", {}).values():
+                if got["stale"]:
+                    code = "stale_signature"
+        mode = sc.get("signcheck_accepts")
+        if mode and code == mode:
+            code = ""
+        if code:
+            if sc.get("signed_left") == code:
+                slot["signed"] = ["signed.apk"]
+            line = "HASIL ok=0 code=%s cert=- sha=- size=0 v1=- v2=0 v3=0 signers=- elapsed=1.0" % code
+            if expect_err == code:
+                done(0, line)
+            done(3, line + "\nALASAN: diharapkan kode %s tetapi kode hasil %s" % (expect_err or "-", code))
+        slot["signed"] = ["signed.apk"] + ["signed-%03d.apk" % int(n) for n in sorted(map(int, slot.get("splits", {})))]
+        cert = rest[rest.index("--owner-sha256") + 1] if "--owner-sha256" in rest else OWNER
+        if sc.get("sign_cert") == "lain":
+            cert = "d" * 64
+        out = ["HASIL ok=1 code=- cert=%s sha=%s size=100 v1=0 v2=1 v3=1 signers=1 elapsed=2.0" % (cert, "a" * 64)]
+        for n in sorted(map(int, slot.get("splits", {}))):
+            out.append("SPLIT index=%d sha=%s size=50 cert=%s v2=1 v3=1 signers=1" % (n, "b" * 64, cert))
+        if expect_err:
+            done(3, "\n".join(out) + "\nALASAN: diharapkan gagal dengan kode %s tetapi job berhasil" % expect_err)
+        if sc.get("sign_cert") == "lain" and "--expect-ok" in rest:
+            done(3, "\n".join(out) + "\nALASAN: sertifikat penanda tangan BUKAN sertifikat pemilik")
+        done(0, "\n".join(out))
+    done(64, "GALAT: tak dikenal")
 
 
 def main():
@@ -290,6 +415,12 @@ def main():
         if sc.get("image_old") == svc and c[:1] in (["test"], ["grep"]):
             log("image", svc=svc)
             done(1, "")
+        if c[:1] == ["grep"] and "--check-bundle" in c:
+            log("image-bundle", svc=svc)
+            done(1 if sc.get("no_check_bundle") else 0, "")
+        if svc in ("runner", "worker") and c[:2] in (["python3", "-c"], ["python", "-c"]) and "memfd_create" in c[2]:
+            log("memfd", svc=svc)
+            done(1 if sc.get("memfd_fail") == svc else 0, "memfd=ok" if sc.get("memfd_fail") != svc else "AttributeError: memfd_create")
         if c[:2] == ["test", "-f"] or c[:1] == ["grep"]:
             log("image", svc=svc)
             done(0, "")
@@ -301,7 +432,7 @@ def main():
             done(sc.get("mount_other_rc", 0), "")
         if c[:1] == ["ls"]:
             log("ls", svc=svc, path=c[-1])
-            done(0, "g%d-1\n" % AID if (svc == "signer" and sc.get("signwork_left")) else "")
+            done(0, "g%d-1\n" % cur_aid() if (svc == "signer" and sc.get("signwork_left")) else "")
         if svc == "web" and c[:3] == ["python", "-m", "app.buildctl"]:
             log("buildctl", sub=c[3], argv_ctl=c[3:])
             buildctl(c[3:])
@@ -312,6 +443,33 @@ def main():
             d = dict(signers=1, v2=1, v3=1, cert=OWNER, zipalign="ok", sha=b["sha"], size=b["size"])
             d.update(sc.get("selftest", {}))
             done(sc.get("selftest_rc", 0), kv(**d))
+        if svc == "signer" and c[:2] == ["signer-selftest", "--check-bundle"]:
+            aid, bid, name = c[2:5]
+            b = bget(int(bid))
+            log("selftest-bundle", build=int(bid), name=name, aid=int(aid))
+            names = list(S["apk_names"])
+            ov = dict(sc.get("bundle_selftest", {}))
+            if ov.get("drop_entry"):
+                names = names[:-1]
+            d = dict(format=b["kind"], entri_apk=len(names))
+            lines = [kv(**d)]
+            for n, nm in enumerate(names, 1):
+                e = {"nama": nm, "signers": 1, "v2": 1, "v3": 1, "cert": OWNER, "zipalign": "ok", "sisa_ttd": 0}
+                for k in ("signers", "v2", "v3", "cert", "zipalign", "sisa_ttd"):
+                    if k in ov and (ov.get("only_entry", n) == n):
+                        e[k] = ov[k]
+                lines.append(kv(**{"entri.%d.%s" % (n, k): v for k, v in e.items()}))
+            lines.append(kv(cert_berbeda=ov.get("cert_berbeda", 1), extras_n=ov.get("extras_n", S["extras_n"])))
+            if sc.get("bundle_selftest_rc"):
+                done(sc["bundle_selftest_rc"], kv(kode="verify_gagal", alasan="x"))
+            done(0, "\n".join(lines))
+        if svc == "runner" and c[:1] == ["python3"] and "# vb-paket" in c[2]:
+            log("paket", argv_paket=c[3:])
+            if "paket" in sc:
+                done(sc["paket"][0], sc["paket"][1])
+            done(0, kv(paket="ok", format=S["kind"], obb=1, ikon=1, manifest=1, skrip_sh_n=1, alias=1, toc=1, extras_uniq=1))
+        if svc == "worker" and c[:2] == ["python", "signcheck.py"]:
+            signcheck(c[2:])
         if svc == "runner" and c[:1] == ["sh"] and "bench_tulis" in " ".join(c):
             log("mount", env=env)
             done(sc.get("mount_rc", 0), sc.get("mount_out", "mount=ok"))
@@ -389,7 +547,17 @@ class Rig:
         ks.chmod(0o755)
         (self.repo / "secrets/signing_keystore.p12").write_bytes(b"P12-PALSU" * 40)
         (self.repo / "secrets/signing_keystore_pass").write_text(PW + "\n")
-        (self.repo / "testdata/vulnsample.apk").write_bytes(b"PK\x03\x04" + b"apk-uji" * 100)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("AndroidManifest.xml", b"<manifest/>")
+            zf.writestr("classes.dex", b"dex\n035\x00" + b"apk-uji" * 100)
+        (self.repo / "testdata/vulnsample.apk").write_bytes(buf.getvalue())
+        gen = ROOT / "scripts/make-test-bundles.py"
+        if gen.exists():
+            shutil.copy2(gen, self.repo / "scripts/make-test-bundles.py")
+        py3 = self.bin / "python3"                                      # python3 di host = interpreter tes (pustaka standar saja dipakai pembangkit)
+        py3.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+        py3.chmod(0o755)
         self.scenario: dict = {}
         self.write_docker()
 
@@ -397,8 +565,14 @@ class Rig:
         cfgp = self.root / "cfg.json"
         cfgp.write_text(json.dumps({"scenario": self.scenario, "statefile": str(self.state), "log": str(self.calls_log), "owner": OWNER,
                                     "hang_marker": str(self.hang_marker)}))
+        # `docker` palsu = stub kecil yang mengimpor modul berkas (bytecode di-cache): tiap panggilan ±15 ms, bukan ±27 ms karena kompilasi ulang skrip 500 baris
+        # (skrip verify-build memanggil docker >150 kali per jalan; tanpa ini seluruh berkas tes memperpanjang CI).
+        mod = self.bin / "fakedocker.py"
+        body = FAKE_DOCKER.split("\n", 1)[1].replace("@CFG@", repr(str(cfgp)))
+        if not mod.exists() or mod.read_text() != body:
+            mod.write_text(body)
         docker = self.bin / "docker"
-        docker.write_text(FAKE_DOCKER.replace("@PY@", sys.executable).replace("@CFG@", repr(str(cfgp))))
+        docker.write_text(f'#!{sys.executable} -S\nimport sys\nsys.path.insert(0, {str(self.bin)!r})\nimport fakedocker\n')
         docker.chmod(0o755)
 
     def scn(self, **kw):
@@ -408,7 +582,7 @@ class Rig:
 
     def env(self, **extra):
         env = {k: v for k, v in os.environ.items() if k not in ("COMPOSE", "COMPOSE_FILE", "COMPOSE_PROFILES", "DOCKER_CMD", "BIG_MB", "KEYSTORE_STAMP", "TIMEOUT_BUILD",
-                                                                "TIMEOUT_SIGN", "VB_STRICT_DIFF")}
+                                                                "TIMEOUT_SIGN", "VB_STRICT_DIFF", "PYTHON3")}
         env.update({"PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}", "LC_ALL": "C.UTF-8"})
         env.update(extra)
         return env
@@ -550,7 +724,8 @@ def test_the_script_deletes_only_its_own_test_analysis_and_exactly_once(rig):
     res, _ = run_ok(rig)
     assert res.returncode == 0
     deletes = rig.kinds("delete")
-    assert [d["analysis"] for d in deletes] == [AID]
+    # Tahap 3: analisis APK uji (langkah 2) + analisis XAPK (12b) + analisis APKS (12e), masing-masing dihapus tepat sekali
+    assert [d["analysis"] for d in deletes] == [AID, AID + 1, AID + 2]
 
 
 def test_calls_follow_the_documented_step_order(rig):
@@ -577,9 +752,9 @@ def test_step_4_uses_the_real_shell_with_an_unexpanded_ws_and_a_random_marker(ri
     run_ok(rig)
     cmds = [c["command"] for c in rig.kinds("shell")]
     sed = [c for c in cmds if "sed -i" in c]
-    assert len(sed) == 2                                          # langkah 4 dan langkah 9
+    assert len(sed) == 4                                          # langkah 4, langkah 9, lalu satu per analisis paket (12b XAPK, 12e APKS)
     markers = {re.search(r"VB[0-9a-f]{12}", c).group(0) for c in sed}
-    assert len(markers) == 2
+    assert len(markers) == 4
     for c in cmds:
         assert "$WS/project/res/values/strings.xml" in c          # `$WS` TIDAK diekspansi di host
     assert any("grep -o" in c for c in cmds)
@@ -655,7 +830,7 @@ def test_step_1_old_image_stops_everything_after_it_with_the_make_up_hint(rig):
     assert res.returncode == 1
     assert status_of(rows, "1 prasyarat") == "GAGAL"
     assert "make up" in rows["1 prasyarat"][1]
-    for step in STEPS[1:12]:
+    for step in STEPS[1:-1]:
         assert status_of(rows, step) == "DILEWATI", step
     assert not rig.kinds("buildctl", "delete")                     # tidak ada analisis dibuat, tidak ada yang dihapus
 
@@ -705,7 +880,7 @@ def test_step_2_duplicate_stops_the_run_and_never_deletes_the_owners_analysis(ri
     assert res.returncode == 1
     assert status_of(rows, "2 analisis uji") == "GAGAL"
     assert "duplicate" in rows["2 analisis uji"][1]
-    for step in STEPS[2:12]:
+    for step in STEPS[2:-1]:
         assert status_of(rows, step) == "DILEWATI", step
     assert not rig.kinds("delete")                                # analisis 9 milik pemilik TIDAK disentuh
 
@@ -747,7 +922,7 @@ def test_step_5_each_broken_guard_is_a_failure_and_the_run_continues_cleanly(rig
     assert res.returncode == 1
     assert status_of(rows, "5 negatif persetujuan") == "GAGAL"
     assert status_of(rows, "6 build nyata") in ("OK", "GAGAL")     # alur lanjut; pembersihan tetap jalan
-    assert [d["analysis"] for d in rig.kinds("delete")] == [AID]
+    assert [d["analysis"] for d in rig.kinds("delete")] == [AID, AID + 1, AID + 2]
 
 
 # ================================================================================ langkah 7, 7b, 8
@@ -1049,3 +1224,556 @@ def test_the_table_is_printed_once_even_when_interrupted_or_failing(rig):
     rig.scn(selftest={"signers": 2})
     res, _ = run_ok(rig)
     assert len(HEADER_RE.findall(res.stdout)) == 1
+
+
+@pytest.fixture(scope="module")
+def ran(tmp_path_factory):
+    """Satu jalan skenario bawaan (semua OK) dipakai bersama oleh tes yang hanya MEMBACA hasilnya: tiap jalan penuh ±3,5 dtk (>200 panggilan docker palsu)."""
+    rig = Rig(tmp_path_factory.mktemp("bawaan"))
+    before = sorted(p.relative_to(rig.repo).as_posix() for p in rig.repo.rglob("*") if p.is_file())
+    res = rig.run()
+    rig.files_before = before
+    return rig, res, table(res.stdout)
+
+
+# ================================================================================ Tahap 3: langkah 12a-12f (XAPK/APKS)
+STEP1_BLOCK_SHA256 = "6320ca59393cc55a547ece6a19769663b035a3d022d6f08983e9c5cb5fb9d5cf"      # health_of() + step1() sama dengan origin/main (PR #50) — JANGAN diubah
+SENT_AID = "2147483000"
+
+
+def _heredoc(name: str) -> str:
+    text = SCRIPT_SRC.read_text(encoding="utf-8")
+    return text.split(f"read -r -d '' {name} <<'PYEOF'\n", 1)[1].split("\nPYEOF", 1)[0]
+
+
+def test_step1_tak_berubah_hash_isi_dan_nama_langkah_lama_tetap():
+    text = SCRIPT_SRC.read_text(encoding="utf-8")
+    block = text[text.index("health_of() {"):text.index("# " + "-" * 96 + " langkah 2-4")].rstrip("\n")
+    assert hashlib.sha256(block.encode()).hexdigest() == STEP1_BLOCK_SHA256, "fungsi langkah 1 tidak boleh diubah (konflik dengan PR #50)"
+    named = re.findall(r'^N(?:1|2|3|4|5|6|7|7B|8|9|10|11|12|13)="([^"\n]*)"$', text, re.M)
+    assert named == [s for s in STEPS if s not in NEW_STEPS]
+
+
+def test_langkah_12a_sampai_12f_ada_dan_berurutan(ran):
+    rig, res, rows = ran
+    assert res.returncode == 0, res.stdout + res.stderr
+    keys = list(rows)
+    pos = [keys.index(s) for s in NEW_STEPS]
+    assert pos == sorted(pos) and keys.index("12 kebersihan") < pos[0] and pos[-1] < keys.index("13 ringkasan")
+    for step in NEW_STEPS:
+        assert status_of(rows, step) == "OK", (step, rows[step])
+    assert len(HEADER_RE.findall(res.stdout)) == 1                      # tetap SATU tabel
+
+
+def test_satu_tabel_status_enum_tetap(ran, rig):
+    _, _, rows = ran
+    assert {v[0] for v in rows.values()} <= {"OK", "GAGAL", "DILEWATI", "INFO"}
+    rig.scn(no_check_bundle=True)
+    res, rows = run_ok(rig)
+    assert {v[0] for v in rows.values()} <= {"OK", "GAGAL", "DILEWATI", "INFO"}
+    assert len(HEADER_RE.findall(res.stdout)) == 1
+
+
+def test_ringkasan_memuat_catatan_belum_diuji_paket(ran):
+    rig, res, rows = ran
+    status, note = rows["13 ringkasan"]
+    assert status == "INFO"
+    for needle in ("BELUM DIUJI", "RQ/antrean", "BIG_MB", "adb install-multiple", "anti-tamper", "Play Integrity", "docs/deploy.md"):
+        assert needle in note, needle
+
+
+def test_urutan_panggilan_paket_dan_kunci_laporan(ran):
+    rig, res, rows = ran
+    kinds = [c["kind"] for c in rig.calls()]
+    assert kinds.index("delete") < kinds.index("image-bundle") < kinds.index("memfd") < kinds.index("selftest-bundle") < kinds.index("paket") < kinds.index("signcheck")
+    memfd = rig.kinds("memfd")
+    assert [m["svc"] for m in memfd] == ["runner", "worker"]
+    for m in memfd:
+        argv = m["argv"]
+        i = argv.index("run")
+        assert argv[i:i + 5] == ["run", "--rm", "--no-deps", "-T", m["svc"]]
+
+
+def test_analisis_paket_lewat_stdin_dengan_uniq_nama_menurut_format(ran):
+    rig, res, rows = ran
+    an = [c for c in rig.kinds("analyze") if c["kind"] == "analyze" and c.get("name")]
+    assert [a["name"] for a in an][0].endswith(".xapk") and [a["name"] for a in an][1].endswith(".apks")
+    ctl = [c["argv_ctl"] for c in rig.kinds("buildctl") if c["argv_ctl"][0] == "analyze"]
+    for argv in ctl[1:]:
+        assert argv[:3] == ["analyze", "-", "--uniq"] and "--name" in argv
+    base = len((rig.repo / "testdata/vulnsample.apk").read_bytes())
+    assert all(a["stdin"] > base for a in an)                            # bukan APK tunggal: paket berisi base + split + extras
+
+
+def test_cek_sertifikat_dan_nama_entri_dari_fixture(ran):
+    rig, res, rows = ran
+    sb = rig.kinds("selftest-bundle")
+    assert len(sb) == 2
+    assert sb[0]["name"].endswith(".xapk") and sb[1]["name"].endswith(".apks")
+    for c in sb:
+        argv = c["argv"]
+        assert argv[argv.index("signer-selftest"):][:2] == ["signer-selftest", "--check-bundle"]
+        assert re.fullmatch(r"[A-Za-z0-9._-]+-modified-\d+\.(xapk|apks)", c["name"])
+
+
+def test_tiap_pemanggilan_runner_paket_adalah_run_sekali_pakai(ran):
+    rig, res, rows = ran
+    for c in rig.kinds("paket", "memfd"):
+        if "runner" in c["argv"]:
+            i = c["argv"].index("run")
+            assert c["argv"][i:i + 5] == ["run", "--rm", "--no-deps", "-T", "runner"]
+    assert not any("exec" in c["argv"] and "runner" in c["argv"] for c in rig.calls())
+
+
+# ---------------------------------------------------------------- 12a
+def test_12a_python3_host_tak_ada_gagal_jelas_dan_langkah_paket_dilewati(rig):
+    res, rows = run_ok(rig, PYTHON3="/tidak/ada/python3")
+    assert res.returncode == 1
+    assert status_of(rows, "12a prasyarat paket") == "GAGAL"
+    assert "python3" in rows["12a prasyarat paket"][1]
+    for step in NEW_STEPS[1:]:
+        assert status_of(rows, step) == "DILEWATI", step
+    assert status_of(rows, "12 kebersihan") == "OK"                    # langkah lama tidak terpengaruh
+
+
+def test_12a_check_bundle_tak_ada_menunjuk_image_lama_dan_make_up(rig):
+    rig.scn(no_check_bundle=True)
+    res, rows = run_ok(rig)
+    assert res.returncode == 1
+    note = rows["12a prasyarat paket"][1]
+    assert status_of(rows, "12a prasyarat paket") == "GAGAL"
+    assert "--check-bundle" in note and "make up" in note
+    assert all(status_of(rows, s) == "DILEWATI" for s in NEW_STEPS[1:])
+    assert not [c for c in rig.kinds("analyze") if c.get("name")]       # tak ada analisis paket dibuat
+
+
+@pytest.mark.parametrize("svc", ["runner", "worker"])
+def test_12a_memfd_create_tak_tersedia_gagal_dengan_gejala(rig, svc):
+    rig.scn(memfd_fail=svc)
+    res, rows = run_ok(rig)
+    assert status_of(rows, "12a prasyarat paket") == "GAGAL"
+    note = rows["12a prasyarat paket"][1]
+    assert "memfd_create" in note and svc in note and "memfd_unavailable" in note
+    assert all(status_of(rows, s) == "DILEWATI" for s in NEW_STEPS[1:])
+
+
+def test_12a_pembangkit_fixture_hilang_gagal_dengan_nama_berkas(rig):
+    (rig.repo / "scripts/make-test-bundles.py").unlink()
+    res, rows = run_ok(rig)
+    assert status_of(rows, "12a prasyarat paket") == "GAGAL"
+    assert "make-test-bundles.py" in rows["12a prasyarat paket"][1]
+    assert all(status_of(rows, s) == "DILEWATI" for s in NEW_STEPS[1:])
+
+
+def test_12a_pembangkit_gagal_menampilkan_pesannya(rig):
+    (rig.repo / "scripts/make-test-bundles.py").write_text("import sys\nsys.stderr.write('boom-pembangkit\\n')\nsys.exit(2)\n")
+    res, rows = run_ok(rig)
+    assert status_of(rows, "12a prasyarat paket") == "GAGAL"
+    assert "boom-pembangkit" in rows["12a prasyarat paket"][1]
+
+
+# ---------------------------------------------------------------- 12b-12e
+def test_12b_analisis_paket_gagal_hanya_12b_gagal_dan_apks_tetap_dicoba(rig):
+    rig.scn(bundle_analyze_fail=True)
+    res, rows = run_ok(rig)
+    assert res.returncode == 1
+    assert status_of(rows, "12a prasyarat paket") == "OK"
+    assert status_of(rows, "12b XAPK build") == "GAGAL"
+    assert status_of(rows, "12c XAPK verifikasi") == "DILEWATI" and status_of(rows, "12d XAPK isi") == "DILEWATI"
+    assert status_of(rows, "12e APKS build+verifikasi") == "GAGAL"      # APKS berdiri sendiri; gejala yang sama dilaporkan terpisah
+    assert status_of(rows, "12f negatif set") == "OK"
+    assert "analisis_gagal" in rows["12b XAPK build"][1]
+
+
+def test_12b_build_paket_gagal_menyertakan_kode_petunjuk_dan_split(rig):
+    rig.scn(bundle_build_fail=True)
+    res, rows = run_ok(rig)
+    for step in ("12b XAPK build", "12e APKS build+verifikasi"):
+        assert status_of(rows, step) == "GAGAL"
+        note = rows[step][1]
+        assert "split_invalid" in note and "config.id.apk" in note and "Ada split yang rusak" in note
+    assert status_of(rows, "12c XAPK verifikasi") == "DILEWATI"
+
+
+def test_12b_format_keluaran_salah_atau_tak_terverifikasi_gagal(rig):
+    rig.scn(output_format="apk")
+    _, rows = run_ok(rig)
+    assert status_of(rows, "12b XAPK build") == "GAGAL" and "output_format" in rows["12b XAPK build"][1]
+    rig.scn(output_format="xapk", bundle_unverified=True)
+    rig.reset()
+    _, rows = run_ok(rig)
+    assert status_of(rows, "12b XAPK build") == "GAGAL" and "verify_ok" in rows["12b XAPK build"][1]
+
+
+def test_12b_menandai_string_via_shell_nyata_dan_hash_diff_terikat(ran):
+    rig, res, rows = ran
+    approve = [c["argv_ctl"] for c in rig.kinds("buildctl") if c["argv_ctl"][0] == "approve"]
+    bundle = [a for a in approve if a[1] not in ("40", "999999999") and "--hold" not in a]
+    # build 5 (langkah 6), 11/12 (langkah 11) lalu dua build paket; semua approve membawa --diff-sha256 64 heks
+    assert all(re.fullmatch(r"[0-9a-f]{64}", a[a.index("--diff-sha256") + 1]) for a in bundle)
+    assert len(bundle) >= 5
+
+
+@pytest.mark.parametrize("ov", [{"signers": 2, "only_entry": 2}, {"v2": 0}, {"v3": 0}, {"cert": OTHER}, {"zipalign": "gagal"}, {"sisa_ttd": 1}, {"cert_berbeda": 2},
+                                {"drop_entry": True}, {"extras_n": 9}])
+def test_12c_setiap_pemeriksaan_verifikasi_per_split_harus_berlaku(rig, ov):
+    rig.scn(bundle_selftest=ov)
+    res, rows = run_ok(rig)
+    assert res.returncode == 1
+    assert status_of(rows, "12c XAPK verifikasi") == "GAGAL"
+    assert status_of(rows, "12d XAPK isi") == "OK"                      # isi tidak bergantung pada hasil 12c
+    key = next(k for k in ("signers", "v2", "v3", "cert", "zipalign", "sisa_ttd", "cert_berbeda", "entri_apk", "extras_n") if k in ov or (k == "entri_apk" and "drop_entry" in ov))
+    assert key in rows["12c XAPK verifikasi"][1]
+
+
+def test_12c_kode_keluar_selftest_bukan_nol_gagal_dengan_kode(rig):
+    rig.scn(bundle_selftest_rc=3)
+    _, rows = run_ok(rig)
+    assert status_of(rows, "12c XAPK verifikasi") == "GAGAL"
+    assert "verify_gagal" in rows["12c XAPK verifikasi"][1]
+
+
+@pytest.mark.parametrize("scn,needle", [({"paket": [3, "paket=gagal\nmasalah.1=obb_beda"]}, "obb_beda"), ({"bundle_info": {"skrip_cocok": 0, "kode": "skrip_tidak_cocok"}}, "skrip_tidak_cocok"),
+                                       ({"bundle_info": {"skrip_lint": "baris di luar allowlist"}}, "skrip_lint"),
+                                       ({"bundle_info": {"verifikasi": "ttd_lama"}}, "ttd_lama")])
+def test_12d_isi_dan_skrip_install_multiple_dijaga(rig, scn, needle):
+    rig.scn(**scn)
+    res, rows = run_ok(rig)
+    assert res.returncode == 1
+    assert status_of(rows, "12d XAPK isi") == "GAGAL"
+    assert needle in rows["12d XAPK isi"][1]
+    assert status_of(rows, "12c XAPK verifikasi") == "OK"
+
+
+def test_12d_argumen_tamu_runner_dari_fixture(ran):
+    rig, res, rows = ran
+    first = rig.kinds("paket")[0]["argv_paket"]
+    aid, bid, name, script, fmt, *checks = first
+    assert aid == str(AID + 1) and bid.isdigit() and name.endswith(f"-modified-{bid}.xapk") and script == f"app-modified-{bid}-install.sh" and fmt == "xapk"
+    kinds = {c.split(":", 1)[0] for c in checks}
+    assert kinds == {"same", "manifest", "extras"}
+    assert any(c.startswith("same:Android/obb/com.example.vuln/main.1.com.example.vuln.obb:") for c in checks)
+    assert any(c.startswith("manifest:manifest.json:") for c in checks)
+    second = rig.kinds("paket")[1]["argv_paket"]
+    assert second[0] == str(AID + 2) and second[4] == "apks"
+    assert {c.split(":", 1)[0] for c in second[5:]} == {"same", "alias", "extras"}
+    assert "alias:splits/base-master_2.apk:splits/base-master.apk" in second[5:]
+
+
+def test_analisis_uji_sebelumnya_tertinggal_membuat_12b_12e_dilewati_dengan_alasan_dan_12f_jalan(rig):
+    rig.scn(stuck_after_cancel=True)
+    res, rows = run_ok(rig)
+    assert res.returncode == 1
+    assert status_of(rows, "12 kebersihan") == "GAGAL"
+    for step in ("12b XAPK build", "12c XAPK verifikasi", "12d XAPK isi", "12e APKS build+verifikasi"):
+        assert status_of(rows, step) == "DILEWATI", step
+        assert "langkah 12" in rows[step][1]
+    assert status_of(rows, "12a prasyarat paket") == "OK" and status_of(rows, "12f negatif set") == "OK"
+
+
+def test_pembangkit_fixture_hanya_menulis_ke_folder_sementara_bukan_repo_secrets_testdata(ran):
+    rig, _, _ = ran
+    before = rig.files_before
+    after = sorted(p.relative_to(rig.repo).as_posix() for p in rig.repo.rglob("*") if p.is_file())
+    assert [a for a in after if a not in before and not a.endswith(".verify-build.lock")] == []
+
+
+# ---------------------------------------------------------------- 12f
+def _sc_groups(rig):
+    groups: dict[str, list[list[str]]] = {}
+    for c in rig.kinds("signcheck"):
+        a = c["argv_sc"]
+        if len(a) > 2 and a[2].isdigit():
+            groups.setdefault(a[2], []).append(a)
+    return groups
+
+
+def test_12f_tiga_negatif_ditolak_dengan_kode_persis_dan_kontrol_positif(ran):
+    rig, res, rows = ran
+    assert status_of(rows, "12f negatif set") == "OK"
+    sc = [c["argv_sc"] for c in rig.kinds("signcheck")]
+    assert sc[0][:2] == ["clean", SENT_AID] and sc[-1][:2] == ["clean", SENT_AID]
+    g = _sc_groups(rig)
+    assert sorted(g) == ["1", "2", "3", "4"]
+    for bid in ("1", "2", "3"):                                       # tiap negatif: letakkan, tanda tangan (harus ditolak), pastikan tak ada signed*, bersihkan
+        assert g[bid][-3][0] == "sign" and g[bid][-2][0] == "ls" and g[bid][-1][0] == "clean"
+    expect = {bid: g[bid][[a[0] for a in g[bid]].index("sign")] for bid in g}
+    assert [expect[b][expect[b].index("--expect-error") + 1] for b in ("1", "2", "3")] == ["input_unsafe", "input_missing", "stale_signature"]
+    pos = expect["4"]
+    assert "--expect-ok" in pos and re.fullmatch(r"[0-9a-f]{64}", pos[pos.index("--owner-sha256") + 1])
+    for a in sc:
+        assert a[1] == SENT_AID                                       # id sentinel: tidak mungkin menyentuh analisis nyata
+        if len(a) > 2 and a[2].isdigit():
+            assert 1 <= int(a[2]) <= 7, a
+
+
+def test_12f_split_diganti_split_hilang_dan_split_basi_dibangun_dari_fixture(ran):
+    rig, res, rows = ran
+    g = _sc_groups(rig)
+    puts = rig.kinds("sc-put-split")
+    # bid 1 (diganti): dua split diletakkan dengan BYTE yang sama (split-1 di slot 2) sementara --splits memuat dua hash berbeda
+    h1 = g["1"][[a[0] for a in g["1"]].index("sign")]
+    hashes = h1[h1.index("--splits") + 1].split(",")
+    assert len(hashes) == 2 and hashes[0] != hashes[1] and all(re.fullmatch(r"[0-9a-f]{64}", h) for h in hashes)
+    assert [a[0] for a in g["1"]].count("put-split") == 2
+    # bid 2 (hilang): hanya satu split diletakkan padahal dua hash diminta
+    assert [a[0] for a in g["2"]].count("put-split") == 1
+    h2 = g["2"][[a[0] for a in g["2"]].index("sign")]
+    assert len(h2[h2.index("--splits") + 1].split(",")) == 2
+    # bid 3 (basi): dua split diletakkan, split ke-2 berbeda ukuran dari split ke-1 (memuat META-INF/OLD.RSA)
+    assert [a[0] for a in g["3"]].count("put-split") == 2
+    assert puts and all(p["size"] > 0 for p in puts)
+    assert len({p["size"] for p in puts}) >= 2
+
+
+@pytest.mark.parametrize("code", ["input_unsafe", "input_missing", "stale_signature"])
+def test_12f_signer_yang_menerima_set_cacat_adalah_gagal(rig, code):
+    rig.scn(signcheck_accepts=code)
+    res, rows = run_ok(rig)
+    assert res.returncode == 1
+    assert status_of(rows, "12f negatif set") == "GAGAL"
+    assert code in rows["12f negatif set"][1]
+    assert rig.kinds("signcheck")[-1]["argv_sc"][0] == "clean"            # pembersihan tetap jalan
+
+
+@pytest.mark.parametrize("code", ["input_unsafe", "input_missing", "stale_signature"])
+def test_12f_berkas_signed_tersisa_setelah_penolakan_adalah_gagal(rig, code):
+    rig.scn(signed_left=code)
+    _, rows = run_ok(rig)
+    assert status_of(rows, "12f negatif set") == "GAGAL"
+    assert "signed" in rows["12f negatif set"][1]
+
+
+def test_12f_kontrol_positif_sertifikat_lain_gagal(rig):
+    rig.scn(sign_cert="lain")
+    _, rows = run_ok(rig)
+    assert status_of(rows, "12f negatif set") == "GAGAL"
+    assert "sertifikat" in rows["12f negatif set"][1]
+
+
+def test_12f_menulis_split_lewat_stdin_dari_berkas_fixture(ran):
+    rig, res, rows = ran
+    puts = rig.kinds("sc-put", "sc-put-split")
+    assert puts and all(p["size"] > 0 for p in puts)
+    assert puts[0]["size"] == len((rig.repo / "testdata/vulnsample.apk").read_bytes())
+
+
+# ---------------------------------------------------------------- pembersihan dan penghentian
+def test_folder_sementara_host_dibersihkan_setelah_selesai_dan_setelah_gagal(rig, tmp_path):
+    tmpdir = tmp_path / "tmpx"
+    tmpdir.mkdir()
+    run_ok(rig, TMPDIR=str(tmpdir))
+    assert list(tmpdir.iterdir()) == []
+    rig.scn(no_check_bundle=True)
+    run_ok(rig, TMPDIR=str(tmpdir))
+    assert list(tmpdir.iterdir()) == []
+
+
+def test_trap_saat_build_paket_menggantung_cancel_wait_delete_dan_bersihkan_sementara(rig, tmp_path):
+    tmpdir = tmp_path / "tmpx"
+    tmpdir.mkdir()
+    rig.scn(hang_bundle=True)
+    proc = rig.popen(TMPDIR=str(tmpdir))
+    deadline = time.time() + 40
+    while not rig.hang_marker.exists() and time.time() < deadline:
+        time.sleep(0.05)
+    assert rig.hang_marker.exists(), "skrip tidak mencapai wait build paket"
+    os.killpg(proc.pid, signal.SIGINT)
+    out, err = proc.communicate(timeout=60)
+    assert proc.returncode == 1
+    rows = table(out)
+    assert status_of(rows, "dihentikan") == "GAGAL"
+    subs = [c["argv_ctl"][0] for c in rig.kinds("buildctl")]
+    assert subs[-1] == "delete"
+    assert [d["analysis"] for d in rig.kinds("delete")][-1] == AID + 1
+    assert list(tmpdir.iterdir()) == []
+    assert rig.kinds("signcheck") == [] or rig.kinds("signcheck")[-1]["argv_sc"][0] == "clean"
+
+
+def test_trap_membersihkan_slot_sentinel_signcheck_bila_dihentikan_di_12f(rig):
+    rig.scn(hang_sc=True)
+    proc = rig.popen()
+    deadline = time.time() + 60
+    while not rig.hang_marker.exists() and time.time() < deadline:
+        time.sleep(0.05)
+    assert rig.hang_marker.exists(), "skrip tidak mencapai sign di 12f"
+    os.killpg(proc.pid, signal.SIGINT)
+    out, err = proc.communicate(timeout=60)
+    assert proc.returncode == 1
+    last = rig.kinds("signcheck")[-1]["argv_sc"]
+    assert last[:2] == ["clean", SENT_AID]
+
+
+# ---------------------------------------------------------------- tamu PY_PAKET dijalankan NYATA di atas berkas buatan
+def _paket_env(tmp_path, monkeypatch=None):
+    return {**os.environ, "PYTHONPATH": str(ROOT / "services"), "VB_DATA": str(tmp_path / "data"), "HOME": str(tmp_path)}
+
+
+def _run_paket(tmp_path, name, script_text, fmt, checks, artifact: bytes, aid="5", bid="9"):
+    d = tmp_path / "data/builds" / aid / bid
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_bytes(artifact)
+    sname = f"app-modified-{bid}-install.sh"
+    if script_text is not None:
+        (d / sname).write_text(script_text)
+    return subprocess.run([sys.executable, "-c", _heredoc("PY_PAKET"), aid, bid, name, sname, fmt, *checks], capture_output=True, text=True, env=_paket_env(tmp_path),
+                          timeout=60)
+
+
+def _gen():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("mtb_vb", ROOT / "scripts/make-test-bundles.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["mtb_vb"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _fixture(kind: str):
+    mod = _gen()
+    base = io.BytesIO()
+    with zipfile.ZipFile(base, "w") as zf:
+        zf.writestr("AndroidManifest.xml", b"<m/>")
+    data = mod.build_xapk(base.getvalue()) if kind == "xapk" else mod.build_apks(base.getvalue())
+    return mod, data, mod.checks_for(data, kind)
+
+
+def _with_uniq(data: bytes, extra: dict[str, bytes] | None = None, drop: tuple[str, ...] = ()) -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as src, zipfile.ZipFile(out, "w") as dst:
+        for i in src.infolist():
+            if i.filename not in drop:
+                dst.writestr(i, src.read(i.filename))
+        dst.writestr("assets/uniq-" + "ab" * 16 + ".txt", b"x")
+        for k, v in (extra or {}).items():
+            dst.writestr(k, v)
+    return out.getvalue()
+
+
+SCRIPT_OK = "#!/bin/sh\nexit 0\n"
+
+
+@pytest.mark.parametrize("kind", ["xapk", "apks"])
+def test_tamu_paket_menerima_artefak_yang_cocok_dengan_fixture(tmp_path, kind):
+    _, data, checks = _fixture(kind)
+    res = _run_paket(tmp_path, f"app-modified-9.{kind}", SCRIPT_OK, kind, checks, _with_uniq(data))
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "paket=ok" in res.stdout and f"format={kind}" in res.stdout and "skrip_sh_n=1" in res.stdout
+
+
+def test_tamu_paket_total_size_boleh_berbeda_tetapi_bidang_lain_tidak(tmp_path):
+    mod, data, checks = _fixture("xapk")
+    def with_manifest(edit):
+        out = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(data)) as src, zipfile.ZipFile(out, "w") as dst:
+            for i in src.infolist():
+                raw = src.read(i.filename)
+                if i.filename == "manifest.json":
+                    m = json.loads(raw)
+                    edit(m)
+                    raw = json.dumps(m).encode()
+                dst.writestr(i, raw)
+            dst.writestr("assets/uniq-" + "ab" * 16 + ".txt", b"x")
+        return out.getvalue()
+    ok = _run_paket(tmp_path, "app-modified-9.xapk", SCRIPT_OK, "xapk", checks, with_manifest(lambda m: m.update(total_size=m["total_size"] + 999)))
+    assert ok.returncode == 0, ok.stdout
+    bad = _run_paket(tmp_path, "app-modified-9.xapk", SCRIPT_OK, "xapk", checks, with_manifest(lambda m: m.update(package_name="com.evil")))
+    assert bad.returncode == 3 and "manifest" in bad.stdout
+
+
+@pytest.mark.parametrize("edit,needle", [
+    ("obb", "same:Android/obb"),
+    ("icon", "same:icon.png"),
+    ("extra", "extras"),
+    ("no_uniq", "extras"),
+    ("two_uniq", "extras"),
+])
+def test_tamu_paket_mendeteksi_extras_yang_berubah(tmp_path, edit, needle):
+    mod, data, checks = _fixture("xapk")
+    obb = "Android/obb/com.example.vuln/main.1.com.example.vuln.obb"
+    if edit == "obb":
+        blob = _replace(_with_uniq(data), obb, b"lain")
+    elif edit == "icon":
+        blob = _replace(_with_uniq(data), "icon.png", b"\x89PNG-lain")
+    elif edit == "extra":
+        blob = _with_uniq(data, {"evil.bin": b"x"})
+    elif edit == "no_uniq":
+        blob = data
+    else:
+        blob = _with_uniq(data, {"assets/uniq-" + "cd" * 16 + ".txt": b"y"})
+    res = _run_paket(tmp_path, "app-modified-9.xapk", SCRIPT_OK, "xapk", checks, blob)
+    assert res.returncode == 3, res.stdout
+    assert "paket=gagal" in res.stdout and needle.split(":")[0] in res.stdout
+
+
+def _replace(data: bytes, name: str, new: bytes) -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as src, zipfile.ZipFile(out, "w") as dst:
+        for i in src.infolist():
+            dst.writestr(i, new if i.filename == name else src.read(i.filename))
+    return out.getvalue()
+
+
+def test_tamu_paket_apks_alias_harus_berbyte_sama_dengan_base(tmp_path):
+    mod, data, checks = _fixture("apks")
+    blob = _replace(_with_uniq(data), "splits/base-master_2.apk", b"PK-lain")
+    res = _run_paket(tmp_path, "app-modified-9.apks", SCRIPT_OK, "apks", checks, blob)
+    assert res.returncode == 3 and "alias" in res.stdout
+
+
+def test_tamu_paket_skrip_sh_n_gagal_atau_hilang(tmp_path):
+    mod, data, checks = _fixture("apks")
+    blob = _with_uniq(data)
+    bad = _run_paket(tmp_path, "app-modified-9.apks", "if then fi (\n", "apks", checks, blob)
+    assert bad.returncode == 3 and "skrip" in bad.stdout
+    gone = _run_paket(tmp_path, "app-modified-9.apks", None, "apks", checks, blob, bid="10")
+    assert gone.returncode == 3 and "skrip" in gone.stdout
+
+
+@pytest.mark.parametrize("argv_edit", ["aid", "name", "fmt", "check"])
+def test_tamu_paket_menolak_masukan_tak_wajar(tmp_path, argv_edit):
+    mod, data, checks = _fixture("xapk")
+    d = tmp_path / "data/builds/5/9"
+    d.mkdir(parents=True)
+    (d / "app-modified-9.xapk").write_bytes(data)
+    argv = {"aid": ["5x", "9", "app-modified-9.xapk"], "name": ["5", "9", "../x.xapk"], "fmt": ["5", "9", "app-modified-9.xapk"], "check": ["5", "9", "app-modified-9.xapk"]}[argv_edit]
+    fmt = "bogus" if argv_edit == "fmt" else "xapk"
+    cks = ["rm:-rf:/"] if argv_edit == "check" else checks
+    res = subprocess.run([sys.executable, "-c", _heredoc("PY_PAKET"), *argv, "app-modified-9-install.sh", fmt, *cks], capture_output=True, text=True,
+                         env=_paket_env(tmp_path), timeout=60)
+    assert res.returncode == 3 and "masukan_salah" in res.stdout
+
+
+def test_tamu_paket_tidak_mengikuti_symlink_artefak(tmp_path):
+    mod, data, checks = _fixture("xapk")
+    d = tmp_path / "data/builds/5/9"
+    d.mkdir(parents=True)
+    (tmp_path / "luar.xapk").write_bytes(data)
+    os.symlink(tmp_path / "luar.xapk", d / "app-modified-9.xapk")
+    (d / "app-modified-9-install.sh").write_text(SCRIPT_OK)
+    res = subprocess.run([sys.executable, "-c", _heredoc("PY_PAKET"), "5", "9", "app-modified-9.xapk", "app-modified-9-install.sh", "xapk", *checks], capture_output=True,
+                         text=True, env=_paket_env(tmp_path), timeout=60)
+    assert res.returncode == 3 and "paket=gagal" in res.stdout
+
+
+def test_penanda_tamu_paket_di_baris_pertama():
+    assert _heredoc("PY_PAKET").splitlines()[0].startswith("# vb-paket")
+
+
+def test_gerbang_keystore_menandai_semua_langkah_sesudahnya_dilewati_termasuk_paket(rig):
+    res = rig.run(FAKE_KS_PRESENT_RC="1")
+    rows = table(res.stdout)
+    assert status_of(rows, "1 prasyarat") == "GAGAL"
+    for step in STEPS[1:-1]:
+        assert status_of(rows, step) == "DILEWATI", step
+    assert not rig.calls()
+
+
+def test_bantuan_menyebut_python3_dan_langkah_paket(rig):
+    h = rig.run("--help")
+    assert h.returncode == 0 and "PYTHON3" in h.stdout and not rig.calls()
+
+
+def test_makefile_menjelaskan_xapk_apks_di_target_verify_build():
+    line = next(ln for ln in MAKEFILE.read_text().splitlines() if ln.startswith("verify-build:"))
+    assert "XAPK" in line and "APKS" in line
