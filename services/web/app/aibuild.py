@@ -2,7 +2,7 @@
 
 Prinsip (mengikat; dijaga tes AST di tests/test_aibuild_helpers.py):
   * Modul ini TIDAK mengimpor `app.builds`/`app.buildctl`/`app.jobs`/RQ/Redis/signspool dan tidak memanggil persetujuan, tanda tangan, unduh, atau pembacaan artefak.
-    Jalur AI hanya bisa membuat build `awaiting_approval` (`store.create_build`); `approved` hanya lewat `store.approve_build` milik pemilik (CLI).
+    Jalur AI hanya bisa membuat build `awaiting_approval` (`store.create_build`); `approved` hanya lewat `store.approve_build` milik pemilik (tab Build web dengan sesi + CSRF, atau CLI).
   * `analysis_id` dan `session_id` datang dari `Scope` (dibuat server dari konteks chat), TIDAK PERNAH dari argumen model. `build_id` dari model divalidasi dan dicek milik analisis ini.
   * Hash diff SELALU dihitung ulang dari bench (`shellspool` op `diff`). Hash dari model hanya pembanding dan tidak pernah disimpan.
   * Hasil bench/DB/runner = data tak tepercaya: pesan galat disusun dari tabel teks tetap (tanpa teks bench/DB), teks lain disaring `sanitize_status`/`sanitize_content`.
@@ -72,8 +72,8 @@ _MESSAGES = {
     "pohon_terlalu_besar": "Ruang kerja terlalu besar atau terlalu dalam untuk dihitung diff-nya.",
     "diff_kosong": "Ruang kerja tidak berbeda dari baseline; tidak ada yang perlu dibangun.",
     "hash_tidak_cocok": "Hash diff yang diberikan tidak sama dengan diff ruang kerja saat ini; periksa lagi dengan bench_diff.",
-    "build_tertunda": "Sudah ada build aktif #{bid} ({label}) untuk analisis ini; AI tidak dapat menggantinya. Pemilik bisa membatalkan lewat CLI.",
-    "baseline_tidak_utuh": "Hampir seluruh proyek terhapus dari baseline; permintaan ditolak. Pemilik tetap bisa memeriksa lewat CLI.",
+    "build_tertunda": "Sudah ada build aktif #{bid} ({label}) untuk analisis ini; AI tidak dapat menggantinya. Pemilik bisa membatalkan lewat tab Build atau CLI.",
+    "baseline_tidak_utuh": "Hampir seluruh proyek terhapus dari baseline; permintaan ditolak. Pemilik tetap bisa memeriksa lewat tab Build atau CLI.",
     "build_bukan_milik_analisis": "Build tidak ditemukan untuk analisis ini.",
     "ringkasan_terlalu_besar": "Ringkasan diff terlalu besar untuk disimpan.",
     "gagal": "Permintaan gagal diproses.",

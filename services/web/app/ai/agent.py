@@ -133,8 +133,9 @@ tidak otomatis menjadi APK baru: untuk membangunnya ikuti alur BUILD APK di bawa
 # Disisipkan tepat setelah blok shell, HANYA bila tool build ditawarkan (gerbang sama dengan shell: AI_SHELL_ENABLED=1).
 BUILD_PROMPT_BLOCK = """BUILD APK (bench_diff, request_build, get_build_status)
 - Alur: ubah berkas di $WS/project lewat shell_run → bench_diff (periksa daftar perubahan dan hash) → request_build → minta pemilik menyetujui build \
-secara manual → get_build_status berulang sampai status done. Pemilik menyetujui lewat CLI: `docker compose exec -T web python -m app.buildctl approve \
-<build_id> --diff-sha256 <hash>` (tombol web menyusul di Tahap 5). Anda tidak bisa menyetujui, membatalkan, menandatangani, mengunduh, atau membaca hasilnya.
+secara manual → get_build_status berulang sampai status done. Pemilik menyetujui sendiri lewat tombol Setujui di tab Build pada halaman analisis (layar \
+persetujuan menampilkan diff dan meminta pernyataan wewenang), atau lewat CLI: `docker compose exec -T web python -m app.buildctl approve \
+<build_id> --diff-sha256 <hash>`. Anda tidak bisa menyetujui, membatalkan, menandatangani, mengunduh, atau membaca hasilnya.
 - Setelah request_build, katakan terus terang bahwa build menunggu persetujuan pemilik. Jangan klaim "selesai" sebelum get_build_status = done. Hanya \
 satu build aktif per analisis. Bila galat tidak_ada_ruang_kerja, minta pemilik menjalankan `buildctl init <id>`.
 - Ubah seminimal mungkin dan verifikasi dulu (grep, bench_diff). Batas jujur: anti-tamper, packer, Play Integrity, atau pemeriksaan hash .so bisa \

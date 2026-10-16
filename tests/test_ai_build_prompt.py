@@ -33,11 +33,11 @@ def test_the_workflow_is_described_in_order():
     assert "done" in b
 
 
-def test_the_owner_approval_command_is_given_and_the_web_button_is_deferred():
+def test_the_owner_approval_command_is_given_and_the_web_button_is_in_the_build_tab():
     b = _block()
     assert "docker compose exec -T web python -m app.buildctl approve" in b
     assert "--diff-sha256" in b
-    assert "Tahap 5" in b
+    assert "tab Build" in b and "tombol Setujui" in b and "Tahap 5" not in b, "tombol web sudah ada (Tahap 5); prompt tidak lagi menyebutnya 'menyusul'"
 
 
 def test_honest_limits_are_stated():

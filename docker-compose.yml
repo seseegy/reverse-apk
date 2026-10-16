@@ -111,7 +111,7 @@ services:
       - db:/data/db
       - bench:/data/bench          # web hanya MENGHAPUS ruang kerja saat analisis dihapus; tidak pernah membaca isinya (data tak tepercaya)
       - benchspool:/data/benchspool
-      # Artefak build: web menghapusnya saat analisis dihapus dan nanti menyajikannya (Tahap 5). Runner menulis folder ini, jadi akses web SELALU lewat
+      # Artefak build: web menghapusnya saat analisis dihapus dan menyajikannya lewat rute unduhan Tahap 5 (salin-lalu-hash-lalu-bandingkan). Runner menulis folder ini, jadi akses web SELALU lewat
       # fsutil.open_dir_chain/rmtree_at (rantai O_NOFOLLOW), bukan jalur string.
       - builds:/data/builds
       - ./config:/config:ro

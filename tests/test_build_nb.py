@@ -194,15 +194,21 @@ def test_no_ai_module_imports_builds_buildctl_or_enqueue_build():
     assert not bad, bad
 
 
-def test_the_web_route_set_is_unchanged_by_feat_e():
-    """Tidak ada rute web baru (persetujuan hanya lewat CLI pemilik). Cuplikan: jumlah dan hash himpunan (metode, path); tak ada path yang menyebut build/approve/sign."""
-    from app import routes_apk, routes_files, routes_storage
+def test_the_web_route_set_is_unchanged_by_feat_e_except_for_the_stage5_build_router():
+    """Himpunan rute lama TIDAK berubah (47 pasangan, hash tetap); rute baru HANYA milik `routes_build` (Tahap 5) dan persis daftar di bawah. Persetujuan web ada di sana
+    (sesi + CSRF + hash diff); tidak ada path yang menyebut approve/sign/bench di luar router itu."""
+    from app import routes_apk, routes_build, routes_files, routes_storage
     from app.main import app
+    mine = {(m, r.path) for r in routes_build.router.routes if hasattr(r, "methods") for m in r.methods}
     pairs = sorted({(m, r.path) for rt in (routes_apk.router, routes_files.router, routes_storage.router, app.router) for r in rt.routes
-                    if hasattr(r, "methods") for m in r.methods})
+                    if hasattr(r, "methods") for m in r.methods} - mine)
     assert len(pairs) == 47
     assert hashlib.sha256("\n".join(f"{m} {p}" for m, p in pairs).encode()).hexdigest() == "4808f03a2a5bd393bd24a60477c3a75fe3b7c835e1fa090c82774c4f8de70aa8"
     assert not [p for _m, p in pairs if any(w in p for w in ("build", "approve", "sign", "bench"))]       # (`download` sudah ada untuk berkas pengguna/AI di Tahap 1)
+    b = "/analyses/{analysis_id}/build"
+    assert mine == {("GET", b), ("GET", b + "/{build_id}"), ("GET", b + "/{build_id}/status"), ("GET", b + "/{build_id}/download"), ("GET", b + "/{build_id}/script"),
+                    ("POST", b + "/init"), ("POST", b + "/request"), ("POST", b + "/{build_id}/approve"), ("POST", b + "/{build_id}/requeue"),
+                    ("POST", b + "/{build_id}/reject"), ("POST", b + "/{build_id}/cancel")}
 
 
 def test_routes_apk_does_not_import_the_build_layer():

@@ -1,5 +1,7 @@
 # 09 — Paket multi-APK & bengkel modifikasi
 
+> **Pembaruan Tahap 5: tab Build di web (layar persetujuan, unduhan salin-lalu-hash, badging) SUDAH ada di kode; verifikasi di VPS belum — lihat "Status Tahap 5" di bagian paling bawah. Paragraf status di bawah ini adalah catatan historis Tahap 1-2a.**
+>
 > **Status: Bagian A (XAPK/APKS) dan Bagian C (shell AI) SEBAGIAN SUDAH ADA; Bagian B (membangun & menandatangani APK) baru sampai FONDASI + DAEMON PENANDA TANGAN (B-1a skema + state machine, keystore, toolchain B-1b, `signer-daemon` Tahap 2a); belum ada tahap `build`, UI, atau AI untuk build — lihat "Status Bagian B, Tahap 1" dan "Status Tahap 2a".** Shell AI (PR C, lihat "Status PR C") **mati secara bawaan** dan sengaja lebih sempit dari rancangan: tanpa build/tanda tangan di dalam `bench` (tool `bench_diff`/`request_build`/`get_build_status` ditambahkan di Tahap 4, lihat "Status Tahap 4"), dan tanpa `apktool`/`jadx` di dalam `bench`. Selama Bagian B belum dikerjakan, tidak ada penulisan APK dan tidak ada tanda tangan. **Sub-paket B-1b (toolchain) SUDAH ada**: image `signer` (Build-Tools 37.0.0 dipin SHA-256, profil Compose `build`, mati secara bawaan) + `signer-selftest` + `make tools-check`. **Tahap 1 (fondasi data & kunci) SUDAH ada**: tabel `build` + state machine persetujuan manual di `rvcore.store` (migrasi v5) dan keystore yang dibuat `make init`; BELUM ada tahap `build` di worker, antarmuka persetujuan, maupun tool AI (lihat "Status paket B-1b" dan "Status Bagian B, Tahap 1"). **Tahap 2a (`signer-daemon` nyata dengan keystore pemilik) SUDAH ada di kode**: antrean `signspool`, penandatanganan `zipalign` → `apksigner sign` → `apksigner verify` dengan sertifikat harus sama dengan keystore pemilik, pemasangan keystore HANYA ke `signer`, `make signer-verify`; uji Docker/cgroup menunggu VPS (lihat "Status Tahap 2a").
 
 ## Tujuan
@@ -103,13 +105,13 @@ Jenis ditentukan dari **isi arsip**, bukan ekstensi (seperti lampiran di 07). Ek
 | FR-9.21 | Keystore: **satu per instalasi**, dibuat oleh `make init`, tidak pernah masuk repo, `web`, `worker`, atau runner. Ini kunci uji, **bukan** kunci rilis, dan tidak boleh dipakai di tempat lain | P1 |
 | FR-9.22 | Skema tanda tangan: v2 + v3 (target SDK modern mewajibkan, dan `resources.arsc` harus tak terkompresi serta rata 4 byte; `zipalign` dijalankan **sebelum** `apksigner`) | P1 |
 | FR-9.23 | Setiap APK hasil memuat berkas jejak `assets/reverse-apk-modified.txt` berisi SHA-256 APK asal, nomor build, dan waktu, agar asal-usulnya jelas. Berkas ini ditambahkan sistem, bukan AI | P1 |
-| FR-9.24 | Verifikasi akhir wajib sebelum status `done`: `apksigner verify` lulus, `aapt2 dump badging` terbaca, paket dan versi sesuai harapan, dan SHA-256 hasil dicatat | P1 — **DITUNDA ke Tahap 5** (badging dan paket/versi); `apksigner verify`, sertifikat, `zipalign`, dan SHA-256 tetap dikerjakan di 2b (lihat Status Tahap 2b) |
-| FR-9.25 | Unduhan hanya lewat sesi login (CSRF + header unduhan seperti di 07), `Content-Type: application/vnd.android.package-archive`, `Content-Disposition: attachment`, `nosniff` | P1 |
+| FR-9.24 | Verifikasi akhir wajib sebelum status `done`: `apksigner verify` lulus, `aapt2 dump badging` terbaca, paket dan versi sesuai harapan, dan SHA-256 hasil dicatat | P1 — **TERPENUHI di Tahap 5** (badging dibaca runner dari `unsigned.apk`, wajib terbaca sebelum tanda tangan; paket/versi dibandingkan dengan analisis asal tanpa memblokir); `apksigner verify`, sertifikat, `zipalign`, dan SHA-256 sudah di 2b (lihat Status Tahap 2b dan Status Tahap 5) |
+| FR-9.25 | Unduhan hanya lewat sesi login (CSRF + header unduhan seperti di 07), `Content-Type: application/vnd.android.package-archive`, `Content-Disposition: attachment`, `nosniff` | P1 — **ada di Tahap 5** (salin-lalu-hash-lalu-bandingkan; lihat Status Tahap 5) |
 | FR-9.26 | Audit log: `build_requested`, `build_approved`, `build_rejected`, `build_done`, `build_failed`, `build_download`, masing-masing dengan `analysis_id`, nomor build, SHA-256 diff, dan SHA-256 hasil | P1 |
 | FR-9.27 | Build dapat dibatalkan (seperti job lain), dan hasil sementara dibersihkan oleh *housekeeping* runner | P1 |
 | FR-9.28 | Batas: maks. N build per analisis yang disimpan (10 bawaan, `BUILD_KEEP`, klem 1–100), kuota disk build ikut `MIN_FREE_GB`/`MAX_OUTPUT_MB` | P1 |
 | FR-9.40 | **Layar persetujuan harus tahan perubahan yang sangat banyak** (pemilik: jenis perubahan "apa saja, sangat banyak"): diff dikelompokkan per berkas dengan jumlah baris tambah/hapus, dapat dicari dan disaring (smali / resource / manifest / aset biner), berkas terbesar dan paling banyak berubah di atas, dan setiap berkas dapat dibuka penuh. Persetujuan terikat pada **SHA-256 diff**: bila ruang kerja berubah lagi setelah diajukan, persetujuan lama tidak berlaku | P1 |
-| FR-9.41 | Verifikasi (FR-9.24) membaca `targetSdkVersion`/`minSdkVersion` dan menampilkan peringatan jelas bila APK **tidak akan terpasang di Android 14+** (target SDK di bawah 23 ditolak oleh sistem terlepas dari tanda tangan). Tidak memblokir unduhan | P1 — **DITUNDA ke Tahap 5** bersama FR-9.24 (lihat Status Tahap 2b) |
+| FR-9.41 | Verifikasi (FR-9.24) membaca `targetSdkVersion`/`minSdkVersion` dan menampilkan peringatan jelas bila APK **tidak akan terpasang di Android 14+** (target SDK di bawah 23 ditolak oleh sistem terlepas dari tanda tangan). Tidak memblokir unduhan | P1 — **TERPENUHI di Tahap 5** bersama FR-9.24: baris `peringatan: target_sdk_di_bawah_23` di stage_log dan ditampilkan di halaman build; tidak memblokir unduhan |
 | FR-9.42 | Ruang kerja punya **titik simpan** (*snapshot*) yang dibuat sistem sebelum tiap permintaan build dan dapat dipulihkan ("Kembali ke titik simpan N"), karena perubahan banyak dan bertahap oleh AI mudah salah arah | P2 |
 
 ### Hal yang **tidak** dijanjikan (harus tampil di UI dan README)
@@ -150,7 +152,7 @@ Konsekuensinya diterima dengan sadar: `web` kini membaca berkas hasil dari konta
 | FR-9.31 | Tool **`bench_diff`**: ringkasan perubahan ruang kerja dibanding hasil apktool asli (**ada, Tahap 4**) | P1 |
 | FR-9.32 | Tool **`request_build`** (`diff_sha256?` pembanding; **tanpa `catatan`** untuk mengurangi permukaan injeksi; **ada, Tahap 4**): membuat permintaan build berstatus `awaiting_approval` (FR-9.16). **Tidak** membangun apa pun; AI tidak bisa menyetujui sendiri | P1 |
 | FR-9.33 | Tool **`get_build_status`**: status, kode galat, dan pesan/log tahap tersanitasi (allowlist baris), supaya AI bisa memperbaiki kesalahan (**ada, Tahap 4**) | P1 |
-| FR-9.34 | Tidak ada tool untuk menyetujui, menandatangani, mengunduh, atau memasang (**terpenuhi, dijaga tes AST**). Persetujuan hanya oleh pemilik: saat ini CLI (`buildctl approve`), UI dengan CSRF di Tahap 5 | P1 |
+| FR-9.34 | Tidak ada tool untuk menyetujui, menandatangani, mengunduh, atau memasang (**terpenuhi, dijaga tes AST**). Persetujuan hanya oleh pemilik: tombol Setujui di tab Build (sesi + CSRF + pernyataan wewenang + hash diff, Tahap 5) dan CLI (`buildctl approve`) | P1 |
 | FR-9.35 | Setiap perintah dan keluarannya tampil di percakapan (terlipat), tersimpan di `chat_message.tool_calls`, dan dihitung ke anggaran | P1 |
 | FR-9.36 | Batas per giliran: jumlah perintah, total keluaran (`AI_MAX_TOOL_CHARS`), total waktu; pada batas, AI diberi tahu dan giliran selesai dengan rapi (pola `stopped` yang sudah ada di `agent.py`) | P1 |
 | FR-9.37 | Keluaran shell melewati redaksi secret yang sama sebelum dikirim ke provider (`AI_REDACT_SECRETS`) | P1 |
@@ -417,7 +419,7 @@ Tahap 3 (satu paket, satu PR) membuat `request`/`approve`/`run_build` bekerja un
 
 **Batas jujur.** Tidak bisa dijanjikan 100%: aplikasi dengan anti-tamper, packer, Play Integrity/SafetyNet, pemeriksaan tanda tangan di dalam kode, atau pemeriksaan hash `.so`/dex dapat menolak berjalan setelah ditandatangani ulang dengan kunci lain. Persetujuan hanya atas diff base; split tidak dimodifikasi. Aplikasi asli harus dihapus dulu sebelum memasang hasil (tanda tangan berbeda). Perubahan `package`/`versionCode` base membuat set tak terpasang (diperingatkan `package_berubah`/`version_code_berubah`).
 
-**Skrip `adb install-multiple` — koreksi catatan lama.** Catatan "tanpa skrip adb" (HANDOFF/Tahap 1) berarti: **aplikasi tidak memanggil adb** dan tidak punya perangkat. Skrip hanyalah **teks** (templat tetap + baris data bertanda kutip, dijaga lint allowlist `installscript.lint`) yang disalin pemilik dari folder build di server; tanpa tautan unduh dan tanpa tombol web sampai Tahap 5.
+**Skrip `adb install-multiple` — koreksi catatan lama.** Catatan "tanpa skrip adb" (HANDOFF/Tahap 1) berarti: **aplikasi tidak memanggil adb** dan tidak punya perangkat. Skrip hanyalah **teks** (templat tetap + baris data bertanda kutip, dijaga lint allowlist `installscript.lint`) yang disalin pemilik dari folder build di server; tanpa tautan unduh dan tanpa tombol web sampai Tahap 5 (sejak Tahap 5 ada unduhan web, lihat Status Tahap 5).
 
 **Verifikasi di VPS.** `make verify-build` (langkah 12a–12f): build XAPK dan APKS sampel buatan skrip (tanpa material kunci) end-to-end, verifikasi per split (`signers=1 v2=1 v3=1 zipalign=ok sisa_ttd=0`), sertifikat sama dengan keystore pemilik, format asli terjaga, isi skrip install-multiple, dan negatif di signer (split diganti `input_unsafe`, split hilang `input_missing`, META-INF basi `stale_signature`). Cadangkan `secrets/signing_keystore.p12` + `secrets/signing_keystore_pass` DI LUAR VPS.
 
@@ -542,14 +544,14 @@ Tahap 3 (satu paket, satu PR) membuat `request`/`approve`/`run_build` bekerja un
 |----|----|----|
 | Build tertunda | satu build aktif per analisis; permintaan identik yang masih `awaiting_approval` dipakai ulang; lainnya `build_tertunda`; satu build baru per giliran | membatasi volume tanpa hitungan tambahan; `BUILD_KEEP` tetap oleh worker |
 | Mengganti permintaan | hanya pemilik (`buildctl cancel`); AI tidak punya tool pembatalan | menjaga tepat tiga tool |
-| `catatan` | dihapus dari `request_build` | tidak ada di rancangan akhir; kurangi permukaan injeksi. Layar persetujuan Tahap 5 menampilkan diff + `diminta_oleh_ai` |
+| `catatan` | dihapus dari `request_build` | tidak ada di rancangan akhir; kurangi permukaan injeksi. Layar persetujuan Tahap 5 menampilkan diff + penanda “diminta oleh AI” |
 | Init ruang kerja | tetap `buildctl init <id>` oleh pemilik (`tidak_ada_ruang_kerja` bila belum); lazy-init (FR-9.39) ditunda | tidak ada tool init pada Tahap 4 |
 | `artefak_tercatat` | `status == done` menurut DB (bukan jaminan berkas ada) | nama jujur untuk "artefak ada" |
 | Pratinjau diff | **dilepas**: `bench_diff` tanpa argumen `paths`/pratinjau isi berkas; hanya ringkasan + hash | brief mengizinkan opsional; menghindari perintah shell yang disusun server. Isi berkas dilihat AI lewat `shell_run`, pemilik lewat `buildctl diff` |
 
-**Persetujuan masih CLI-only sampai Tahap 5.** Jalur AI hanya menghasilkan `awaiting_approval`; `approve_build`, penandatanganan, unduhan, dan pembacaan artefak tidak terjangkau dari kode tool (tes AST/impor transitif + tes perilaku).
+**Persetujuan CLI-only sampai Tahap 5; sejak Tahap 5 juga lewat tombol web (lihat Status Tahap 5).** Jalur AI hanya menghasilkan `awaiting_approval`; `approve_build`, penandatanganan, unduhan, dan pembacaan artefak tidak terjangkau dari kode tool (tes AST/impor transitif + tes perilaku).
 
-**Belum ada / belum diuji:** UI persetujuan dan unduhan (Tahap 5); anggaran/limit AI yang baru dan perilaku "berhenti rapi lalu tanya lanjut?" (Tahap 6); Docker/Compose, bench/Landlock nyata dalam loop chat, RQ, dan model nyata (verifikasi hanya `docker` palsu + bench palsu; cek live opsional manual).
+**Belum ada / belum diuji (catatan Tahap 4; UI persetujuan dan unduhan sudah ada di Tahap 5, limit AI dan perilaku "berhenti rapi lalu tanya lanjut?" sudah ada di Tahap 6):** Docker/Compose, bench/Landlock nyata dalam loop chat, RQ, dan model nyata (verifikasi hanya `docker` palsu + bench palsu; cek live opsional manual).
 
 ## Status Tahap 6: limit AI, berhenti rapi, anggaran, dan batas 1 GB
 
