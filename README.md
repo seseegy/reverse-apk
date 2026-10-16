@@ -24,6 +24,8 @@ Berjalan di VPS sendiri lewat Docker Compose.
 > Bukti satu-perintah di VPS: `make verify-build` (BELUM DIUJI di Docker). Detail, tabel mount, dan gejala VPS: [docs/deploy.md](docs/deploy.md#build-apk-tahap-2b-pipeline-bench--runner--signer-status-terbukti-di-sandbox-belum-diuji-di-docker).
 >
 > **Build XAPK/APKS Tahap 3 (split APK):** `request`/`approve` kini juga untuk analisis XAPK dan APKS. Base dibangun ulang (apktool), SETIAP split lain dibuang tanda tangan lamanya lalu ditandatangani ulang dengan **kunci pemilik yang sama**; keluaran **format asal** (XAPK→XAPK, APKS→APKS) ditambah skrip teks `adb install-multiple` di folder build (aplikasi tidak memanggil adb; tanpa tautan unduh sampai Tahap 5). Sampel uji dibuat `scripts/make-test-bundles.py` (tanpa material kunci). `make verify-build` diperluas (12a–12f). **Batas jujur: tidak bisa dijanjikan 100%** untuk aplikasi dengan anti-tamper, packer, Play Integrity, atau pemeriksaan hash `.so`. **BELUM DIUJI:** Docker nyata, `adb install-multiple` pada perangkat Android 12+, XAPK/APKS nyata dari toko. **Cadangkan `secrets/signing_keystore.p12` + `secrets/signing_keystore_pass` DI LUAR VPS** — tanpa kunci itu, hasil build lama tidak bisa diperbarui di tempat. Detail: [docs/deploy.md](docs/deploy.md#build-xapkapks-tahap-3-split-apk-status-terbukti-di-sandbox-belum-diuji-di-docker-dan-di-perangkat).
+>
+> **Tool build AI (Tahap 4):** bila `AI_SHELL_ENABLED=1`, AI di chat mendapat tiga tool: `bench_diff` (daftar perubahan ruang kerja + hash), `request_build` (membuat permintaan build `awaiting_approval` dari diff saat ini) dan `get_build_status` (status/galat tersanitasi). Alur: AI mengubah berkas lewat shell → `bench_diff` → `request_build` → **meminta Anda menyetujui** → `get_build_status`. AI **tidak bisa** menyetujui, membatalkan, menandatangani, mengunduh, atau membaca hasil build; **persetujuan masih HANYA lewat CLI pemilik** (`docker compose exec -T web python -m app.buildctl approve <id> --diff-sha256 <hash>`) sampai tombol web di Tahap 5. Satu build aktif per analisis. Bukti tanpa model dan tanpa kunci API: `make verify-build` langkah 14a–14n (pembantu `python -m app.aitoolcheck` memanggil kode tool yang sama dengan chat). Cek live dengan model nyata opsional/manual ([docs/deploy.md](docs/deploy.md); `make ai-check` hanya menguji provider). **BELUM DIUJI:** Docker/Compose nyata, bench/Landlock nyata dalam loop chat, RQ, dan model nyata. Tidak ada jaminan hasil berfungsi pada aplikasi dengan anti-tamper/packer/Play Integrity/hash `.so`.
 
 ## Mulai cepat
 ```bash
@@ -58,7 +60,7 @@ docs/prd/                 Dokumen kebutuhan produk per bagian
 scripts/init.sh           Penyiapan .env, secrets/, dan keystore penanda tangan
 scripts/keystore.sh       Membuat/menampilkan keystore (keytool di image signer; tidak pernah menimpa); `access`/`check` memastikan kunci terbaca signer
 scripts/signer-verify.sh  `make signer-verify`: bukti end-to-end penandatanganan (tabel OK/GAGAL yang bisa ditempel)
-scripts/verify-build.sh   `make verify-build`: bukti end-to-end pipeline build APK + XAPK/APKS (satu tabel OK/GAGAL)
+scripts/verify-build.sh   `make verify-build`: bukti end-to-end pipeline build APK + XAPK/APKS + tool build AI tanpa LLM (satu tabel OK/GAGAL)
 scripts/make-test-bundles.py  Pembuat sampel XAPK/APKS uji (stdlib; tanpa kunci; keluaran di testdata/, di-ignore Git)
 docker-compose.keystore.yml  Berkas tambahan: memasang keystore HANYA ke `signer` (dimuat Makefile bila keystore ada)
 ```
