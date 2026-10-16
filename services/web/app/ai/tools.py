@@ -19,6 +19,7 @@ ini (hasil_ai/): path divalidasi ketat, hanya ekstensi teks, berkas tidak pernah
 from __future__ import annotations
 
 import json
+import math
 import re
 import threading
 import time
@@ -915,7 +916,7 @@ def _shell_turn_guard(ctx: ToolContext, timeout: int) -> int:
         raise ToolError(f"batas total keluaran shell {limit_c} karakter per giliran tercapai ({ctx.shell_out_chars} karakter sudah dikirim ke Anda); jangan memanggil shell_run lagi. "
                         "Rangkum yang sudah selesai dan yang tersisa, lalu tawarkan kepada pengguna untuk melanjutkan di giliran berikutnya.")
     if limit_s:
-        timeout = min(timeout, max(1, int(limit_s - ctx.shell_seconds)))
+        timeout = min(timeout, max(1, math.ceil(limit_s - ctx.shell_seconds)))
     return timeout
 
 

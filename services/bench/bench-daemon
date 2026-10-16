@@ -46,8 +46,8 @@ def _int_env(name: str, default: int, lo: int, hi: int) -> int:
 LIMITS = executor.Limits(
     max_timeout=_int_env("BENCH_CMD_MAX_TIMEOUT", 120, 1, 3600),
     output_bytes=_int_env("BENCH_CMD_MAX_OUTPUT_KB", 64, 1, 4096) * 1024,
-    workspace_bytes=_int_env("BENCH_WORKSPACE_MAX_MB", 2048, 1, 1_000_000) * 1024 * 1024,
-    file_bytes=_int_env("BENCH_FILE_MAX_MB", 256, 1, 100_000) * 1024 * 1024,
+    workspace_bytes=_int_env("BENCH_WORKSPACE_MAX_MB", 4096, 1, 1_000_000) * 1024 * 1024,
+    file_bytes=_int_env("BENCH_FILE_MAX_MB", 1024, 1, 100_000) * 1024 * 1024,
     nproc=_int_env("BENCH_NPROC", 2048, 8, 1_000_000),
 )
 def _net_config() -> executor.NetConfig | None:

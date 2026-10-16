@@ -242,7 +242,7 @@ def test_konstanta_zip_max_runner_worker_sama_dengan_settings_web():
     s = load_settings()
     assert B.ZIP_MAX_ENTRIES == s.zip_max_entries == 100_000
     assert B.ZIP_MAX_TOTAL_BYTES == s.zip_max_total_uncompressed == 3072 * B.MIB
-    assert B.ZIP_MAX_ENTRY_BYTES == s.zip_max_entry_uncompressed == 512 * B.MIB
+    assert B.ZIP_MAX_ENTRY_BYTES == s.zip_max_entry_uncompressed == 1024 * B.MIB
     assert B.ZIP_MAX_RATIO == s.zip_max_ratio == 100
     assert (B.UPLOAD_COPY_MAX_RUNNER_MB, B.UPLOAD_COPY_MAX_WORKER_MB, B.MAX_ALIAS_CANDIDATES) == (512, 256, 8)
     assert Settings is not None
@@ -256,7 +256,7 @@ def test_konstanta_dibaca_dari_env_bernama_sama():
     env = {**os.environ, "ZIP_MAX_ENTRIES": "77", "ZIP_MAX_RATIO": "7", "ZIP_MAX_ENTRY_MB": "bukan-angka", "PYTHONPATH": str(ROOT / "services")}
     out = subprocess.run([sys.executable, "-c", "from rvcore import bundle as b; print(b.ZIP_MAX_ENTRIES, b.ZIP_MAX_RATIO, b.ZIP_MAX_ENTRY_BYTES)"],
                          env=env, capture_output=True, text=True, check=True).stdout.split()
-    assert out == ["77", "7", str(512 * B.MIB)]
+    assert out == ["77", "7", str(1024 * B.MIB)]
 
 
 def test_modul_bundle_tidak_membuka_apk_bersarang_di_plan_split_set():

@@ -690,6 +690,10 @@ select:hover { border-color: var(--color-muted-foreground); }
 .msg-body { overflow-wrap: anywhere; max-width: 78ch; line-height: 1.65; }
 .msg-body.msg-plain { white-space: pre-wrap; }
 .msg-note { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); font-size: 0.85rem; color: var(--text-warn); }
+.stop-card { padding: var(--space-2) var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius); }
+.stop-card > span { flex: 1 1 18rem; }
+.budget-warn { margin: 0; font-size: 0.8rem; color: var(--text-warn); }
+.budget-warn[hidden] { display: none; }
 .msg-meta { font-size: 0.78rem; color: var(--color-muted-foreground); font-family: var(--font-mono); }
 
 /* Indikator "sedang berpikir" sebelum token pertama (bukan gelembung kosong) */

@@ -33,8 +33,8 @@ _libc = None
 class Limits:
     max_timeout: int = 120
     output_bytes: int = 64 * 1024              # per aliran (stdout, stderr); kepala + ekor disimpan, tengah dihilangkan
-    workspace_bytes: int = 2048 * 1024 * 1024
-    file_bytes: int = 256 * 1024 * 1024
+    workspace_bytes: int = 4096 * 1024 * 1024
+    file_bytes: int = 1024 * 1024 * 1024
     nofile: int = 512
     # RLIMIT_NPROC dihitung per UID di seluruh host (terukur): proses runner/worker/web dengan uid yang sama ikut terhitung, jadi nilai kecil membuat perintah
     # SAH gagal secara acak. Pembatas proses yang tepat per kontainer adalah `pids_limit` (cgroup) di docker-compose.yml; ini hanya lapis kedua.

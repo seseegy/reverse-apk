@@ -159,3 +159,9 @@ Permintaan untuk menyerang layanan pihak ketiga (mis. mengeksploitasi endpoint y
 ## Pertanyaan terbuka
 - [OPEN] Perlu tool `decompile_with_other_engine` (CFR/Fernflower) untuk method yang gagal di jadx?
 - [OPEN] Memori lintas sesi (catatan pengguna per APK) diinjeksikan ke konteks?
+
+## Status Tahap 6: limit, berhenti rapi, dan anggaran di chat
+- **Limit baru** (rincian di [09](09-bundles-and-workbench.md) "Status Tahap 6"): `AI_SHELL_MAX_SECONDS_PER_TURN` (900), `AI_SHELL_MAX_TURN_OUTPUT_CHARS` (400000), `AI_BUILD_MAX_PER_SESSION` (5); 0 = tanpa batas. Pelanggaran = hasil tool galat berbahasa Indonesia (tercatat di `tool_calls`, kode build `batas_sesi`), lalu giliran ditutup tanpa tool dengan ringkasan jujur.
+- **`stopped`**: `done | max_steps | budget | cancelled | error | repeat | tool_budget | shell_budget | build_limit`. UI menampilkan kartu berisi teks dari server; tombol **Lanjutkan** hanya untuk `max_steps`, `tool_budget`, `shell_budget`, `repeat`. Tombol mengirim `continue: true` dan server memakai pesan tetap (`agent.CONTINUE_TEXT`). `budget` dan `build_limit` menjelaskan apa yang harus dilakukan pemilik tanpa tombol. Kartu bertahan setelah muat ulang (penanda `ai_call` berbiaya nol) dan muncul di ekspor Markdown.
+- **Anggaran**: sidebar menampilkan sisa harian dan SESI serta peringatan >= 80%; agent menutup dengan ringkasan saat >= 90% (mulai langkah ke-2). Anggaran dicek sebelum tiap panggilan provider; setiap putaran (termasuk yang memanggil tool build) dihitung ke anggaran sesi.
+- **Belum diuji**: perilaku model nyata saat diminta berhenti rapi (hanya klien palsu), UI di browser nyata, Docker/Compose.

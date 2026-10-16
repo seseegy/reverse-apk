@@ -399,8 +399,16 @@ docker compose exec -T web python -m app.aitoolcheck audit-approvals <analysis_i
 
 **BELUM DIUJI (butuh Docker VPS / model nyata):** semua langkah 14 di Docker nyata (sandbox: `docker` palsu + `app.aitoolcheck` diuji dengan bench palsu), bench/Landlock nyata untuk `bench_diff` dalam loop chat, RQ nyata, dan model nyata (apakah ia mengikuti alur di prompt). Batas jujur: anti-tamper, packer, Play Integrity, dan pemeriksaan hash `.so` bisa membuat APK hasil tidak berfungsi; tidak ada jaminan 100%.
 
+### Limit AI, berhenti rapi, dan batas 1 GB (Tahap 6)
+Tahap 6 menambah tiga variabel (`AI_SHELL_MAX_SECONDS_PER_TURN`, `AI_SHELL_MAX_TURN_OUTPUT_CHARS`, `AI_BUILD_MAX_PER_SESSION`; semuanya sudah diteruskan di `docker-compose.yml`) dan mengubah bawaan batas ukuran agar APK/XAPK hingga 1 GB tidak ditolak tanpa sengaja. Tabel sebelum/sesudah dan alasannya: PRD 09 "Status Tahap 6". Setelah `git pull`: `make up`, lalu `make env-check`.
+- **Berubah (bawaan baru)**: `MAX_UPLOAD_MB` 1024, `ZIP_MAX_ENTRY_MB` 1024, `MAX_OUTPUT_MB` 6144, `BENCH_WORKSPACE_MAX_MB` 4096, `BENCH_FILE_MAX_MB` 1024, `SIGN_MAX_MB` 1280, `TIMEOUT_APKTOOL/JADX/ANALYZE` 600/2400/600, `JOB_TIMEOUT` 4500. `ZIP_MAX_*` dan `MAX_BASE_APK_MB` kini diteruskan compose (web, runner, worker memakai nilai yang sama). Caddy perlu dimulai ulang agar membaca `MAX_UPLOAD_MB` baru (`make restart` sudah mencakupnya).
+- **Tidak berubah dengan sengaja**: semua `mem_limit` (VPS 8 GB), `JADX_HEAP`, `MIN_FREE_GB`/`JOB_MIN_FREE_GB`. Siapkan disk >= 60 GB bila memproses APK ~1 GB dan kecilkan `BUILD_KEEP` (10 paket besar = puluhan GiB).
+- **Batas yang masih menolak**: build XAPK/APKS dengan unggahan > 256 MiB (`bundle_too_large`; salinan memori worker). Analisis paket 1 GB dan build APK tunggal tidak terkena.
+- **Cara mengukur (BELUM DIUJI, tidak ada pengukuran di sandbox)**: unggah APK terbesar Anda; catat durasi tiap tahap di halaman analisis, `memory.peak` runner (`docker stats`), ukuran `work/<id>` dan `bench/<id>`; sesuaikan variabel yang menolak. Gejala: "keluaran terlalu besar" (`MAX_OUTPUT_MB`), "entri terlalu besar" (`ZIP_MAX_ENTRY_MB`), `input_too_large` (`SIGN_MAX_MB`), `tree_too_large`, `kuota` pada `buildctl init` (`BENCH_WORKSPACE_MAX_MB`), time out tahap jadx (`TIMEOUT_JADX`).
+- **Chat**: kartu "berhenti karena batas" dengan tombol Lanjutkan, sisa anggaran sesi/harian, dan peringatan 80% ada di halaman Chat; tidak ada langkah `make verify-build` baru (tahap ini diuji dengan klien palsu, BELUM dengan model nyata).
+
 ## Upload besar dan Cloudflare
-Batas ukuran APK diatur `MAX_UPLOAD_MB` di `.env` (bawaan 200). Nilai yang sama dipakai aplikasi dan Caddy.
+Batas ukuran APK diatur `MAX_UPLOAD_MB` di `.env` (bawaan 1024 sejak Tahap 6; sebelumnya 200). Nilai yang sama dipakai aplikasi dan Caddy.
 Jika proxy Cloudflare (awan oranye) dinyalakan, paket gratis membatasi body request ~100 MB sehingga APK yang
 lebih besar gagal di tepi; gunakan "DNS only" untuk host ini atau naikkan paket.
 

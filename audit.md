@@ -680,3 +680,22 @@ Ruang lingkup: `services/web/app/aibuild.py`, tiga tool di `ai/tools.py`, blok p
 **Belum terbukti.** Docker/Compose nyata, bench/Landlock nyata dalam loop chat, RQ nyata, dan model nyata (apakah ia mengikuti alur, tidak mengarang "selesai"); langkah 14 hanya diuji dengan `docker` palsu + bench palsu di sandbox. Cek live opsional/manual.
 
 **Tes lama yang sengaja diubah** (rincian di PR): `test_web_builds` (`build_diff_request` kini dipakai `builds.py` dan `aibuild.py`; `build_init_request` tetap hanya `builds.py`), `test_build_nb` (registri tool bertambah tepat tiga; asersi nama diperketat jadi daftar eksak), `test_verify_build_script` (docker palsu per-analisis, hitungan analisis/penghapusan/`sed`). Tidak ada tes isolasi yang dilonggarkan.
+
+### 10.22 Tahap 6: limit AI, berhenti rapi, anggaran, batas 1 GB (Okt 2026)
+
+**Permukaan baru dan keputusan.**
+- *Limit alur bengkel*: waktu total shell, keluaran total shell, dan build per sesi (bawaan 900 dtk / 400000 karakter / 5; 0 = tanpa batas). Pelanggaran = hasil tool galat (bukan exception) + giliran ditutup tanpa tool. Risiko yang ditutup: loop shell yang membengkakkan konteks (`AI_MAX_TURN_TOOL_CHARS` bawaan 0) dan AI yang terus mengajukan build di satu sesi.
+- *Pesan lanjutan*: dikirim server dari konstanta (`continue: true`), bukan dari klien/model; request dengan teks/lampiran/tanpa sesi ditolak. Tidak membuka jalur baru bagi prompt injection: teks yang dikirim identik dengan yang bisa diketik pemilik sendiri, dan rute tetap CSRF + sesi login.
+- *Penanda berhenti*: baris `ai_call` berbiaya nol menggantikan kolom baru agar tidak bertabrakan dengan migrasi skema tahap build. Dampak: baris itu tampak di tabel `ai_call` (purpose `chat_stop`); tidak memengaruhi total anggaran (`SUM(cost_credits)`).
+- *Anggaran*: penutupan rapi pada >= 90% (mulai langkah ke-2). Sisa risiko: satu panggilan penutup bisa melewati batas keras (konservatif, dicatat di `budget.py`).
+- *Batas ukuran*: lihat PRD 09 "Status Tahap 6" D. Menaikkan `ZIP_MAX_ENTRY_MB`, `MAX_OUTPUT_MB`, `BENCH_*`, `SIGN_MAX_MB`, dan tenggat memperlebar permukaan zip-bomb/DoS pada runner (tanpa jaringan, `mem_limit` tidak berubah); pengaman rasio, jumlah entri, dan batas pohon tetap.
+
+**Temuan selama pengerjaan.**
+1. Ringkasan galat tool (`_summarize`) menampilkan "galat: gagal" untuk pesan > 160 karakter; pesan batas baru termasuk yang panjang. Diperbaiki (dipotong 160, bukan dibuang).
+2. `ZIP_MAX_*` tidak diteruskan compose ke satu layanan pun, jadi mengubahnya di `.env` tidak berpengaruh; kini diteruskan ke web, runner, worker dengan tes paritas.
+3. Salinan memfd upload paket (`UPLOAD_COPY_MAX_WORKER_MB` 256, `mem_limit: 512m`) membuat build XAPK/APKS > 256 MiB tetap ditolak; dicatat sebagai batas yang diketahui, bukan disamarkan dengan menaikkan memori.
+4. Kalimat tes Tahap 4 "tidak ada env `AI_BUILD*`" dilonggarkan sadar (hanya `AI_BUILD_MAX_PER_SESSION`).
+
+**Terbukti (sandbox, klien dan bench palsu):** `tests/test_tahap6_limits.py` (48 tes): bawaan/klem konfigurasi, tiga limit (galat jelas, `limit_hit`, tidak menyentuh bench, 0 = nonaktif), penutupan rapi per alasan di loop agent, ringkasan server saat model diam, kartu tanpa tombol untuk anggaran/build, penanda dan muat ulang, `continue` tetap dari server, snapshot anggaran, anggaran dicek sebelum tiap panggilan di loop shell, putaran tool build dihitung ke anggaran sesi, konsistensi angka kode/compose/.env.example dan urutan rantai batas ukuran, `mem_limit` tidak naik.
+
+**BELUM terbukti.** Model nyata (apakah ia mematuhi pesan penutup dan tidak menawarkan lanjut saat anggaran habis), UI di browser nyata (hanya tes string/DOM sederhana dan `node --check`), Docker/Compose, seluruh angka ukuran terhadap APK/XAPK 1 GB sungguhan (ASUMSI), dan memori JVM di cgroup.

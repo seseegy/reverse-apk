@@ -478,8 +478,8 @@ def _shown_args(ctx: T.ToolContext, name: str, raw: str) -> str:
 
 def _summarize(name: str, out: str, ok: bool) -> str:
     if not ok:
-        m = re.search(r">([^<]{1,160})<", out)
-        return "galat: " + (m.group(1) if m else "gagal")
+        m = re.search(r">([^<]+)<", out)
+        return "galat: " + (m.group(1)[:160] if m else "gagal")
     try:
         body = out.split("\n", 2)[2].rsplit("\n</hasil_tool>", 1)[0]
         data = json.loads(body)

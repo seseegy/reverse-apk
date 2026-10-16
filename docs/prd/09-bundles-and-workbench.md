@@ -550,3 +550,55 @@ Tahap 3 (satu paket, satu PR) membuat `request`/`approve`/`run_build` bekerja un
 **Persetujuan masih CLI-only sampai Tahap 5.** Jalur AI hanya menghasilkan `awaiting_approval`; `approve_build`, penandatanganan, unduhan, dan pembacaan artefak tidak terjangkau dari kode tool (tes AST/impor transitif + tes perilaku).
 
 **Belum ada / belum diuji:** UI persetujuan dan unduhan (Tahap 5); anggaran/limit AI yang baru dan perilaku "berhenti rapi lalu tanya lanjut?" (Tahap 6); Docker/Compose, bench/Landlock nyata dalam loop chat, RQ, dan model nyata (verifikasi hanya `docker` palsu + bench palsu; cek live opsional manual).
+
+## Status Tahap 6: limit AI, berhenti rapi, anggaran, dan batas 1 GB
+
+Tahap 6 menutup butir yang tertulis "belum ada" di Status Tahap 4. Kode: `ai/{config,agent,tools,budget,chat}.py`, `aibuild.py` (satu kait `before_create`), `routes_apk.py`, `templates/chat.html`, `static/js/app.js`, `docker-compose.yml`, `.env.example`; tes `tests/test_tahap6_limits.py`.
+
+### A. Limit per giliran dan per sesi (FR-9.36)
+| Variabel | Bawaan | Arti | Bila dilanggar |
+|---|---|---|---|
+| `AI_SHELL_MAX_CALLS_PER_TURN` (lama) | 200 | jumlah `shell_run`/`bench_diff`/`request_build` per giliran | galat tool, `stopped=shell_budget` |
+| `AI_SHELL_MAX_SECONDS_PER_TURN` (baru) | 900 (0 = tanpa batas, klem 0-86400) | total WAKTU DINDING semua `shell_run` dalam satu giliran; timeout perintah terakhir dipersempit ke sisa waktu (minimal 1 dtk) | galat tool "batas total waktu shell", `shell_budget` |
+| `AI_SHELL_MAX_TURN_OUTPUT_CHARS` (baru) | 400000 (0 = tanpa batas) | total keluaran shell (setelah redaksi dan pemotongan) yang dikirim ke model dalam satu giliran; `AI_MAX_TURN_TOOL_CHARS` tetap 0 secara bawaan, jadi tanpa batas ini 200 perintah x 12000 karakter bisa membengkakkan konteks | galat tool "batas total keluaran shell", `shell_budget` |
+| `AI_BUILD_MAX_PER_SESSION` (baru) | 5 (0 = tanpa batas, klem 0-1000) | build BARU oleh AI per sesi chat (permintaan yang dipakai ulang tidak dihitung; "satu build baru per giliran" tetap) | galat tool `[batas_sesi]`, `stopped=build_limit` |
+
+Keputusan: pelanggaran SELALU hasil tool galat berbahasa Indonesia (bukan exception) yang tercatat di `tool_calls`; ringkasan kartu kini memuat awal pesan (sampai 160 karakter, sebelumnya galat yang pesannya lebih panjang tampil "gagal"). Hitungan build per sesi dibaca dari `audit_log` (`build_requested` dengan `requested_by=ai:<sesi>`, ditulis `store.create_build`), bukan dari tabel `build`, supaya pemangkasan `BUILD_KEEP` tidak mengosongkannya; tes memakai `create_build` sungguhan agar perubahan format audit tertangkap.
+
+### B. Berhenti rapi, lalu tawarkan lanjut
+- `TurnResult.stopped` kini: `done | max_steps | budget | cancelled | error | repeat | tool_budget | shell_budget | build_limit` (`agent.STOPPED_VALUES`; `repeat` dipertahankan tetapi belum dipakai agent). Semua pemetaan memakai satu sumber (`agent.STOP_NOTES`, `CONTINUABLE`, `NEEDS_OWNER`); tes memastikan JS dan template mencakup semua nilai.
+- Tool yang menolak karena batas mengisi `ctx.limit_hit`; agent lalu memaksa putaran berikutnya TANPA tool dengan pesan penutup (`wrap_up_message`: ringkasan jujur = selesai/tersisa/langkah berikut, sitasi dari yang sudah dibaca). Bila model tetap membandel (jawaban kosong), server menulis ringkasan jujur sendiri (`fallback_summary`).
+- **Kartu di UI**: teks dan boleh-tidaknya tombol datang dari server (`final.stop`). `max_steps`, `tool_budget`, `shell_budget`, `repeat` = tombol **Lanjutkan**; `budget` dan `build_limit` = penjelasan (naikkan anggaran / tunggu besok / sesi baru / naikkan `AI_BUILD_MAX_PER_SESSION`) TANPA tombol, karena lanjut pasti gagal lagi. **Berhenti** tidak berubah.
+- **Pesan lanjutan tetap dari server**: tombol mengirim `{"continue": true, "session_id": n}`; server menolak (422) bila disertai teks/lampiran atau tanpa sesi, dan menyimpan `agent.CONTINUE_TEXT` sebagai pesan pengguna. Teks bebas dari klien atau model tidak pernah menjadi pesan lanjutan.
+- **Kartu bertahan setelah muat ulang** tanpa migrasi skema (skema v5 dipakai bersama tahap build): alasan berhenti dicatat sebagai baris `ai_call` berbiaya nol (`purpose=chat_stop`, `error="stopped:<alasan>:<id pesan asisten>"`), berlaku hanya selama pesan itu masih pesan terakhir sesi; dipakai juga oleh ekspor Markdown. `cancelled`/`error` tidak ditandai (hanya tampil langsung).
+- Prompt: blok baru `LIMIT_PROMPT_BLOCK` (hanya saat shell menyala; setelah blok build, tanpa menyentuh `BUILD_PROMPT_BLOCK`) menjelaskan: batas yang disebut galat tool itu nyata, tutup dengan ringkasan, tawarkan Lanjutkan hanya untuk batas per giliran.
+
+### C. Anggaran
+`budget.snapshot` kini memuat sisa (`*_remaining`), persen (`*_pct`), `warn` (>= 80% dan belum habis; sesi didahulukan) dan `wrapup` (>= 90%). Sidebar chat menampilkan anggaran hari ini + sisa, anggaran SESI + sisa, dan peringatan; biaya giliran dan sesi tetap di baris status/meta. **Penutupan karena anggaran hampir habis**: mulai langkah ke-2 sebuah giliran (setelah ada tool yang dipakai), bila salah satu batas >= 90% agent menutup dengan ringkasan selagi masih ada sisa untuk satu panggilan terakhir (`stopped=budget`, tanpa tombol lanjut). Langkah pertama tidak dipotong (pertanyaan baru tetap dijawab sampai batas keras 100%). Anggaran dicek SEBELUM tiap panggilan provider di loop (termasuk loop shell panjang; diuji: berhenti paling banyak satu panggilan setelah batas) dan setiap putaran, termasuk yang memanggil `bench_diff`/`request_build`, dicatat di `ai_call` dengan `session_id` sehingga dihitung ke anggaran sesi (FR-9.35). Build itu sendiri bukan panggilan provider dan tidak berbiaya kredit. Ambang 80%/90% sengaja konstanta di kode (`budget.WARN_RATIO`, `WRAPUP_RATIO`), bukan variabel `.env`.
+
+### D. Batas ukuran 1 GB (build dan ruang kerja)
+**Kejujuran: TIDAK ADA pengukuran di sandbox pengembangan.** Semua angka "sesudah" di bawah adalah ASUMSI turunan dari rantai batas yang saling mengunci, bukan hasil mengukur APK 1 GB sungguhan. Status "DIKUNCI TES" berarti hubungan antar-angkanya dijaga tes konsistensi, bukan bahwa angkanya benar di VPS.
+
+| Pengaturan | Sebelum | Sesudah | Alasan | Status |
+|---|---|---|---|---|
+| `MAX_UPLOAD_MB` (web + Caddy, satu variabel) | 200 | **1024** | keputusan pemilik 1 GB; sebelumnya belum diterapkan | DIKUNCI TES (web = Caddy = bawaan kode) |
+| `ZIP_MAX_ENTRY_MB` | 512 | **1024** | satu APK di dalam paket atau satu entri bisa sebesar unggahan; sama dengan `treediff.max_file_bytes` dan `MAX_BASE_APK_MB` | ASUMSI; DIKUNCI TES |
+| `ZIP_MAX_UNCOMPRESSED_MB` | 3072 | 3072 (tetap) | = batas pohon proyek 3 GiB (`treediff.Limits.max_total_bytes`); menaikkannya hanya memindahkan penolakan ke tahap build. APK yang mengembang > 3 GiB ditolak jelas saat unggah | ASUMSI (belum diukur pada APK 1 GB) |
+| `ZIP_MAX_ENTRIES`, `ZIP_MAX_RATIO` | 100000, 100 | tetap | tidak terkait ukuran | - |
+| Penerusan `ZIP_MAX_*` di compose | tidak diteruskan | **diteruskan ke web, runner, worker** | tiga layanan membaca batas yang sama; sebelumnya mengubah satu nilai di `.env` tidak berpengaruh sama sekali | DIKUNCI TES (bawaan sama di tiga layanan) |
+| `MAX_BASE_APK_MB` (runner) | 1024, tidak diteruskan | 1024, **diteruskan** | APK dasar di dalam paket <= unggahan | DIKUNCI TES |
+| `MAX_OUTPUT_MB` (runner) | 3072 | **6144** | keluaran dekompilasi = apktool (<= 3 GiB, batas pohon) + jadx (<= 3 GiB); 3072 bisa menolak APK 1 GB yang sah ("keluaran terlalu besar") | ASUMSI; DIKUNCI TES (>= 2 x batas pohon) |
+| `BENCH_WORKSPACE_MAX_MB` | 2048 | **4096** | salinan baseline dibatasi 3/4 kuota (3 GiB = batas pohon) dan hasil `init` <= 90% kuota; 2048 hanya menerima baseline <= 1,5 GiB | DIKUNCI TES (3/4 x kuota >= batas pohon) |
+| `BENCH_FILE_MAX_MB` (RLIMIT_FSIZE perintah AI) | 256 | **1024** | `cp -r` baseline yang berisi aset > 256 MB gagal di tengah dan membuat `project/` tidak lengkap (diff "banyak dihapus") | DIKUNCI TES (>= `treediff.max_file_bytes`) |
+| `SIGN_MAX_MB` (per berkas) | 1100 | **1280** | `unsigned.apk` hasil rebuild boleh sedikit lebih besar dari unggahan 1024 MiB; 1100 hanya +7%. Uji signer terbesar: 1.055.300.391 B; 1280 belum diuji | ASUMSI; DIKUNCI TES (> unggahan) |
+| `SIGN_MAX_TOTAL_MB` | 3072 | tetap | jumlah APK satu paket <= ~1,3 GB | - |
+| `TIMEOUT_APKTOOL`/`JADX`/`ANALYZE` | 300/900/300 | **600/2400/600** | berkas dan dex lebih besar; pemrosesan dibatasi I/O dan jumlah kelas | ASUMSI (belum diukur) |
+| `JOB_TIMEOUT` (web + worker) | 2700 | **4500** | harus melampaui jumlah tenggat tahap (3600) + antrean runner/unpack | DIKUNCI TES (> jumlah tahap) |
+| `TIMEOUT_BUILD`/`TIMEOUT_SIGN` | 1800/900 | tetap | klem atas 3600 ada di kode build (di luar lingkup tahap ini) | belum diukur |
+| `MIN_FREE_GB`/`JOB_MIN_FREE_GB` | 15/5 | tetap | menaikkan akan menolak APK kecil di VPS berdisk sempit. Kebutuhan terburuk per APK 1 GB (keluaran 6 GiB + ruang kerja 4 GiB + build) bisa puluhan GiB: pakai disk >= 60 GB dan kecilkan `BUILD_KEEP` | ASUMSI |
+| `mem_limit` semua layanan, `JADX_HEAP` 2g, aapt2/apktool heap | - | **TIDAK dinaikkan** | VPS 8 GB total; jumlah `mem_limit` 6,4 GiB dijaga tes (<= 7 GiB). jadx pada dex sangat besar bisa kehabisan heap 2g: belum diukur | DIKUNCI TES (nilai tidak berubah) |
+| `UPLOAD_COPY_MAX_WORKER_MB` (salinan memfd paket) | 256 | 256 (tetap) | memfd dihitung ke memori worker (`mem_limit: 512m`); 1 GB akan OOM | DIKUNCI TES (x2 <= mem_limit worker) |
+
+**Batas yang TETAP menolak 1 GB (diketahui, belum diperbaiki):** build **XAPK/APKS** dengan unggahan > 256 MiB ditolak worker (`bundle_too_large`) karena perakitan paket memegang salinan upload di memori; analisis paket 1 GB tetap bisa, dan build **APK tunggal** hingga 1 GB tidak terkena batas ini. Memperbaikinya butuh salinan ke berkas di disk (perubahan di `worker/builds.py`, di luar lingkup Tahap 6 karena dikerjakan Tahap 5) atau menaikkan `mem_limit` worker setelah diukur. Pohon proyek > 3 GiB (APK yang mengembang) juga ditolak saat build (`tree_too_large`).
+
+**BELUM DIUJI:** semua angka terhadap APK/XAPK 1 GB sungguhan, waktu unggah/dekompilasi/rebuild/tanda tangan, memori JVM (jadx, apktool, apksigner) dan cgroup, disk VPS, Caddy menerima body 1 GiB, Docker/Compose, model nyata untuk perilaku "berhenti rapi" (hanya klien palsu), dan UI di browser (hanya tes string/DOM sederhana). Cara mengukur: unggah APK terbesar yang ada, lalu catat durasi tiap tahap, `memory.peak` runner, ukuran `work/<id>` dan `bench/<id>`; sesuaikan variabel di tabel.

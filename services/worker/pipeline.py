@@ -67,9 +67,9 @@ class Config:
             layout=layout,
             spool=Spool(layout.spool),
             timeouts={
-                "apktool": _env_int("TIMEOUT_APKTOOL", 300),
-                "jadx": _env_int("TIMEOUT_JADX", 900),
-                "analyze": _env_int("TIMEOUT_ANALYZE", 300),
+                "apktool": _env_int("TIMEOUT_APKTOOL", 600),
+                "jadx": _env_int("TIMEOUT_JADX", 2400),
+                "analyze": _env_int("TIMEOUT_ANALYZE", 600),
             },
             pickup_timeout=_env_int("RUNNER_PICKUP_TIMEOUT", 120),
             min_free_bytes=_env_int("JOB_MIN_FREE_GB", 5) * 1024**3,

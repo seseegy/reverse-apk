@@ -47,11 +47,11 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-# Batas zip: bawaan dan nama env SAMA dengan services/web/app/config.py (tes menjaga kesamaan). Compose hari ini tidak meneruskan ZIP_MAX_*
-# ke web, runner, maupun worker; menaikkan batas berarti mengubah compose di KETIGA layanan (docs/deploy.md).
+# Batas zip: bawaan dan nama env SAMA dengan services/web/app/config.py (tes menjaga kesamaan). Sejak Tahap 6 compose meneruskan ZIP_MAX_*
+# ke web, runner, dan worker dengan bawaan yang sama (tes paritas), jadi satu nilai di .env berlaku di ketiganya.
 ZIP_MAX_ENTRIES = _env_int("ZIP_MAX_ENTRIES", 100_000)
 ZIP_MAX_TOTAL_BYTES = _env_int("ZIP_MAX_UNCOMPRESSED_MB", 3072) * MIB
-ZIP_MAX_ENTRY_BYTES = _env_int("ZIP_MAX_ENTRY_MB", 512) * MIB
+ZIP_MAX_ENTRY_BYTES = _env_int("ZIP_MAX_ENTRY_MB", 1024) * MIB
 ZIP_MAX_RATIO = _env_int("ZIP_MAX_RATIO", 100)
 BOMB_ENTRY_MIN = 8 * MIB              # rasio per entri hanya dinilai untuk entri >= 8 MiB (sama dengan apkcheck)
 MAX_BUNDLE_APKS = 200                 # FR-9.3: base + 199 split

@@ -67,9 +67,11 @@ def test_prd_readme_and_audit_mention_the_tools_and_cli_only_approval():
     assert "### 10.20 Tahap 4" in read("audit.md") and "## Status Tahap 4" in read("docs/prd/09-bundles-and-workbench.md")
 
 
-def test_no_new_env_means_env_example_is_untouched_by_this_stage():
+def test_stage_4_itself_added_no_env_but_stage_6_added_the_documented_build_limit():
+    """Tahap 4 tidak menambah env. Kalimat lama ("AI_BUILD tidak ada") dilonggarkan SADAR di Tahap 6: AI_BUILD_MAX_PER_SESSION sah, selain itu tetap tidak ada env AI_BUILD*."""
     env = read(".env.example")
-    assert "AI_SHELL_ENABLED" in env and "AI_BUILD" not in env and "AITOOL" not in env
+    assert "AI_SHELL_ENABLED" in env and "AITOOL" not in env
+    assert set(re.findall(r"AI_BUILD[A-Z_]*", env)) == {"AI_BUILD_MAX_PER_SESSION"}
 
 
 def test_the_dropped_diff_preview_is_stated_explicitly_in_every_owner_document():
