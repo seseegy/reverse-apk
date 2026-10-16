@@ -208,7 +208,7 @@ def test_zero_disables_every_new_shell_limit(sp, bench):
 def test_session_build_count_uses_real_create_build_audit_and_does_not_mix_sessions():
     """Penghitung membaca audit_log `build_requested`; tes ini memakai store.create_build SUNGGUHAN supaya perubahan format audit tertangkap."""
     from web_rig import ctx_analysis
-    aid, _ = ctx_analysis("t6-count")
+    _, aid = ctx_analysis("t6-count")             # (apk_id, analysis_id): id keduanya hanya kebetulan sama pada DB bersih
     sid = 910_007                                    # id sesi yang tidak dipakai tes lain di DB bersama
     with closing(context.db()) as conn:
         before = [T.session_build_count(conn, n) for n in (sid, sid * 10, sid * 100 + 7)]
