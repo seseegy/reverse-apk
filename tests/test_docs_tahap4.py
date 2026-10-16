@@ -70,3 +70,17 @@ def test_prd_readme_and_audit_mention_the_tools_and_cli_only_approval():
 def test_no_new_env_means_env_example_is_untouched_by_this_stage():
     env = read(".env.example")
     assert "AI_SHELL_ENABLED" in env and "AI_BUILD" not in env and "AITOOL" not in env
+
+
+def test_the_dropped_diff_preview_is_stated_explicitly_in_every_owner_document():
+    for p in ("docs/deploy.md", "docs/prd/09-bundles-and-workbench.md", "audit.md", "README.md"):
+        text = read(p)
+        assert "pratinjau" in text.lower() and "dilepas" in text.lower(), p
+    assert "bench_diff" in read("docs/prd/05-chat-agent.md") and "dilepas" in read("docs/prd/05-chat-agent.md").lower()
+
+
+def test_owner_runbook_states_slot_hold_and_that_approval_commands_come_from_buildctl_not_chat():
+    deploy = deploy_section()
+    assert "menahan slot" in deploy
+    assert "salin" in deploy.lower() and "bukan dari chat" in deploy.lower()
+

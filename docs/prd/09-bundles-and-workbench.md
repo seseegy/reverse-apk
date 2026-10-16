@@ -545,6 +545,7 @@ Tahap 3 (satu paket, satu PR) membuat `request`/`approve`/`run_build` bekerja un
 | `catatan` | dihapus dari `request_build` | tidak ada di rancangan akhir; kurangi permukaan injeksi. Layar persetujuan Tahap 5 menampilkan diff + `diminta_oleh_ai` |
 | Init ruang kerja | tetap `buildctl init <id>` oleh pemilik (`tidak_ada_ruang_kerja` bila belum); lazy-init (FR-9.39) ditunda | tidak ada tool init pada Tahap 4 |
 | `artefak_tercatat` | `status == done` menurut DB (bukan jaminan berkas ada) | nama jujur untuk "artefak ada" |
+| Pratinjau diff | **dilepas**: `bench_diff` tanpa argumen `paths`/pratinjau isi berkas; hanya ringkasan + hash | brief mengizinkan opsional; menghindari perintah shell yang disusun server. Isi berkas dilihat AI lewat `shell_run`, pemilik lewat `buildctl diff` |
 
 **Persetujuan masih CLI-only sampai Tahap 5.** Jalur AI hanya menghasilkan `awaiting_approval`; `approve_build`, penandatanganan, unduhan, dan pembacaan artefak tidak terjangkau dari kode tool (tes AST/impor transitif + tes perilaku).
 
