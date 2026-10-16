@@ -13,10 +13,13 @@ import time
 
 import pytest
 import uvicorn
-from test_web_build_ui import env, mk_build, mk_done, new_analysis, query, status_of  # noqa: F401 - `env` adalah fixture
+import test_web_build_ui
+from test_web_build_ui import mk_build, mk_done, new_analysis, query, status_of
 
 from app import webcheck
 from app.main import app
+
+env = test_web_build_ui.env                   # fixture dipakai bersama (bukan diimpor langsung: pyflakes menandai impor fixture sebagai redefinisi)
 
 
 @pytest.fixture

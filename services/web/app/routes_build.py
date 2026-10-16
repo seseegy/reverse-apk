@@ -12,7 +12,6 @@ Unduhan: salin-lalu-hash-lalu-bandingkan (`builds.open_download`), lalu salinan 
 from __future__ import annotations
 
 import json
-import re
 import threading
 from contextlib import closing
 from functools import partial
