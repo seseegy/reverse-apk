@@ -180,13 +180,15 @@ aid, bid, name, mark, old, asal, dsha, strict = sys.argv[1:9]
 ALLOW = {("M", "res/values/strings.xml"), ("A", "assets/reverse-apk-modified.txt"), ("M", "apktool.yml"), ("M", "original/AndroidManifest.xml")}
 ALLOW_DIRS = {"assets"}     # direktori baru yang hanya menampung berkas allowlist
 # apktool menyalin tanda tangan lama APK asal ke original/META-INF/ (diukur nyata di e2e T-3: MANIFEST.MF, *.RSA, *.SF); namanya bergantung kunci APK asal, jadi awalan.
+# Sampel bertanda tangan v1 (JDK ada saat build.py): pohon dasar memuat tanda tangan lama, artefak yang baru; selisihnya R/M/A di bawah awalan ini (e2e fase 3).
 META_PREFIX = "original/META-INF"
 
 
 def di_luar(op, p, kind):
     if (op, p) in ALLOW or (op == "A" and kind == "d" and p in ALLOW_DIRS):
         return False
-    if op == "A" and (p == META_PREFIX or (p.startswith(META_PREFIX + "/") and ".." not in p.split("/"))):
+    # A (tanda tangan baru), R (tanda tangan lama diganti) dan M (MANIFEST.MF) di bawah original/META-INF: sisa tanda tangan, bukan perubahan isi.
+    if op in ("A", "M", "R") and (p == META_PREFIX or (p.startswith(META_PREFIX + "/") and ".." not in p.split("/"))):
         return False
     return True
 

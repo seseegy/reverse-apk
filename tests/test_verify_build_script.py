@@ -1002,12 +1002,22 @@ def test_step_8_allowlist_accepts_original_meta_inf_signature_files_added_by_apk
         assert not di_luar("A", p, kind), p
 
 
+def test_step_8_allowlist_accepts_signature_residue_changes_when_the_sample_was_v1_signed():
+    """Regresi e2e fase 3: sampel yang ditandatangani v1 (`sample-apk/build.py` memakai jarsigner bila JDK ada) membuat apktool menyalin tanda tangan LAMA ke
+    original/META-INF/ di pohon dasar, sedangkan artefak membawa tanda tangan baru: selisih nyata `treediff` = R (hapus) pada *.SF/*.RSA lama dan M pada
+    MANIFEST.MF. Itu sisa tanda tangan yang memang diganti, bukan perubahan isi; dahulu hanya A yang diterima sehingga langkah 8 GAGAL palsu."""
+    di_luar = _py_isi_allowlist()
+    for op, p, kind in (("R", "original/META-INF/ANDROIDD.RSA", "f"), ("R", "original/META-INF/ANDROIDD.SF", "f"), ("M", "original/META-INF/MANIFEST.MF", "f"),
+                        ("A", "original/META-INF/REVERSE-.RSA", "f"), ("R", "original/META-INF/MANIFEST.MF", "f")):
+        assert not di_luar(op, p, kind), (op, p)
+
+
 def test_step_8_allowlist_still_rejects_everything_else():
     di_luar = _py_isi_allowlist()
     for op, p, kind in (("M", "res/values/public.xml", "f"), ("A", "smali/Evil.smali", "f"), ("M", "AndroidManifest.xml", "f"),
-                        ("D", "original/META-INF/MANIFEST.MF", "f"), ("M", "original/META-INF/MANIFEST.MF", "f"),
-                        ("A", "original/META-INFX/a", "f"), ("A", "original/META-INF/../smali/x", "f"),
-                        ("A", "original/other.dex", "f")):
+                        ("R", "original/AndroidManifest.xml", "f"), ("R", "original/other.dex", "f"), ("R", "smali/Main.smali", "f"),
+                        ("A", "original/META-INFX/a", "f"), ("A", "original/META-INF/../smali/x", "f"), ("M", "original/META-INF/../smali/x", "f"),
+                        ("M", "original/META-INFX/a", "f"), ("A", "original/other.dex", "f")):
         assert di_luar(op, p, kind), (op, p)
     assert not di_luar("M", "res/values/strings.xml", "f") and not di_luar("A", "assets", "d")
 
