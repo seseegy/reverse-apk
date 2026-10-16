@@ -189,3 +189,105 @@ def test_a_dumped_result_roundtrips_through_the_worker_reader_limits(tmp_path):
     path.write_text(json.dumps(out))
     raw = read_small(path, 64 * 1024)
     assert raw is not None and B.parse_build_result(json.loads(raw))["ok"] is True
+
+
+# ======================================================================================== Tahap 3 (sub-area B): source_kind, splits, kode galat paket
+NEW_CODES = ("bundle_changed", "bundle_invalid", "split_missing", "split_invalid", "bundle_too_large", "memfd_unavailable")
+S1, S2 = "11" * 32, "22" * 32
+BUNDLE_OK = {**OK, "source_kind": "xapk", "plan_sha256": H, "aliases": [], "splits": [{"index": 1, "sha256": S1, "size": 10}, {"index": 2, "sha256": S2, "size": 20}],
+             "warnings": ["package_berubah", "entri_dibuang_n=2"]}
+
+
+@pytest.mark.parametrize("kind", ["apk", "xapk", "apks"])
+def test_request_source_kind_valid(kind):
+    assert B.validate_build_request(good(source_kind=kind)).source_kind == kind
+
+
+@pytest.mark.parametrize("kind", ["XAPK", "apkm", "", None, 5, True, ["xapk"], "xapk "])
+def test_request_source_kind_invalid(kind):
+    with pytest.raises(ValueError):
+        B.validate_build_request(good(source_kind=kind))
+
+
+def test_request_tanpa_source_kind_tetap_apk():
+    assert B.validate_build_request(good()).source_kind == "apk"
+    assert B.BuildRequest(5, 7, H, G, 600).source_kind == "apk"
+
+
+def test_build_build_request_membawa_source_kind_dan_menolak_nilai_buruk():
+    job = B.build_build_request(5, 7, H, G, 600, source_kind="apks")
+    assert job["source_kind"] == "apks" and B.validate_build_request(job).source_kind == "apks"
+    assert B.validate_build_request(B.build_build_request(5, 7, H, G, 600)).source_kind == "apk"
+    with pytest.raises(ValueError):
+        B.build_build_request(5, 7, H, G, 600, source_kind="zip")
+
+
+def test_error_text_kode_baru_lengkap():
+    for code in NEW_CODES:
+        assert code in B.BUILD_ERROR_CODES and B.ERROR_TEXT[code].endswith(".") and not re.search(r"/data|/tmp", B.ERROR_TEXT[code])
+        assert B.parse_build_result({"status": "failed", "error_code": code})["error_code"] == code
+
+
+def test_result_apk_tunggal_tetap_tanpa_bidang_paket():
+    r = B.parse_build_result(OK)
+    assert r["ok"] and r["source_kind"] == "apk" and r["splits"] == [] and r["aliases"] == [] and r["warnings"] == [] and r["plan_sha256"] is None
+
+
+def test_result_splits_dinormalkan():
+    r = B.parse_build_result({**BUNDLE_OK, "splits": [{**BUNDLE_OK["splits"][0], "nama": "../../etc/passwd"}, BUNDLE_OK["splits"][1]]})
+    assert r["ok"] and r["source_kind"] == "xapk" and r["plan_sha256"] == H
+    assert r["splits"] == [{"index": 1, "sha256": S1, "size": 10}, {"index": 2, "sha256": S2, "size": 20}], "nama dari kontainer tidak pernah dibawa"
+    assert r["warnings"] == ["package_berubah", "entri_dibuang_n=2"] and r["aliases"] == []
+
+
+def test_result_xapk_tanpa_split_n0_sah():
+    r = B.parse_build_result({**BUNDLE_OK, "splits": []})
+    assert r["ok"] and r["splits"] == []
+
+
+@pytest.mark.parametrize("mut", [
+    {"plan_sha256": None}, {"plan_sha256": "A" * 64}, {"plan_sha256": "a" * 63}, {"source_kind": "zip"}, {"source_kind": 5},
+    {"splits": "x"}, {"splits": None}, {"splits": [None]}, {"splits": [{"index": 2, "sha256": S1, "size": 1}]},
+    {"splits": [{"index": 1, "sha256": S1, "size": 1}, {"index": 3, "sha256": S2, "size": 1}]},
+    {"splits": [{"index": 1, "sha256": S1, "size": 1}, {"index": 1, "sha256": S2, "size": 1}]},
+    {"splits": [{"index": True, "sha256": S1, "size": 1}]}, {"splits": [{"index": 1, "sha256": "x", "size": 1}]},
+    {"splits": [{"index": 1, "sha256": S1, "size": 0}]}, {"splits": [{"index": 1, "sha256": S1, "size": "1"}]}, {"splits": [{"index": 1, "sha256": S1}]},
+    {"splits": [{"index": i, "sha256": S1, "size": 1} for i in range(1, 201)]},
+    {"aliases": "x"}, {"aliases": [True]}, {"aliases": [1, 1]}, {"aliases": [-1]}, {"aliases": list(range(9))},
+    {"warnings": "x"}, {"warnings": [5]}, {"warnings": ["Ada Spasi"]}, {"warnings": ["x" * 80]}, {"warnings": ["a"] * 40},
+])
+def test_result_splits_tak_koheren_bad_result(mut):
+    r = B.parse_build_result({**BUNDLE_OK, **mut})
+    assert r["ok"] is False and r["error_code"] == "bad_result" and r["splits"] == []
+
+
+@pytest.mark.parametrize("extra", [{"splits": [{"index": 1, "sha256": S1, "size": 1}]}, {"plan_sha256": H}, {"aliases": [0]}])
+def test_result_apk_dengan_bidang_paket_bad_result(extra):
+    assert B.parse_build_result({**OK, **extra})["error_code"] == "bad_result"
+
+
+def test_result_gagal_tidak_membawa_bidang_paket():
+    r = B.parse_build_result({"status": "failed", "error_code": "split_missing", "splits": [{"index": 1, "sha256": S1, "size": 1}], "plan_sha256": H})
+    assert r["ok"] is False and r["error_code"] == "split_missing" and r["splits"] == [] and r["plan_sha256"] is None
+
+
+def test_dump_result_batas_32k_hanya_bila_splits_8k_untuk_apk():
+    assert B.RESULT_MAX_BYTES == 8 * 1024 and B.RESULT_MAX_BYTES_BUNDLE == 32 * 1024
+    splits = [{"index": i, "sha256": S1, "size": 2 ** 31} for i in range(1, 200)]
+    big = {**BUNDLE_OK, "splits": splits, "apktool_log_tail": "é" * 5000, "error_text": "e" * 500}
+    out = B.dump_result(big)
+    n = len(json.dumps(out, ensure_ascii=False).encode())
+    assert 8 * 1024 < n <= 32 * 1024 and len(out["splits"]) == 199, "split tidak pernah dipotong diam-diam"
+    apk = B.dump_result({**OK, "apktool_log_tail": "é" * 20000, "error_text": "e" * 5000})
+    assert len(json.dumps(apk, ensure_ascii=False).encode()) <= 8 * 1024
+
+
+def test_dump_result_paket_roundtrip_pembaca_worker(tmp_path):
+    from rvcore.signkeys import read_small
+    out = B.dump_result({**BUNDLE_OK, "splits": [{"index": i, "sha256": S1, "size": 2 ** 31} for i in range(1, 200)]})
+    path = tmp_path / "r.json"
+    path.write_text(json.dumps(out))
+    raw = read_small(path, 64 * 1024)
+    assert raw is not None
+    r = B.parse_build_result(json.loads(raw))
+    assert r["ok"] and len(r["splits"]) == 199

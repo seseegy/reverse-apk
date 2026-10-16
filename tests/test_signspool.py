@@ -103,10 +103,10 @@ def test_build_sign_request_shape():
 
 # --------------------------------------------------------------------------------------------------- validate_request
 def test_validate_request_returns_ids_and_clamped_timeout():
-    assert S.validate_request(req(timeout=60), jid()) == (1, 1, 60, EXP)
+    assert S.validate_request(req(timeout=60), jid()) == (1, 1, 60, EXP, [])
     assert S.validate_request(req(timeout=1), jid())[2] == 10
     assert S.validate_request(req(timeout=10**9), jid())[2] == 3600
-    assert S.validate_request(req(jid(12, 34), analysis_id=12, build_id=34), jid(12, 34)) == (12, 34, 60, EXP)
+    assert S.validate_request(req(jid(12, 34), analysis_id=12, build_id=34), jid(12, 34)) == (12, 34, 60, EXP, [])
 
 
 @pytest.mark.parametrize("mut", [
@@ -199,7 +199,7 @@ def test_spool_made_failure_is_mapped_to_bad_request():
 
 def test_error_text_covers_every_code():
     assert set(S.ERROR_TEXT) == set(S.ERROR_CODES) | {"bad_result"}
-    assert len(S.ERROR_CODES) == 18
+    assert len(S.ERROR_CODES) == 19
     for code, text in S.ERROR_TEXT.items():
         assert text and len(text) <= 300 and text == text.strip(), code
         assert all(ch.isprintable() for ch in text), code
@@ -207,7 +207,7 @@ def test_error_text_covers_every_code():
 
 
 def test_constants():
-    assert (S.MAX_REQUEST_BYTES, S.MAX_RESULT_BYTES, S.MAX_HEARTBEAT_BYTES, S.HEARTBEAT_STALE_AFTER) == (4096, 64 * 1024, 16 * 1024, 20.0)
+    assert (S.MAX_REQUEST_BYTES, S.MAX_RESULT_BYTES, S.MAX_HEARTBEAT_BYTES, S.HEARTBEAT_STALE_AFTER) == (16 * 1024, 128 * 1024, 16 * 1024, 20.0)
     assert S.OPEN_FLAGS is signkeys.OPEN_FLAGS and S.read_small is signkeys.read_small
     assert issubclass(SignerUnavailable, Exception) and SignerUnavailable("x").message == "x"
 
@@ -218,7 +218,7 @@ def test_layout_has_a_separate_signspool_root(tmp_path):
 
 # -------------------------------------------------------------------------------------------------- SignSpool basics
 def test_spool_is_isolated_from_the_runner_protocol(sp, tmp_path):
-    assert sp.heartbeat_file == tmp_path / "signspool" / "signer.hb" and sp.max_request == 4096 and sp.id_re is S.JOB_ID_RE
+    assert sp.heartbeat_file == tmp_path / "signspool" / "signer.hb" and sp.max_request == 16 * 1024 and sp.id_re is S.JOB_ID_RE
     with pytest.raises(ValueError):
         sp.submit({"job_id": "a1-apktool-deadbeef"})
     assert S.make_spool(tmp_path / "x").root == tmp_path / "x"
@@ -259,7 +259,7 @@ def test_mismatched_content_and_garbage_are_answered_bad_request(sp):
         jid(tail="00000004"): b"\xff\xfe\x00bad",
         jid(tail="00000005"): b"[" * 4000,
         jid(tail="00000006"): b"",
-        jid(tail="00000007"): json.dumps(req(jid(tail="00000007"), pad="x" * 5000)).encode(),
+        jid(tail="00000007"): json.dumps(req(jid(tail="00000007"), pad="x" * (S.MAX_REQUEST_BYTES + 1000))).encode(),
     }
     for j, data in cases.items():
         (sp.requests / f"{j}.json").write_bytes(data)

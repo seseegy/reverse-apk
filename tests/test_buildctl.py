@@ -432,8 +432,8 @@ def test_analyze_name_is_always_cleaned(ctl, env):
     assert "/" not in name and "\u202e" not in name and name.endswith(".apk") and name.startswith("x")
 
 
-def test_analyze_bundle_records_options_and_request_refuses_it(ctl, env):
-    """A-08 (M96): `options.bundle` terisi, jadi `request` menolak `paket_belum_didukung`."""
+def test_analyze_bundle_records_options_and_request_accepts_it_with_source_kind(ctl, env):
+    """Tahap 3: `options.bundle` XAPK/APKS tidak lagi ditolak `request`; build mencatat `source_kind` sesuai format (format tak dikenal tetap ditolak)."""
     from app import context
     r = ctl("analyze", "-", "--no-wait", "--name", "paket.xapk", stdin=xapk("ctl-analyze-xapk"))
     assert r.code == 0
@@ -444,7 +444,9 @@ def test_analyze_bundle_records_options_and_request_refuses_it(ctl, env):
         assert store.finish_analysis(conn, aid, store.DONE)
     assert opts["deobf"] is False and opts["bundle"]["format"] == "xapk"
     req = ctl("request", str(aid))
-    assert req.code == 3 and req["kode"] == "paket_belum_didukung"
+    assert req.code == 0, (req.code, req)
+    with closing(context.db()) as conn:
+        assert store.get_build(conn, int(req["build_id"]))["source_kind"] == "xapk"
 
 
 def test_analyze_waits_for_done_and_prints_elapsed(ctl, env):

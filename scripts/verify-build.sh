@@ -4,7 +4,13 @@
 # Pemakaian: scripts/verify-build.sh   (lewat `make verify-build`; butuh Docker Compose v2, keystore sudah dibuat, stack sudah `make up`, testdata/vulnsample.apk ada)
 #   BIG_MB=<1..1100>   opsional; hanya dicatat sebagai baris INFO (uji APK besar untuk signer = `BIG_MB=1000 make signer-verify`)
 #   VB_STRICT_DIFF=0   opsional; langkah 8: selisih isi di luar allowlist hanya INFO (bawaan 1 = GAGAL; allowlist memuat original/META-INF/* hasil ukur nyata)
+#   PYTHON3=<jalur>    opsional; python3 di HOST untuk pembangkit sampel XAPK/APKS (scripts/make-test-bundles.py, stdlib saja; bawaan python3)
 # Kode keluar: 0 tidak ada GAGAL; 1 ada GAGAL (atau dihentikan / analisis uji tertinggal); 64 salah pakai.
+#
+# Tahap 3 (XAPK/APKS): setelah langkah 12 ditambah 12a..12f (tabel TETAP satu): 12a prasyarat paket (python3 host, pembangkit, `signer-selftest --check-bundle`, modul + memfd_create di
+# runner dan worker), 12b build XAPK nyata (analisis uji dari sampel buatan pembangkit), 12c verifikasi per split + sertifikat sama, 12d isi (OBB/ikon/manifest.json/skrip install-multiple),
+# 12e hal yang sama untuk APKS (alias master, toc.pb), 12f negatif set di signer (split diganti, split hilang, META-INF basi) + kontrol positif. Sampel dibuat di folder sementara host
+# (mktemp -d, dihapus saat selesai) dan TIDAK memuat material kunci; tanda tangan dibuat signer dengan keystore pemilik. Langkah lama (1-13) tidak diubah selain ringkasan.
 #
 # Prinsip: bash di host TIDAK PERNAH mem-parse JSON. Semua keputusan bergantung isi dibuat DI DALAM kontainer (app.buildctl, signer-selftest --check-apk, tamu
 # python di runner) dan dilaporkan sebagai kode keluar 0/3/64 plus baris `kunci=nilai`; skrip ini hanya membaca baris itu dengan sed. Host tidak menulis/menghapus
@@ -21,12 +27,14 @@ COMPOSE="${COMPOSE:-docker compose}"
 DOCKER_CMD="${DOCKER_CMD:-docker}"
 BIG_MB="${BIG_MB:-}"
 VB_STRICT_DIFF="${VB_STRICT_DIFF:-1}"
+PYTHON3="${PYTHON3:-python3}"
+SENT_AID=2147483000                                                               # id sentinel signcheck (sama dengan signer-verify): tidak mungkin menyentuh analisis nyata
 TIMEOUT_BUILD="${TIMEOUT_BUILD:-1800}"
 TIMEOUT_SIGN="${TIMEOUT_SIGN:-900}"
 APK=testdata/vulnsample.apk
 
 case "${1-}" in
-  -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   "") ;;
   *) echo "✗ pemakaian: scripts/verify-build.sh   (tanpa argumen; opsional BIG_MB=<MiB>, VB_STRICT_DIFF=0)" >&2; exit 64 ;;
 esac
@@ -58,7 +66,13 @@ N10="10 negatif pembatalan"
 N11="11 retensi"
 N12="12 kebersihan"
 N13="13 ringkasan"
-ORDER=(N1 N2 N3 N4 N5 N6 N7 N7B N8 N9 N10 N11 N12)
+N12A="12a prasyarat paket"
+N12B="12b XAPK build"
+N12C="12c XAPK verifikasi"
+N12D="12d XAPK isi"
+N12E="12e APKS build+verifikasi"
+N12F="12f negatif set"
+ORDER=(N1 N2 N3 N4 N5 N6 N7 N7B N8 N9 N10 N11 N12 N12A N12B N12C N12D N12E N12F)
 
 # ------------------------------------------------------------------------------------------------ tabel
 ROWS_ST=(); ROWS_STEP=(); ROWS_NOTE=()
@@ -115,6 +129,15 @@ cx() { OUT="$(exec 9>&-; $COMPOSE exec -T "$@" </dev/null 2>&1 | tr -d '\r')"; R
 # cr [-e K=V] LAYANAN perintah...: kontainer sekali pakai (pola Makefile `run --rm --no-deps`); SATU-SATUNYA jalan ke runner
 # shellcheck disable=SC2086
 cr() { OUT="$(exec 9>&-; $COMPOSE run --rm --no-deps -T "$@" </dev/null 2>&1 | tr -d '\r')"; RC=$?; }
+# Tahap 3: varian dengan stdin dari BERKAS sampel (analisis paket lewat stdin; `put`/`put-split` signcheck). Sama dengan bc/cr: 9>&- agar kunci tidak ikut tertahan.
+# shellcheck disable=SC2086
+bc_file() { local f="$1"; shift; OUT="$(exec 9>&-; $COMPOSE exec -T web python -m app.buildctl "$@" <"$f" 2>&1 | tr -d '\r')"; RC=$?; }
+# shellcheck disable=SC2086
+cr_in() { local f="$1"; shift; OUT="$(exec 9>&-; $COMPOSE run --rm --no-deps -T "$@" <"$f" 2>&1 | tr -d '\r')"; RC=$?; }
+SC_DIRTY=0
+sc() { SC_DIRTY=1; cr worker python signcheck.py "$@"; }                          # signcheck (kontainer worker sekali pakai); id sentinel saja
+sc_in() { local f="$1"; shift; SC_DIRTY=1; cr_in "$f" worker python signcheck.py "$@"; }
+gen() { OUT="$("$PYTHON3" scripts/make-test-bundles.py "$@" 2>&1 </dev/null | tr -d '\r')"; RC=$?; }     # pembangkit sampel di HOST (stdlib; tanpa kunci)
 err_text() {
   local k a
   k="$(lv kode)"; a="$(lv alasan)"
@@ -157,13 +180,15 @@ aid, bid, name, mark, old, asal, dsha, strict = sys.argv[1:9]
 ALLOW = {("M", "res/values/strings.xml"), ("A", "assets/reverse-apk-modified.txt"), ("M", "apktool.yml"), ("M", "original/AndroidManifest.xml")}
 ALLOW_DIRS = {"assets"}     # direktori baru yang hanya menampung berkas allowlist
 # apktool menyalin tanda tangan lama APK asal ke original/META-INF/ (diukur nyata di e2e T-3: MANIFEST.MF, *.RSA, *.SF); namanya bergantung kunci APK asal, jadi awalan.
+# Sampel bertanda tangan v1 (JDK ada saat build.py): pohon dasar memuat tanda tangan lama, artefak yang baru; selisihnya R/M/A di bawah awalan ini (e2e fase 3).
 META_PREFIX = "original/META-INF"
 
 
 def di_luar(op, p, kind):
     if (op, p) in ALLOW or (op == "A" and kind == "d" and p in ALLOW_DIRS):
         return False
-    if op == "A" and (p == META_PREFIX or (p.startswith(META_PREFIX + "/") and ".." not in p.split("/"))):
+    # A (tanda tangan baru), R (tanda tangan lama diganti) dan M (MANIFEST.MF) di bawah original/META-INF: sisa tanda tangan, bukan perubahan isi.
+    if op in ("A", "M", "R") and (p == META_PREFIX or (p.startswith(META_PREFIX + "/") and ".." not in p.split("/"))):
         return False
     return True
 
@@ -226,6 +251,152 @@ try:
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 PYEOF
+read -r -d '' PY_PAKET <<'PYEOF'
+# vb-paket: periksa isi PAKET XAPK/APKS hasil build di builds/<aid>/<bid> (dibuka lewat rantai-dirfd + O_NOFOLLOW; VB_DATA hanya untuk tes, bawaan /data):
+# pemeriksaan dari sampel (same|manifest|alias|extras) dan `sh -n` pada skrip install-multiple. Argumen: aid bid nama skrip format pemeriksaan...
+import hashlib, io, json, os, re, stat, subprocess, sys, zipfile
+from rvcore.fsutil import open_dir_chain
+aid, bid, name, script, fmt = sys.argv[1:6]
+checks = sys.argv[6:]
+DATA = os.environ.get("VB_DATA", "/data")
+MAXB = 256 * 1024 * 1024
+NAME = r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}"
+CHECK = r"(?:(?:same|manifest):[^:\n]+:[0-9a-f]{64}|alias:[^:\n]+:[^:\n]+|extras:[^:\n]*)"
+
+
+def kv(key, value):
+    print("%s=%s" % (key, str(value).replace("\n", " ")[:300]))
+
+
+if not (aid.isascii() and aid.isdigit() and bid.isascii() and bid.isdigit() and re.fullmatch(NAME, name) and re.fullmatch(NAME, script)
+        and fmt in ("xapk", "apks") and name.endswith("." + fmt) and all(re.fullmatch(CHECK, c) for c in checks)):
+    kv("paket", "masukan_salah")
+    sys.exit(3)
+problems = []
+
+
+def finish(names=()):
+    kv("format", fmt)
+    if problems:
+        kv("paket", "gagal")
+        for n, text in enumerate(problems[:10], 1):
+            kv("masalah.%d" % n, text)
+        sys.exit(3)
+    kv("paket", "ok")
+    kv("periksa_n", len(checks))
+    kv("entri_n", len(names))
+    kv("skrip_sh_n", 1)
+    sys.exit(0)
+
+
+def read_member(zf, member, cap=MAXB):
+    h, total = hashlib.sha256(), 0
+    chunks = []
+    with zf.open(zf.getinfo(member)) as fh:
+        while True:
+            block = fh.read(1 << 20)
+            if not block:
+                break
+            total += len(block)
+            if total > cap:
+                raise ValueError("terlalu besar")
+            h.update(block)
+            chunks.append(block)
+    return h.hexdigest(), b"".join(chunks) if cap < MAXB else b""
+
+
+try:
+    dfd = open_dir_chain(os.path.join(DATA, "builds"), str(int(aid)), str(int(bid)))
+except OSError as exc:
+    problems.append("folder build tidak terbuka: %s" % (exc.strerror or exc))
+    finish()
+try:
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dfd)
+    except OSError as exc:
+        problems.append("paket %s tidak terbuka (tidak ada, symlink, atau bukan berkas biasa): %s" % (name, exc.strerror or exc))
+        finish()
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            problems.append("paket %s bukan berkas biasa" % name)
+            finish()
+        names = []
+        try:
+            with os.fdopen(os.dup(fd), "rb") as fh, zipfile.ZipFile(fh) as zf:
+                names = [i.filename for i in zf.infolist() if not i.is_dir()]
+                for c in checks:
+                    kind, _, rest = c.partition(":")
+                    try:
+                        if kind == "same":
+                            member, _, want = rest.rpartition(":")
+                            if read_member(zf, member)[0] != want:
+                                problems.append("same %s: isi berbeda dari sampel (OBB/ikon/penanda harus utuh)" % member)
+                        elif kind == "manifest":
+                            member, _, want = rest.rpartition(":")
+                            data = json.loads(read_member(zf, member, 1 << 20)[1].decode("utf-8-sig"))
+                            data.pop("total_size", None)
+                            if hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest() != want:
+                                problems.append("manifest %s: berbeda dari sampel di luar total_size" % member)
+                        elif kind == "alias":
+                            a, _, b = rest.partition(":")
+                            if read_member(zf, a)[0] != read_member(zf, b)[0]:
+                                problems.append("alias %s tidak berbyte sama dengan %s (alias master harus salinan base bertanda tangan)" % (a, b))
+                        else:
+                            want = set(x for x in rest.split(",") if x)
+                            have = set(n for n in names if not n.lower().endswith(".apk"))
+                            uniq = set(n for n in have - want if re.fullmatch(r"assets/uniq-[0-9a-f]{32}\.txt", n))
+                            if want - have:
+                                problems.append("extras hilang: %s" % ", ".join(sorted(want - have)[:5]))
+                            if have - want - uniq:
+                                problems.append("extras tak terduga: %s" % ", ".join(sorted(have - want - uniq)[:5]))
+                            if len(uniq) != 1:
+                                problems.append("extras: entri assets/uniq-* harus tepat satu (ada %d)" % len(uniq))
+                    except (KeyError, ValueError, UnicodeDecodeError, zipfile.BadZipFile, OSError) as exc:
+                        problems.append("%s %s: %s" % (kind, rest[:80], type(exc).__name__))
+        except (zipfile.BadZipFile, OSError) as exc:
+            problems.append("paket %s bukan ZIP yang sah: %s" % (name, type(exc).__name__))
+    finally:
+        os.close(fd)
+    try:
+        sfd = os.open(script, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dfd)
+    except OSError as exc:
+        problems.append("skrip %s tidak terbuka: %s" % (script, exc.strerror or exc))
+        finish(names)
+    try:
+        if not stat.S_ISREG(os.fstat(sfd).st_mode) or os.fstat(sfd).st_size > 1 << 20:
+            problems.append("skrip %s bukan berkas biasa atau terlalu besar" % script)
+            finish(names)
+        text = b""
+        while True:
+            block = os.read(sfd, 65536)
+            if not block:
+                break
+            text += block
+    finally:
+        os.close(sfd)
+    run = subprocess.run(["sh", "-n"], input=text, capture_output=True, timeout=30)
+    if run.returncode != 0:
+        problems.append("skrip %s: sh -n gagal: %s" % (script, (run.stderr.decode("utf-8", "replace").strip().splitlines() or ["?"])[-1][:120]))
+finally:
+    os.close(dfd)
+finish(names)
+PYEOF
+read -r -d '' PY_PROBE <<'PYEOF'
+# vb-probe: modul Tahap 3 ada (argumen) dan memfd_create tersedia di kontainer ini (tanpa cadangan diam-diam; kode galat produk: memfd_unavailable)
+import importlib, os, sys
+for mod in sys.argv[1:]:
+    try:
+        importlib.import_module(mod)
+    except ImportError as exc:
+        print("modul_tak_ada=%s" % exc)
+        sys.exit(2)
+try:
+    os.close(os.memfd_create("vb-probe"))
+except (AttributeError, OSError) as exc:
+    print("memfd_create=%s" % exc)
+    sys.exit(3)
+print("memfd=ok")
+PYEOF
 read -r -d '' SH_MOUNT <<'SHEOF'
 for p in /data/signwork /data/signspool /data/benchspool /data/files /data/db; do test ! -e "$p" || { echo "ada=$p"; exit 1; }; done
 if ( : > /data/bench/.vb-bench_tulis ) 2>/dev/null; then rm -f /data/bench/.vb-bench_tulis; echo "bench_tulis=1 (seharusnya ro)"; exit 1; fi
@@ -239,6 +410,7 @@ SH_ABSENT='for p in "$@"; do test ! -e "$p" || exit 1; done'
 
 # ------------------------------------------------------------------------------------------------ penutup (juga lewat trap)
 AID=""; APK_SHA=""; CLEAN_NOTE=""; LEFT=""; INTERRUPTED=0; NO_TABLE=0
+BT=""                                                                            # folder sementara HOST untuk sampel XAPK/APKS (langkah 12a; dihapus di on_exit)
 settle() { # settle: batalkan tiap build AKTIF milik analisis uji, tunggu sampai final; build yang tak final masuk $LEFT
   LEFT=""
   [ -n "$AID" ] || return 0
@@ -276,9 +448,11 @@ on_exit() {
   trap - EXIT INT TERM
   if [ "$NO_TABLE" = 1 ]; then exit 1; fi
   cleanup_aid
+  [ "$SC_DIRTY" = 1 ] && sc clean "$SENT_AID" >/dev/null 2>&1                    # slot sentinel signcheck tidak boleh tertinggal (langkah 12f dihentikan)
+  [ -n "$BT" ] && rm -rf -- "$BT"                                                # sampel sementara di host (bukan di volume)
   [ "$INTERRUPTED" = 1 ] && row GAGAL "dihentikan" "skrip dihentikan sebelum selesai; build uji dibatalkan dan analisis uji dibersihkan"
   [ -n "$CLEAN_NOTE" ] && row GAGAL "pembersihan" "$CLEAN_NOTE"
-  row INFO "$N13" "total $SECONDS dtk. BELUM DIUJI oleh skrip ini: RQ/antrean di bawah beban, APK besar (BIG_MB), disk penuh, runner terkompromi; ringkasan gejala per langkah: docs/deploy.md"
+  row INFO "$N13" "total $SECONDS dtk. BELUM DIUJI oleh skrip ini: RQ/antrean di bawah beban, APK besar (BIG_MB), disk penuh, runner terkompromi, paket besar (ratusan split, ASSEMBLE_TIMEOUT), XAPK/APKS nyata dari toko, adb install-multiple di perangkat Android 12+ (skrip hanya diperiksa sh -n), aplikasi dengan anti-tamper/packer/Play Integrity/hash .so (tidak bisa dijanjikan 100%); ringkasan gejala per langkah: docs/deploy.md"
   print_table
   exit $?
 }
@@ -695,9 +869,303 @@ step12() {
   return 0
 }
 
+# ------------------------------------------------------------------------------------------------ Tahap 3: langkah 12a-12f (XAPK/APKS)
+# Sampel dibuat di folder sementara host ($BT, dihapus saat keluar) oleh scripts/make-test-bundles.py (tanpa kunci). Host tidak menulis apa pun di volume.
+F_SPLIT1=""; F_SPLIT2=""; F_STALE=""
+XAPK_NAMES=""; XAPK_N=""; XAPK_EXTRAS=""; XAPK_CHECKS=""
+APKS_NAMES=""; APKS_N=""; APKS_EXTRAS=""; APKS_CHECKS=""
+X_BID=""; X_NAME=""; X_CERT=""; X_SCRIPT=""
+BB_BID=""; BB_NAME=""; BB_CERT=""; BB_SCRIPT=""; BB_WHY=""; BV_WHY=""; BC_WHY=""; BD_WHY=""
+owner_fp() { # isi OWNER bila belum (langkah 7 bisa saja dilewati): sidik jari keystore pemilik; RC 0 bila ada
+  [ -n "$OWNER" ] && return 0
+  local info_out irc
+  info_out="$(./scripts/keystore.sh info 2>&1)"; irc=$?
+  OWNER="$(printf '%s\n' "$info_out" | sed -n 's/^ *SHA-256 (heks kecil): *//p' | sed -n 1p | tr -d ' \r')"
+  if [ "$irc" -ne 0 ] || ! is_hex64 "$OWNER"; then OWNER=""; return 1; fi
+  return 0
+}
+apk_names_of() { printf '%s\n' "$OUT" | sed -n 's/^apk\.[0-9]*=//p' | LC_ALL=C sort | tr '\n' ' '; }
+checks_of() { printf '%s\n' "$OUT" | sed -n 's/^periksa\.[0-9]*=//p'; }
+probe_image() { # probe_image LAYANAN PYTHON modul...: modul Tahap 3 ada + memfd_create bisa dipakai di kontainer sekali pakai itu; mengisi $PROBE_WHY bila gagal
+  local svc="$1" py="$2"; shift 2
+  PROBE_WHY=""
+  cr "$svc" "$py" -c "$PY_PROBE" "$@"
+  case "$RC" in
+    0) ;;
+    2) PROBE_WHY="image $svc lama (modul Tahap 3 tidak ada: $(printf '%s' "$OUT" | tail -n 1)) -> make up lalu ulangi" ;;
+    *) PROBE_WHY="memfd_create tidak tersedia di $svc (build paket akan gagal dengan kode memfd_unavailable): $(printf '%s' "$OUT" | tail -n 2 | tr '\n' ' ') — periksa seccomp/kernel kontainer" ;;
+  esac
+}
+step12a() {
+  local -a bad=()
+  local why
+  PROBE_WHY=""
+  if ! command -v "$PYTHON3" >/dev/null 2>&1; then
+    bad+=("python3 tidak ada di host ($PYTHON3): pasang python3 (hanya stdlib dipakai) atau set PYTHON3=/jalur/python3")
+  elif [ ! -f scripts/make-test-bundles.py ]; then
+    bad+=("scripts/make-test-bundles.py HILANG (pulihkan: git checkout -- scripts/make-test-bundles.py)")
+  fi
+  cx signer grep -q -e --check-bundle /usr/local/bin/signer-selftest; [ "$RC" -eq 0 ] || bad+=("image signer lama (signer-selftest tanpa --check-bundle) -> make up lalu ulangi")
+  probe_image runner python3 rvcore.splitzip rvcore.bundle; [ -z "$PROBE_WHY" ] || bad+=("$PROBE_WHY")
+  probe_image worker python rvcore.bundleout rvcore.installscript; [ -z "$PROBE_WHY" ] || bad+=("$PROBE_WHY")
+  if [ "${#bad[@]}" -eq 0 ]; then
+    BT="$(mktemp -d "${TMPDIR:-/tmp}/verify-build.XXXXXX")" || { bad+=("tidak bisa membuat folder sementara di ${TMPDIR:-/tmp}"); BT=""; }
+  fi
+  if [ "${#bad[@]}" -eq 0 ]; then
+    gen xapk --base "$APK" -o "$BT/sampel.xapk"
+    if [ "$RC" -ne 0 ] || [ "$(lv format)" != xapk ]; then bad+=("pembangkit XAPK gagal: $(printf '%s' "$OUT" | tail -n 3 | tr '\n' ' ')"); else
+      XAPK_NAMES="$(apk_names_of)"; XAPK_N="$(lv entri_apk)"; XAPK_EXTRAS="$(lv extras_n)"; XAPK_CHECKS="$(checks_of)"
+    fi
+    gen apks --base "$APK" -o "$BT/sampel.apks"
+    if [ "$RC" -ne 0 ] || [ "$(lv format)" != apks ]; then bad+=("pembangkit APKS gagal: $(printf '%s' "$OUT" | tail -n 3 | tr '\n' ' ')"); else
+      APKS_NAMES="$(apk_names_of)"; APKS_N="$(lv entri_apk)"; APKS_EXTRAS="$(lv extras_n)"; APKS_CHECKS="$(checks_of)"
+    fi
+    gen splits --base "$APK" -o "$BT/parts"
+    F_SPLIT1="$(lv split-1.sha256)"; F_SPLIT2="$(lv split-2.sha256)"; F_STALE="$(lv split-stale.sha256)"
+    if [ "$RC" -ne 0 ] || ! is_hex64 "$F_SPLIT1" || ! is_hex64 "$F_SPLIT2" || ! is_hex64 "$F_STALE"; then bad+=("pembangkit split lepas gagal: $(printf '%s' "$OUT" | tail -n 3 | tr '\n' ' ')"); fi
+    if ! { is_num "$XAPK_N" && is_num "$APKS_N" && is_num "$XAPK_EXTRAS" && is_num "$APKS_EXTRAS"; } && [ "${#bad[@]}" -eq 0 ]; then bad+=("keluaran pembangkit tidak lengkap (entri_apk/extras_n)"); fi
+  fi
+  if [ "${#bad[@]}" -gt 0 ]; then
+    why="$(printf '%s; ' "${bad[@]}")"
+    row GAGAL "$N12A" "${why%; }"
+    return 1
+  fi
+  row OK "$N12A" "python3 host ada; signer-selftest punya --check-bundle; runner dan worker memuat modul Tahap 3 dan memfd_create jalan; sampel dibuat tanpa kunci di folder sementara (XAPK $XAPK_N APK, APKS $APKS_N APK, split lepas untuk negatif)"
+  return 0
+}
+bundle_build() { # bundle_build FORMAT BERKAS: analisis paket uji -> init -> ubah string -> request/approve/wait/status; isi BB_*; RC 0 hanya bila done dan terverifikasi
+  local kind="$1" file="$2" dup aid status old mk b why="" pet sg
+  BB_BID=""; BB_NAME=""; BB_CERT=""; BB_SCRIPT=""; BB_WHY=""
+  echo "• langkah 12 ($kind): analisis paket uji lewat stdin (bisa beberapa menit)…" >&2
+  bc_file "$file" analyze - --uniq --name "vb-sampel.$kind"
+  dup="$(lv duplicate)"; aid="$(lv analysis_id)"; status="$(lv status)"
+  if [ "$dup" = 1 ]; then BB_WHY="duplicate=1: paket sampel sudah ada sebagai analisis lain; menolak melanjutkan (analisis milik pemilik TIDAK disentuh)"; return 1; fi
+  if [ "$dup" = 0 ] && is_num "$aid"; then AID="$aid"; fi
+  if [ "$RC" -ne 0 ] || [ "$status" != done ] || [ -z "$AID" ]; then BB_WHY="analisis $kind gagal (status=${status:--}): $(err_text)"; return 1; fi
+  bc init "$AID"
+  if [ "$RC" -ne 0 ] || [ "$(lv created)" != 1 ]; then BB_WHY="init $kind harus created=1: $(err_text) created=$(lv created)"; return 1; fi
+  # shellcheck disable=SC2016
+  shell_cmd 'grep -o "<string name=.app_name.>[^<]*" "$WS/project/res/values/strings.xml"'
+  old="$(printf '%s\n' "$OUT" | sed -n 's/^o| <string name="app_name">//p' | sed -n 1p)"
+  if ! shell_ok || [ -z "$old" ]; then BB_WHY="tidak bisa membaca app_name basis $kind lewat shell: $(err_text)"; return 1; fi
+  mk="VB$(rand_hex)"
+  sed_marker "$mk"
+  if ! shell_ok; then BB_WHY="sed lewat shell ($kind) gagal: $(err_text) exit_code=$(lv exit_code)"; return 1; fi
+  echo "• langkah 12 ($kind): build + tanda tangan nyata semua split (menunggu paling lama ${WAIT_MAX} dtk)…" >&2
+  build_once
+  case $? in
+    2) BB_WHY="request $kind gagal: $(err_text)"; return 1 ;;
+    3) BB_WHY="approve $kind gagal atau tidak masuk antrean: $(err_text) enqueued=$(lv enqueued)"; return 1 ;;
+  esac
+  b="$B_ID"
+  bc wait "$b" --timeout "$WAIT_MAX"
+  if [ "$RC" -ne 0 ]; then
+    why="build $kind tidak selesai (status=$(lv status) error_code=$(lv error_code)): $(lv error_text)"
+    bc status "$b"
+    pet="$(lv petunjuk)"; sg="$(lv split_gagal)"
+    [ -n "$pet" ] && why="$why; petunjuk: $pet"
+    [ -n "$sg" ] && why="$why; split_gagal=$sg"
+    BB_WHY="$why"
+    return 1
+  fi
+  bc status "$b"
+  BB_BID="$b"; BB_NAME="$(lv output_name)"; BB_CERT="$(lv cert_sha256)"; BB_SCRIPT="$(lv install_script)"
+  [ "$RC" -eq 0 ] && [ "$(lv status)" = done ] || why="status bukan done"
+  [ "$(lv verify_ok)" = 1 ] || why="$why; verify_ok=$(lv verify_ok) (harus 1: semua berkas terverifikasi)"
+  [ "$(lv source_kind)" = "$kind" ] || why="$why; source_kind=$(lv source_kind) (harus $kind)"
+  [ "$(lv output_format)" = "$kind" ] || why="$why; output_format=$(lv output_format) (format asli harus terjaga: $kind)"
+  is_hex64 "$BB_CERT" || why="$why; cert_sha256 kosong/bukan hex64"
+  [[ "$BB_NAME" =~ ^[A-Za-z0-9._-]+-modified-${b}\.${kind}$ ]] || why="$why; output_name '$BB_NAME' tidak cocok pola *-modified-$b.$kind"
+  [[ "$BB_SCRIPT" =~ ^[A-Za-z0-9._-]+-modified-${b}-install\.sh$ ]] || why="$why; install_script '$BB_SCRIPT' tidak cocok pola *-modified-$b-install.sh (skrip adb install-multiple tidak terbit)"
+  if [ -n "$why" ]; then BB_WHY="${why#; }"; return 1; fi
+  return 0
+}
+bundle_verify() { # bundle_verify FORMAT NAMAS JUMLAH EKSTRAS: signer-selftest --check-bundle atas paket; keputusan di sini; isi BV_WHY
+  local kind="$1" names="$2" want_n="$3" want_ex="$4" n i got fails="" nm sg v2 v3 ce za sisa gotn
+  BV_WHY=""
+  if ! owner_fp; then BV_WHY="keystore.sh info tidak memberi sidik jari pemilik"; return 1; fi
+  cx signer signer-selftest --check-bundle "$AID" "$X_BID" "$X_NAME"
+  n="$(lv entri_apk)"
+  [ "$RC" -eq 0 ] || fails="signer-selftest --check-bundle kode keluar $RC ($(lv kode) $(lv alasan))"
+  [ "$(lv format)" = "$kind" ] || fails="$fails; format=$(lv format) (harus $kind)"
+  [ "$n" = "$want_n" ] || fails="$fails; entri_apk=${n:--} != sampel $want_n (split hilang/bertambah)"
+  got=""
+  if is_num "$n" && [ "$n" -le 250 ]; then
+    for ((i = 1; i <= n; i++)); do
+      nm="$(lv "entri.$i.nama")"; sg="$(lv "entri.$i.signers")"; v2="$(lv "entri.$i.v2")"; v3="$(lv "entri.$i.v3")"
+      ce="$(lv "entri.$i.cert")"; za="$(lv "entri.$i.zipalign")"; sisa="$(lv "entri.$i.sisa_ttd")"
+      got="$got$nm"$'\n'
+      [ "$sg" = 1 ] || fails="$fails; $nm signers=${sg:--} (harus 1)"
+      [ "$v2" = 1 ] || fails="$fails; $nm v2=${v2:--} (harus 1)"
+      [ "$v3" = 1 ] || fails="$fails; $nm v3=${v3:--} (harus 1)"
+      [ "$za" = ok ] || fails="$fails; $nm zipalign=${za:--} (harus ok)"
+      [ "$sisa" = 0 ] || fails="$fails; $nm sisa_ttd=${sisa:--} (harus 0: tanda tangan lama tersisa)"
+      [ "$ce" = "$X_CERT" ] || fails="$fails; $nm cert $(short "$ce")… != sertifikat build di DB $(short "$X_CERT")…"
+      [ "$ce" = "$OWNER" ] || fails="$fails; $nm cert $(short "$ce")… != keystore pemilik $(short "$OWNER")…"
+    done
+  fi
+  gotn="$(printf '%s' "$got" | LC_ALL=C sort | tr '\n' ' ')"
+  [ "$gotn" = "$names" ] || fails="$fails; nama entri APK beda dari sampel (ada: ${gotn:--}; seharusnya: $names)"
+  [ "$(lv cert_berbeda)" = 1 ] || fails="$fails; cert_berbeda=$(lv cert_berbeda) (semua berkas harus SATU sertifikat)"
+  [ "$(lv extras_n)" = "$((want_ex + 1))" ] || fails="$fails; extras_n=$(lv extras_n) != $((want_ex + 1)) (sampel $want_ex + satu assets/uniq-*)"
+  if [ -n "$fails" ]; then BV_WHY="${fails#; }"; return 1; fi
+  return 0
+}
+bundle_content() { # bundle_content FORMAT PEMERIKSAAN(baris): tamu runner (isi paket + sh -n) lalu buildctl artifact-info; isi BC_WHY
+  local kind="$1" checks_txt="$2" fails="" ln lines="" splits_n bad_split
+  local -a checks=()
+  BC_WHY=""
+  while IFS= read -r ln; do [ -n "$ln" ] && checks+=("$ln"); done <<<"$checks_txt"
+  cr runner python3 -c "$PY_PAKET" "$AID" "$X_BID" "$X_NAME" "$X_SCRIPT" "$kind" ${checks[@]+"${checks[@]}"}
+  if [ "$RC" -ne 0 ] || [ "$(lv paket)" != ok ]; then
+    lines="$(printf '%s\n' "$OUT" | sed -n 's/^masalah\.[0-9]*=//p' | head -n 6 | tr '\n' ';')"
+    fails="isi paket: paket=$(lv paket) ${lines:+masalah: $lines}$(printf '%s' "$OUT" | grep -v '^[a-z_.0-9]*=' | tail -n 2 | tr '\n' ' ')"
+  fi
+  bc artifact-info "$X_BID"
+  [ "$RC" -eq 0 ] || fails="$fails; artifact-info: $(err_text)"
+  [ "$(lv cocok)" = 1 ] || fails="$fails; artifact-info cocok=$(lv cocok)"
+  [ "$(lv format)" = "$kind" ] || fails="$fails; artifact-info format=$(lv format) (harus $kind)"
+  [ "$(lv skrip)" = "$X_SCRIPT" ] || fails="$fails; artifact-info skrip=$(lv skrip) != $X_SCRIPT"
+  [ "$(lv skrip_cocok)" = 1 ] || fails="$fails; skrip_cocok=$(lv skrip_cocok) (skrip install-multiple berubah setelah terbit)"
+  [ "$(lv skrip_lint)" = ok ] || fails="$fails; skrip_lint=$(lv skrip_lint) (skrip memuat baris di luar allowlist)"
+  splits_n="$(lv split_n)"
+  is_num "$splits_n" && [ "$splits_n" -ge 1 ] || fails="$fails; split_n=${splits_n:--}"
+  bad_split="$(printf '%s\n' "$OUT" | sed -n 's/^split\.[0-9]*=//p' | grep -v ' verifikasi=ok$' | head -n 3 | tr '\n' ';')"
+  [ -z "$bad_split" ] || fails="$fails; split bermasalah: $bad_split"
+  if [ -n "$fails" ]; then BC_WHY="${fails#; }"; return 1; fi
+  return 0
+}
+bundle_delete() { # bundle_delete: hapus analisis paket uji (settle -> delete); isi BD_WHY; AID kosong bila terhapus
+  local a="$AID"
+  BD_WHY=""
+  [ -n "$a" ] || return 0
+  settle
+  if [ -n "$LEFT" ]; then BD_WHY="analisis uji TERTINGGAL aid=$a (build masih aktif:$LEFT)"; return 1; fi
+  bc delete "$a"
+  [ "$(lv hasil)" = deleted ] && AID=""
+  if [ "$RC" -ne 0 ] || [ "$(lv hasil)" != deleted ] || [ "$(lv builds_ada)$(lv bench_ada)$(lv work_ada)" != 000 ]; then
+    BD_WHY="delete aid=$a: $(err_text) hasil=$(lv hasil) builds_ada=$(lv builds_ada) bench_ada=$(lv bench_ada) work_ada=$(lv work_ada)"
+  fi
+  printf '%s\n' "$OUT" | grep -q 'PermissionError' && BD_WHY="$BD_WHY; PermissionError di keluaran delete"
+  [ -z "$BD_WHY" ]
+}
+step12b() {
+  bundle_build xapk "$BT/sampel.xapk" || { row GAGAL "$N12B" "$BB_WHY"; return 1; }
+  X_BID="$BB_BID"; X_NAME="$BB_NAME"; X_CERT="$BB_CERT"; X_SCRIPT="$BB_SCRIPT"
+  row OK "$N12B" "analisis $AID (XAPK dari sampel buatan, --uniq) -> init -> string via shell -> request/approve/wait: done; output=$X_NAME format=xapk verify_ok=1 cert=$(short "$X_CERT")… skrip=$X_SCRIPT"
+}
+step12c() {
+  if ! bundle_verify xapk "$XAPK_NAMES" "$XAPK_N" "$XAPK_EXTRAS"; then row GAGAL "$N12C" "$BV_WHY"; return 1; fi
+  row OK "$N12C" "signer-selftest --check-bundle: $XAPK_N APK, tiap berkas signers=1 v2=1 v3=1 zipalign=ok sisa_ttd=0, cert_berbeda=1, semua sertifikat == build di DB == keystore pemilik; nama dan jumlah entri sama dengan sampel"
+}
+step12d() {
+  local why=""
+  bundle_content xapk "$XAPK_CHECKS" || why="$BC_WHY"
+  bundle_delete || why="${why:+$why; }$BD_WHY"
+  if [ -n "$why" ]; then row GAGAL "$N12D" "$why"; return 1; fi
+  row OK "$N12D" "OBB dan ikon utuh, manifest.json sama kecuali total_size, extras = sampel + tepat satu assets/uniq-*; skrip install-multiple lolos sh -n, hash cocok, lint ok; semua split verifikasi=ok; analisis uji dihapus bersih"
+}
+step12e() {
+  local why=""
+  bundle_build apks "$BT/sampel.apks" || { why="$BB_WHY"; }
+  if [ -z "$why" ]; then
+    X_BID="$BB_BID"; X_NAME="$BB_NAME"; X_CERT="$BB_CERT"; X_SCRIPT="$BB_SCRIPT"
+    bundle_verify apks "$APKS_NAMES" "$APKS_N" "$APKS_EXTRAS" || why="$BV_WHY"
+    bundle_content apks "$APKS_CHECKS" || why="${why:+$why; }$BC_WHY"
+  fi
+  bundle_delete || why="${why:+$why; }$BD_WHY"
+  if [ -n "$why" ]; then row GAGAL "$N12E" "$why"; return 1; fi
+  row OK "$N12E" "APKS: build done; $APKS_N APK dengan signers=1 v2=1 v3=1 zipalign=ok sisa_ttd=0 dan satu sertifikat (== DB == keystore pemilik); alias base-master_2 berbyte sama dengan base bertanda tangan; toc.pb utuh; skrip install-multiple lolos sh -n; analisis uji dihapus bersih"
+}
+sc_put() { # sc_put BERKAS put|put-split SENTINEL BID [N]: letakkan berkas uji lewat stdin; kegagalan dicatat ke $F12_PROBLEM
+  local f="$1"; shift
+  sc_in "$f" "$@"
+  [ "$RC" -eq 0 ] || F12_PROBLEM="$F12_PROBLEM; (bid ${3-}) $1 ${4-}: gagal meletakkan berkas uji: $(err_text)"
+}
+sc_ls_signed() { # sc_ls_signed BID -> RC 0 bila TIDAK ada signed*.apk di folder build sentinel
+  sc ls "$SENT_AID" "$1"
+  [ "$RC" -eq 0 ] || { SC_LS_NOTE="ls gagal: $(err_text)"; return 1; }
+  if printf '%s\n' "$OUT" | grep -q '^signed'; then SC_LS_NOTE="berkas signed*.apk TERSISA sesudah penolakan: $(printf '%s\n' "$OUT" | grep '^signed' | head -n 3 | tr '\n' ' ')"; return 1; fi
+  return 0
+}
+sc_negative() { # sc_negative BID KODE "deskripsi" HASH1,HASH2: sign harus ditolak dengan KODE persis; lalu tak ada signed*; lalu clean; menambah ke $F12_PROBLEM
+  local bid="$1" code="$2" desc="$3" hashes="$4"
+  sc sign "$SENT_AID" "$bid" --timeout 120 --expect-error "$code" --splits "$hashes"
+  if [ "$RC" -ne 0 ]; then
+    F12_PROBLEM="$F12_PROBLEM; ($bid) $desc: diharapkan kode $code, ternyata: $(printf '%s\n' "$OUT" | sed -n 's/^ALASAN: //p' | sed -n 1p) [$(printf '%s\n' "$OUT" | sed -n 's/^\(HASIL .*\)$/\1/p' | sed -n 1p)]"
+  elif ! sc_ls_signed "$bid"; then
+    F12_PROBLEM="$F12_PROBLEM; ($bid) $desc: $SC_LS_NOTE"
+  fi
+  sc clean "$SENT_AID" "$bid"
+}
+F12_PROBLEM=""; SC_LS_NOTE=""
+step12f() {
+  local p="$BT/parts" nsplit
+  F12_PROBLEM=""
+  if ! owner_fp; then row GAGAL "$N12F" "keystore.sh info tidak memberi sidik jari pemilik (butuh untuk kontrol positif)"; return 1; fi
+  sc clean "$SENT_AID"                                                           # sisa run yang terputus
+  # (1) split DIGANTI: byte split-1 diletakkan di slot 2, sementara hash yang dicatat (expect_sha256) adalah hash split-2
+  sc_put "$p/base.apk" put "$SENT_AID" 1
+  sc_put "$p/split-1.apk" put-split "$SENT_AID" 1 1
+  sc_put "$p/split-1.apk" put-split "$SENT_AID" 1 2
+  sc_negative 1 input_unsafe "split diganti" "$F_SPLIT1,$F_SPLIT2"
+  # (2) split HILANG: dua hash diminta, hanya slot 1 yang ada
+  sc_put "$p/base.apk" put "$SENT_AID" 2
+  sc_put "$p/split-1.apk" put-split "$SENT_AID" 2 1
+  sc_negative 2 input_missing "split hilang" "$F_SPLIT1,$F_SPLIT2"
+  # (3) META-INF BASI: split ke-2 membawa META-INF/OLD.RSA (hash cocok) -> signer harus menolak, bukan menandatangani
+  sc_put "$p/base.apk" put "$SENT_AID" 3
+  sc_put "$p/split-1.apk" put-split "$SENT_AID" 3 1
+  sc_put "$p/split-stale.apk" put-split "$SENT_AID" 3 2
+  sc_negative 3 stale_signature "META-INF basi" "$F_SPLIT1,$F_STALE"
+  # (4) kontrol POSITIF: set yang sama tetapi bersih HARUS ditandatangani, satu sertifikat = pemilik (membuktikan tiga penolakan di atas disebabkan cacatnya, bukan sampelnya)
+  sc_put "$p/base.apk" put "$SENT_AID" 4
+  sc_put "$p/split-1.apk" put-split "$SENT_AID" 4 1
+  sc_put "$p/split-2.apk" put-split "$SENT_AID" 4 2
+  sc sign "$SENT_AID" 4 --timeout 300 --expect-ok --owner-sha256 "$OWNER" --splits "$F_SPLIT1,$F_SPLIT2"
+  nsplit="$(printf '%s\n' "$OUT" | grep -c '^SPLIT ')"
+  if [ "$RC" -eq 3 ]; then
+    F12_PROBLEM="$F12_PROBLEM; (4) kontrol positif (set bersih harus ditandatangani): $(printf '%s\n' "$OUT" | sed -n 's/^ALASAN: //p' | sed -n 1p)"
+  elif [ "$RC" -ne 0 ]; then
+    F12_PROBLEM="$F12_PROBLEM; (4) kontrol positif gagal dijalankan: $(err_text)"
+  elif [ "$nsplit" != 2 ]; then
+    F12_PROBLEM="$F12_PROBLEM; (4) kontrol positif: baris SPLIT $nsplit (harus 2)"
+  fi
+  sc clean "$SENT_AID" 4
+  sc clean "$SENT_AID"
+  [ "$RC" -eq 0 ] && SC_DIRTY=0
+  if [ -n "$F12_PROBLEM" ]; then row GAGAL "$N12F" "${F12_PROBLEM#; }"; return 1; fi
+  row OK "$N12F" "signer menolak tepat: split diganti -> input_unsafe, split hilang -> input_missing, META-INF basi -> stale_signature (tanpa signed*.apk, folder dibersihkan); kontrol positif: base + 2 split bersih ditandatangani dengan sertifikat pemilik"
+}
+
 # ------------------------------------------------------------------------------------------------ alur
 START_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 H9=""
+step_bundles() { # Tahap 3: 12a..12f; 12b-12e butuh $AID kosong (analisis uji langkah 2 sudah bersih); 12f berdiri sendiri (hanya signer)
+  local v
+  if ! step12a; then
+    for v in N12B N12C N12D N12E N12F; do row DILEWATI "${!v}" "dilewati: prasyarat paket (langkah 12a) gagal"; done
+    return
+  fi
+  if [ -n "$AID" ]; then
+    for v in N12B N12C N12D N12E; do row DILEWATI "${!v}" "dilewati: analisis uji aid=$AID masih ada (langkah 12 belum bersih; lihat baris 12 kebersihan)"; done
+  else
+    if step12b; then
+      step12c
+      step12d
+    else
+      row DILEWATI "$N12C" "dilewati: build XAPK tidak selesai (langkah 12b)"
+      row DILEWATI "$N12D" "dilewati: build XAPK tidak selesai (langkah 12b)"
+      bundle_delete || CLEAN_NOTE="${CLEAN_NOTE:-$BD_WHY}"
+    fi
+    if [ -n "$AID" ]; then
+      row DILEWATI "$N12E" "dilewati: analisis uji aid=$AID (XAPK) belum bersih; lihat pembersihan"
+    else
+      step12e
+    fi
+  fi
+  step12f
+}
 run_all() {
   step1 || { halt_from N2 "dilewati: prasyarat (langkah 1) gagal"; return; }
   step2 || { halt_from N3 "dilewati: analisis uji tidak tersedia (langkah 2)"; return; }
@@ -721,6 +1189,7 @@ run_all() {
   step10
   step11
   step12
+  step_bundles
   if [ -n "$BIG_MB" ]; then
     row INFO "BIG_MB uji APK besar" "BIG_MB=$BIG_MB dicatat; pipeline build tidak menguji APK besar di sini — uji besar signer: BIG_MB=$BIG_MB make signer-verify"
   fi

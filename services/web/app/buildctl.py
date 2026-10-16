@@ -8,6 +8,9 @@ spasi) dan blok teks bebas berawalan `o| ` (stdout shell), `e| ` (stderr shell),
 memalsukan baris seperti `persetujuan=...`. Kode keluar: 0 harapan terpenuhi; 3 harapan TIDAK terpenuhi atau galat operasional (selalu `kode=<stabil>`); 64 salah pakai
 (pesan ke stderr). Pengecualian tak terduga -> `kode=internal galat=<NamaGalat>`, kode 3, tanpa traceback di stdout.
 
+Build paket (Tahap 3, XAPK/APKS): `status` dan `artifact-info` menambah format asli, daftar split (hash/ukuran/verifikasi), lokasi skrip install-multiple, peringatan, petunjuk
+galat per split, dan batas jujur (tidak ada janji 100%; tidak ada tautan unduh). Build APK tunggal: keluaran tidak berubah.
+
 `shell` memanggil `shellspool.run_command` LANGSUNG: CLI ini tidak mengimpor `ai.tools` dan tidak membaca `AI_SHELL_ENABLED`. Catatan jujur (A-14): modul `ai.tools` TETAP terimpor secara
 transitif (lewat `routes_apk`/`app.context`, karena CLI hanya berjalan di kontainer web berenv lengkap) dan itu DITERIMA; jaminannya bukan "tidak terimpor" melainkan perilaku:
 tes mem-patch `ai.tools.shell_run` agar melempar lalu menjalankan semua perintah dengan AI_SHELL_ENABLED=0 -> tidak pernah terpicu.
@@ -395,8 +398,29 @@ def cmd_status(d: builds.Deps, args: argparse.Namespace, stdin: BinaryIO | None)
         return EXIT_OK
     res = builds.get_status(d, build_id=args.build_id)
     emit(**{k: (f"{res[k]:.3f}" if isinstance(res[k], float) else res[k]) for k in STATUS_KEYS})
+    if res["source_kind"] in builds.BUNDLE_KINDS:
+        _emit_bundle_status(res)
     emit_block("l", res["stage_log"])
     return EXIT_OK
+
+
+def _emit_bundle_status(res: dict[str, Any]) -> None:
+    """Tambahan HANYA untuk build paket (APK tunggal tidak mendapat kunci baru): format, skrip install-multiple, peringatan runner, petunjuk galat, batas jujur."""
+    emit(source_kind=res["source_kind"], output_format=res["output_format"])
+    log = res["stage_log"]
+    script = builds.INSTALL_SCRIPT_RE.search(log)
+    if script is not None:
+        emit(install_script=script.group(1), install_script_lokasi=f"builds/{res['analysis_id']}/{res['build_id']}/{script.group(1)}")
+    warn = re.search(r"^peringatan=(\S+)$", log, re.MULTILINE)
+    if warn is not None:
+        emit(peringatan=warn.group(1))
+    if res["status"] == store.B_FAILED:
+        hint, split = builds.bundle_hint(res["error_code"], res["error_text"])
+        if hint:
+            emit(petunjuk=hint)
+        if split:
+            emit(split_gagal=split)
+    emit(batas=builds.LIMIT_NOTICE, unduh=builds.NO_DOWNLOAD_NOTICE)
 
 
 def cmd_wait(d: builds.Deps, args: argparse.Namespace, stdin: BinaryIO | None) -> int:
@@ -424,6 +448,21 @@ def cmd_artifact_info(d: builds.Deps, args: argparse.Namespace, stdin: BinaryIO 
     res = builds.artifact_info(d, args.build_id)
     emit(build_id=res["build_id"], output_name=res["output_name"], output_size=res["output_size"], output_sha256=res["output_sha256"], cert_sha256=res["cert_sha256"],
          disk_sha256=res["disk_sha256"], cocok=res["cocok"])
+    rep = res.get("bundle")
+    if rep is None:
+        return EXIT_OK
+    emit(format=rep["format"], split_n=len(rep["splits"]))
+    for n, line in enumerate(rep["splits"], 1):
+        emit(**{f"split.{n}": line})
+    if "skrip" in rep:
+        emit(skrip=rep["skrip"], skrip_lokasi=rep["skrip_lokasi"], skrip_sha256=rep.get("skrip_sha256", ""), skrip_cocok=rep.get("skrip_cocok", False),
+             skrip_lint=rep.get("skrip_lint", ""))
+    emit(sertifikat="sama untuk semua berkas (dicatat worker/signer saat build; CLI ini tidak menjalankan apksigner)", batas=builds.LIMIT_NOTICE, unduh=builds.NO_DOWNLOAD_NOTICE)
+    if rep["masalah"]:
+        for n, (kode, alasan) in enumerate(rep["masalah"][1:], 1):
+            emit(**{f"masalah.{n}": f"{kode}: {alasan}"})
+        emit(kode=rep["masalah"][0][0], alasan=rep["masalah"][0][1])
+        return EXIT_FAIL
     return EXIT_OK
 
 

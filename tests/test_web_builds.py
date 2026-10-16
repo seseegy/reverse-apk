@@ -182,12 +182,34 @@ def test_request_without_changes_is_refused(rig, W):
     assert kode(W, W.request_build, rig.deps(), rig.analysis()) == "tidak_ada_perubahan"
 
 
-def test_request_refuses_bundles_unfinished_and_apktool_less_analyses(rig, W):
-    bundle = rig.analysis_with(options={"deobf": False, "bundle": {"format": "xapk", "splits": 2}})
+def test_request_refuses_unknown_bundle_formats_unfinished_and_apktool_less_analyses(rig, W):
+    bundle = rig.analysis_with(options={"deobf": False, "bundle": {"format": "apkm", "splits": 2}})
     assert kode(W, W.request_build, rig.deps(), bundle) == "paket_belum_didukung"
+    assert kode(W, W.request_build, rig.deps(), rig.analysis_with(options={"deobf": False, "bundle": "xapk"})) == "paket_belum_didukung"
     assert kode(W, W.request_build, rig.deps(), rig.analysis_with(status=store.QUEUED)) == "analisis_belum_siap"
     assert kode(W, W.request_build, rig.deps(), rig.analysis_with(apktool=store.FAILED)) == "apktool_tidak_ada"
     assert kode(W, W.request_build, rig.deps(), 424242) == "analisis_tidak_ada"
+
+
+@pytest.mark.parametrize("fmt", ["xapk", "apks"])
+def test_request_xapk_apks_diterima_dengan_source_kind(rig, W, fmt):
+    aid = rig.analysis_with(options={"deobf": False, "bundle": {"format": fmt, "splits": 2}})
+    res = W.request_build(rig.deps(), aid)
+    assert rig.row(res["build_id"])["source_kind"] == fmt and res["status"] == "awaiting_approval"
+
+
+def test_request_apk_biasa_tetap_source_kind_apk(rig, W):
+    assert rig.row(W.request_build(rig.deps(), rig.analysis())["build_id"])["source_kind"] == "apk"
+
+
+@pytest.mark.parametrize("fmt,want", [("apk", 3300), ("xapk", 3300 + 3200), ("apks", 3300 + 3200)])
+def test_approve_job_timeout_memakai_margin_menurut_format(rig, W, fmt, want):
+    from rq import Queue
+    aid = rig.analysis_with(options={"deobf": False, "bundle": {"format": fmt}} if fmt != "apk" else {})
+    bid = W.request_build(rig.deps(), aid)["build_id"]
+    W.approve_build(rig.deps(), bid, rig.row(bid)["diff_sha256"], via="cli")
+    job = Queue("jobs", connection=rig.redis).fetch_job(rig.queue_ids()[0])
+    assert job.timeout == want
 
 
 def test_request_with_an_active_build_is_refused_with_build_aktif(rig, W):

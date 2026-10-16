@@ -122,12 +122,13 @@ def test_signer_service_is_isolated_secretless_and_profiled():
     for forbidden in ("secrets:", "networks:", "ports:", "depends_on", "docker.sock", "privileged", "cap_add", "edge", "backend", "keystore",
                       "<<: *hardening", 'restart: "no"'):
         assert forbidden not in block, forbidden
-    # Tepat tiga volume (2b sadar: + signwork, ruang kerja privat yang HANYA signer pasang) dan tiga env; tmpfs hanya /tmp tanpa exec.
+    # Tepat tiga volume (2b sadar: + signwork, ruang kerja privat yang HANYA signer pasang) dan empat env (Tahap 3: + SIGN_MAX_TOTAL_MB); tmpfs hanya /tmp tanpa exec.
     assert _list_items(block, "volumes") == ["builds:/data/builds", "signspool:/data/signspool", "signwork:/data/signwork"]
     assert _list_items(block, "tmpfs") == ["/tmp:rw,size=256m,nosuid"]
     assert _list_items(block, "security_opt") == ["no-new-privileges:true"]
     env = re.search(r"(?m)^    environment:\n((?:      \w+: .*\n?)+)", block).group(1)
-    assert [ln.strip() for ln in env.splitlines()] == ["DATA_DIR: /data", "SIGN_TIMEOUT: ${SIGN_TIMEOUT:-900}", "SIGN_MAX_MB: ${SIGN_MAX_MB:-1100}"]
+    assert [ln.strip() for ln in env.splitlines()] == ["DATA_DIR: /data", "SIGN_TIMEOUT: ${SIGN_TIMEOUT:-900}", "SIGN_MAX_MB: ${SIGN_MAX_MB:-1100}",
+                                                  "SIGN_MAX_TOTAL_MB: ${SIGN_MAX_TOTAL_MB:-3072}"]
 
 
 def test_signer_is_the_only_profiled_service():
@@ -220,7 +221,7 @@ def test_sign_env_read_by_the_daemon_is_forwarded_by_compose_and_listed_in_env_e
     src = (ROOT / "services/signer/signer-daemon").read_text(encoding="utf-8")
     names = set(re.findall(r'_int_env\(\s*"(SIGN\w*)"', src)) | set(re.findall(r'environ(?:\.get)?[\[(]\s*"(SIGN\w*)"', src))
     excepted = {"SIGNER_SECRETS_DIR", "SIGNCHECK_DIAG"}  # pengungkit uji, SENGAJA tidak diteruskan compose
-    assert names - excepted == {"SIGN_TIMEOUT", "SIGN_MAX_MB"}, names
+    assert names - excepted == {"SIGN_TIMEOUT", "SIGN_MAX_MB", "SIGN_MAX_TOTAL_MB"}, names
     block = _strip_comments(compose_block("signer"))
     example = (ROOT / ".env.example").read_text(encoding="utf-8")
     for n in names - excepted:
@@ -232,6 +233,7 @@ def test_sign_env_read_by_the_daemon_is_forwarded_by_compose_and_listed_in_env_e
     # Bawaan di compose/.env.example sama dengan bawaan kode.
     assert '_int_env("SIGN_TIMEOUT", 900,' in src and "SIGN_TIMEOUT: ${SIGN_TIMEOUT:-900}" in block and "#SIGN_TIMEOUT=900" in example
     assert '_int_env("SIGN_MAX_MB", 1100,' in src and "SIGN_MAX_MB: ${SIGN_MAX_MB:-1100}" in block and "#SIGN_MAX_MB=1100" in example
+    assert '_int_env("SIGN_MAX_TOTAL_MB", 3072,' in src and "SIGN_MAX_TOTAL_MB: ${SIGN_MAX_TOTAL_MB:-3072}" in block and "#SIGN_MAX_TOTAL_MB=3072" in example
 
 
 # ================================================================================ (c) Makefile + skrip

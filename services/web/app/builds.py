@@ -18,6 +18,7 @@ import os
 import re
 import stat
 import time
+import zipfile
 from contextlib import closing
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -25,7 +26,7 @@ from typing import Any, Callable
 import redis
 from rq import Queue
 
-from rvcore import shellspool, store
+from rvcore import installscript, shellspool, splitzip, store
 from rvcore.fsutil import open_dir_chain
 from rvcore.paths import MAX_PROTO_ID, Layout
 from rvcore.spool import Spool
@@ -38,6 +39,8 @@ HEARTBEAT_STALE_AFTER = 30.0                 # detik; worker menulis tiap 10 dtk
 SUMMARY_MAX_CHARS = 7000                     # store menolak > 8192; sisanya untuk pembungkus
 TRACE_FILE = "assets/reverse-apk-modified.txt"
 JOB_TIMEOUT_MARGIN = 600                     # sama dengan worker.builds.JOB_TIMEOUT_MARGIN
+BUNDLE_JOB_MARGIN = 3800                     # sama dengan worker.builds.BUNDLE_JOB_MARGIN (paket xapk/apks; dijaga tes paritas)
+BUNDLE_KINDS = ("xapk", "apks")
 HASH_BLOCK = 1024 * 1024
 OPEN_ARTIFACT = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
@@ -71,6 +74,11 @@ def _env_int(name: str, default: int, lo: int, hi: int) -> int:
     except ValueError:
         return default
     return max(lo, min(hi, value))
+
+
+def job_margin(source_kind: str) -> int:
+    """Margin `job_timeout` RQ menurut format: paket memakai margin besar, APK tunggal tetap 600 (sama dengan `worker.builds.job_margin`)."""
+    return BUNDLE_JOB_MARGIN if source_kind in BUNDLE_KINDS else JOB_TIMEOUT_MARGIN
 
 
 def job_timeout_from_env() -> int:
@@ -194,8 +202,13 @@ def request_build(d: Deps, analysis_id: int, requested_by: str = "user", note: s
             options = json.loads(row["options"] or "{}")
         except (ValueError, RecursionError):
             options = {}
-        if isinstance(options, dict) and options.get("bundle"):
-            raise BuildsError("paket_belum_didukung", "Paket XAPK/APKS belum didukung untuk build (Tahap 3); hanya APK biasa.")
+        source_kind = "apk"
+        marked = options.get("bundle") if isinstance(options, dict) else None
+        if marked:
+            fmt = marked.get("format") if isinstance(marked, dict) else None
+            if fmt not in BUNDLE_KINDS:
+                raise BuildsError("paket_belum_didukung", "Format paket ini belum didukung untuk build; hanya APK, XAPK, dan APKS.")
+            source_kind = fmt
         stage = next((s["status"] for s in store.get_stages(conn, analysis_id) if s["name"] == "apktool"), None)
         if stage not in (store.OK, store.WARN):
             raise BuildsError("apktool_tidak_ada", "Hasil apktool tidak tersedia untuk analisis ini; tidak bisa dibangun.")
@@ -207,7 +220,7 @@ def request_build(d: Deps, analysis_id: int, requested_by: str = "user", note: s
     summary = build_summary(diff)
     with closing(d.db()) as conn:
         try:
-            build_id = store.create_build(conn, analysis_id, requested_by=requested_by, source_kind="apk", diff_sha256=diff["diff_sha256"], diff_summary=summary, note=note)
+            build_id = store.create_build(conn, analysis_id, requested_by=requested_by, source_kind=source_kind, diff_sha256=diff["diff_sha256"], diff_summary=summary, note=note)
         except store.BuildInputError as exc:
             raise BuildsError("masukan_tidak_valid", str(exc)) from None
         except store.BuildStateError as exc:
@@ -263,7 +276,7 @@ def approve_build(d: Deps, build_id: int, diff_sha256: str, *, statement_version
         return result
     try:
         if not _has_job(d.redis, build_id):
-            jobs.enqueue_build(d.redis, build_id, d.job_timeout)
+            jobs.enqueue_build(d.redis, build_id, d.job_timeout + job_margin(row["source_kind"]) - JOB_TIMEOUT_MARGIN)
         result["enqueued"] = True
     except redis.RedisError as exc:
         result["galat"] = f"antrean (Redis) tidak terjangkau: {type(exc).__name__}"
@@ -396,6 +409,7 @@ def get_status(d: Deps, build_id: int | None = None, analysis_id: int | None = N
         "build_id": row["id"], "analysis_id": row["analysis_id"], "status": row["status"], "alasan": _reason(d, row, mulai), "diff_sha256": row["diff_sha256"],
         "error_code": row["error_code"] or "", "error_text": row["error_text"] or "", "cancel_requested": row["cancel_requested"], "output_name": row["output_name"] or "",
         "output_size": row["output_size"], "output_sha256": row["output_sha256"] or "", "cert_sha256": row["cert_sha256"] or "", "verify_ok": row["verify_ok"],
+        "source_kind": row["source_kind"], "output_format": row["output_format"] or "",
         "approved_at": row["approved_at"], "started_at": row["started_at"], "signing_mulai": mulai, "finished_at": row["finished_at"],
         "waktu_antre": _delta(row["approved_at"], row["started_at"]), "waktu_build": _delta(row["started_at"], mulai),
         "waktu_tanda_tangan": _delta(mulai, row["finished_at"]) if final else None, "stage_log": row["stage_log"] or "",
@@ -424,9 +438,135 @@ def wait_build(d: Deps, build_id: int, timeout: float, on_change: Callable[[str,
 
 
 # ---------------------------------------------------------------------------------------------------- artefak
+BUNDLE_KINDS = ("xapk", "apks")
+INSTALL_SCRIPT_RE = re.compile(r"^install_script=(\S+) sha256=([0-9a-f]{64})$", re.MULTILINE)
+SCRIPT_MAX_BYTES = 1024 * 1024
+BUNDLE_MAX_APKS = 200
+BUNDLE_MAX_BYTES = 8 * 1024 * 1024 * 1024         # batas sabuk pengaman total byte APK yang dibaca ulang (zip-bomb di folder yang bisa ditulis runner)
+LIMIT_NOTICE = ("Tidak bisa dijanjikan 100%: aplikasi dengan anti-tamper, packer, Play Integrity, atau pemeriksaan hash .so dapat menolak berjalan setelah "
+                "ditandatangani ulang dengan kunci pemilik.")
+NO_DOWNLOAD_NOTICE = "Tidak ada tautan unduh atau tombol web (baru Tahap 5); salin berkas dari folder build di server oleh pemilik."
+BUNDLE_HINTS = {
+    "bundle_changed": "Paket unggahan berubah atau hilang sejak dianalisis; ajukan build baru.",
+    "bundle_invalid": "Susunan paket XAPK/APKS tidak valid; periksa berkas asal.",
+    "split_missing": "Paket menyebut split yang tidak ada; periksa split yang disebut.",
+    "split_invalid": "Ada split yang rusak atau tidak didukung (terenkripsi, kompresi tak umum, bukan ZIP); periksa split yang disebut.",
+    "bundle_too_large": "Paket melebihi batas ukuran, jumlah entri, atau rasio kompresi; kecilkan paket.",
+    "sign_cert_mismatch": "Sertifikat salah satu berkas tidak sama dengan keystore pemilik; semua split harus satu sertifikat.",
+    "sign_bad_result": "Hasil tanda tangan salah satu berkas tidak memenuhi syarat (v2 dan v3, satu penanda tangan).",
+    "sign_stale_signature": "Ada split yang masih membawa tanda tangan lama; hasil dibuang.",
+    "artifact_changed": "Berkas berubah di antara build, tanda tangan, dan penamaan; ajukan build baru.",
+    "assemble_failed": "Perakitan paket akhir gagal; ajukan build baru.",
+    "no_space": "Ruang disk tidak cukup; kosongkan ruang lalu ajukan build baru.",
+}
+SPLIT_NAME_RE = re.compile(r"((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.apk)")
+
+
+def bundle_hint(error_code: str, error_text: str) -> tuple[str, str]:
+    """(petunjuk, split_gagal) untuk build paket yang gagal. Petunjuk jujur: tidak ada set setengah jadi (worker membuang paket DAN skrip); `split_gagal` diambil dari
+    teks galat bila menyebut nama `*.apk`, selain itu kosong."""
+    hint = BUNDLE_HINTS.get(error_code, "")
+    if not hint:
+        return "", ""
+    found = SPLIT_NAME_RE.search(error_text or "")
+    return hint + " Tidak ada set setengah jadi yang terbit.", found.group(1) if found else ""
+
+
+def _hash_fd(fd: int) -> str:
+    digest = hashlib.sha256()
+    while True:
+        block = os.read(fd, HASH_BLOCK)
+        if not block:
+            break
+        digest.update(block)
+    return digest.hexdigest()
+
+
+def _read_script(bfd: int, name: str, logged: str | None, problems: list[tuple[str, str]], info: dict[str, Any]) -> None:
+    info["skrip"] = name
+    try:
+        fd = os.open(name, OPEN_ARTIFACT, dir_fd=bfd)
+    except OSError:
+        problems.append(("skrip_tidak_ada", f"Skrip install-multiple {name} tidak ada atau bukan berkas biasa."))
+        return
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > SCRIPT_MAX_BYTES:
+            problems.append(("skrip_tidak_ada", f"Skrip install-multiple {name} bukan berkas biasa atau terlalu besar."))
+            return
+        data = b""
+        while len(data) < st.st_size:
+            block = os.read(fd, HASH_BLOCK)
+            if not block:
+                break
+            data += block
+    finally:
+        os.close(fd)
+    digest = hashlib.sha256(data).hexdigest()
+    info["skrip_sha256"] = digest
+    same = logged is not None and hmac.compare_digest(digest, logged)
+    info["skrip_cocok"] = same
+    if not same:
+        problems.append(("skrip_tidak_cocok", f"Hash skrip {name} di disk tidak sama dengan yang dicatat saat build (skrip berubah setelah terbit)."))
+    try:
+        bad = installscript.lint(data.decode("utf-8"))
+    except UnicodeDecodeError:
+        bad = ["bukan UTF-8"]
+    info["skrip_lint"] = "ok" if not bad else "; ".join(bad[:3])
+    if bad:
+        problems.append(("skrip_tidak_lolos_lint", f"Skrip {name} memuat baris di luar allowlist ({'; '.join(bad[:3])})."))
+
+
+def _inspect_splits(fd: int, problems: list[tuple[str, str]], info: dict[str, Any]) -> None:
+    """Buka ulang paket dari fd yang sama (hash sudah dicocokkan) dan hitung hash/ukuran tiap APK di dalamnya; verifikasi = zip utuh (CRC), ada AndroidManifest.xml,
+    tanpa sisa tanda tangan lama (`splitzip.unexpected_signature_entries`: v1 milik apksigner sah)."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    rows: list[str] = []
+    total = 0
+    try:
+        with os.fdopen(os.dup(fd), "rb") as fh, zipfile.ZipFile(fh) as zf:
+            apks = [i for i in zf.infolist() if not i.is_dir() and i.filename.lower().endswith(".apk")]
+            if len(apks) > BUNDLE_MAX_APKS:
+                problems.append(("split_bermasalah", f"Paket memuat {len(apks)} APK (> {BUNDLE_MAX_APKS})."))
+                apks = apks[:BUNDLE_MAX_APKS]
+            for n, zi in enumerate(apks, 1):
+                status, digest, size = "ok", "", 0
+                try:
+                    total += zi.file_size
+                    if total > BUNDLE_MAX_BYTES:
+                        raise OverflowError
+                    h = hashlib.sha256()
+                    with zf.open(zi) as part:
+                        while True:
+                            block = part.read(HASH_BLOCK)
+                            if not block:
+                                break
+                            size += len(block)
+                            h.update(block)
+                    digest = h.hexdigest()
+                    with zf.open(zi) as part, zipfile.ZipFile(part) as inner:
+                        names = inner.namelist()
+                    if "AndroidManifest.xml" not in names:
+                        status = "tanpa_manifest"
+                    elif splitzip.unexpected_signature_entries(names):
+                        # Himpunan yang SAMA dengan signer-daemon/--check-bundle: v1 milik apksigner (MANIFEST.MF + satu .SF + satu .RSA) pada paket hasil BUKAN sisa.
+                        status = "ttd_lama"
+                except OverflowError:
+                    status = "terlalu_besar"
+                except (zipfile.BadZipFile, zipfile.LargeZipFile, NotImplementedError, EOFError, RuntimeError, OSError, ValueError):
+                    status = "rusak"
+                rows.append(f"{zi.filename} sha256={digest or '-'} ukuran={size} verifikasi={status}")
+                if status != "ok":
+                    problems.append(("split_bermasalah", f"Split {zi.filename} bermasalah: {status}."))
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, NotImplementedError, EOFError, RuntimeError, OSError, ValueError):
+        problems.append(("split_bermasalah", "Paket di disk tidak bisa dibuka sebagai ZIP."))
+    info["splits"] = rows
+
+
 def artifact_info(d: Deps, build_id: int) -> dict[str, Any]:
     """Hash ULANG berkas artefak di disk dan bandingkan dengan DB (runner bisa menulis `builds/`, jadi DB saja tidak cukup). Berkas dibuka lewat rantai
-    O_NOFOLLOW, harus berkas biasa (FIFO/symlink/direktori -> `berkas_tidak_ada`, tanpa menggantung)."""
+    O_NOFOLLOW, harus berkas biasa (FIFO/symlink/direktori -> `berkas_tidak_ada`, tanpa menggantung). Build paket (xapk/apks): kunci `bundle` memuat daftar split
+    (hash/ukuran/verifikasi dari paket yang sama), skrip install-multiple (hash dicocokkan dengan catatan stage_log, lint allowlist), dan `masalah` [(kode, alasan)]."""
     _check_id("build_id", build_id)
     with closing(d.db()) as conn:
         row = _get_build(conn, build_id)
@@ -436,6 +576,8 @@ def artifact_info(d: Deps, build_id: int) -> dict[str, Any]:
     if not OUTPUT_NAME_RE.fullmatch(name):
         raise BuildsError("berkas_tidak_ada", "Nama artefak di DB tidak valid.")
     info = {"build_id": build_id, "output_name": name, "output_size": row["output_size"], "output_sha256": row["output_sha256"], "cert_sha256": row["cert_sha256"]}
+    bundle = row["output_format"] in BUNDLE_KINDS
+    report: dict[str, Any] = {"format": row["output_format"], "splits": [], "masalah": []}
     try:
         bfd = open_dir_chain(d.layout.builds, str(row["analysis_id"]), str(build_id))
     except OSError:
@@ -448,18 +590,23 @@ def artifact_info(d: Deps, build_id: int) -> dict[str, Any]:
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise BuildsError("berkas_tidak_ada", "Artefak bukan berkas biasa.", **info)
-            digest = hashlib.sha256()
-            while True:
-                block = os.read(fd, HASH_BLOCK)
-                if not block:
-                    break
-                digest.update(block)
+            disk = _hash_fd(fd)
+            match = hmac.compare_digest(disk, row["output_sha256"])
+            if not match:
+                raise BuildsError("hash_tidak_cocok", "Hash berkas di disk TIDAK sama dengan hash di DB (artefak berubah setelah terbit).", disk_sha256=disk, cocok=False, **info)
+            if bundle:
+                _inspect_splits(fd, report["masalah"], report)
         finally:
             os.close(fd)
+        if bundle:
+            found = INSTALL_SCRIPT_RE.search(row["stage_log"] or "")
+            if found is None:
+                report["masalah"].append(("skrip_tidak_ada", "Catatan build tidak memuat nama dan hash skrip install-multiple."))
+            else:
+                _read_script(bfd, found.group(1), found.group(2), report["masalah"], report)
     finally:
         os.close(bfd)
-    disk = digest.hexdigest()
-    match = hmac.compare_digest(disk, row["output_sha256"])
-    if not match:
-        raise BuildsError("hash_tidak_cocok", "Hash berkas di disk TIDAK sama dengan hash di DB (artefak berubah setelah terbit).", disk_sha256=disk, cocok=False, **info)
+    if bundle:
+        report["skrip_lokasi"] = f"builds/{row['analysis_id']}/{build_id}/{report.get('skrip', '')}" if report.get("skrip") else ""
+        return {**info, "disk_sha256": disk, "cocok": True, "bundle": report}
     return {**info, "disk_sha256": disk, "cocok": True}

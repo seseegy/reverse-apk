@@ -358,7 +358,7 @@ def test_readme_and_audit_state_2b_status_honestly():
     readme, audit = _read("README.md"), _read("audit.md")
     assert "Tahap 2b" in readme and "BELUM DIUJI" in readme and "FR-9.24" in readme
     assert "### 10.18 " in audit
-    entry = audit.split("### 10.18 ", 1)[1]
+    entry = audit.split("### 10.18 ", 1)[1].split("\n### ", 1)[0]          # hanya entri 10.18 (entri sesudahnya, mis. 10.19 Tahap 3, boleh menyebut verify-build)
     for needle in ("R3", "R10", "R-1", "Belum terbukti", "fakeredis", "RQ nyata", "Docker", "FR-9.24"):
         assert needle in entry, needle
     assert "make verify-build" in readme and "verify-build" not in entry     # README menyebutnya (FEAT G); audit 10.18 ditulis sebelum G

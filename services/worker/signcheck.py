@@ -11,6 +11,10 @@ Kode keluar (seragam):
 Pengaman: SEMUA subperintah menolak analysis_id < 2147000000 (id analisis nyata autoincrement kecil, jadi tak mungkin menyentuh data nyata)
 dan build_id di luar 1..7. Subperintah diagnostik (put-garbage, put-symlink, put-big, bad-request) hanya aktif bila env SIGNCHECK_DIAG=1.
 
+Multi-berkas (Tahap 3): `put-split AID BID N` (stdin -> `split-NNN.apk`, N = 1..199, lewat `Tmp.publish`) dan `sign ... --splits HEX,HEX,...` (expect_sha256 tiap split,
+urutan = indeks 1..n; tenggat bawaan diskalakan `signspool.sign_timeout`). Setelah baris `HASIL` (berkas dasar) dicetak satu baris `SPLIT index=.. sha=.. size=.. cert=..
+v2=.. v3=.. signers=..` per split; `--expect-ok` juga menuntut jumlah hasil == jumlah diminta dan sertifikat SETIAP split == pemilik. Tanpa `--splits` perilaku 2b tidak berubah.
+
 Keluaran `kunci=nilai` atau satu baris `HASIL ok=1|0 code=<kode>|- cert=<hex64>|- sha=<hex64>|- size=<n> v1=1|0|- v2=1|0 v3=1|0 signers=<n>|- elapsed=<detik>`.
 Kata sandi tidak pernah disentuh di sini; sertifikat/sha penuh (64 heks) bukan rahasia.
 
@@ -37,8 +41,8 @@ from typing import Any, Iterator
 
 from rvcore.fsutil import open_dir_chain, rmtree_at
 from rvcore.paths import Layout
-from rvcore.signspool import (ERROR_CODES, JOB_ID_RE, SignerUnavailable, make_spool, new_job_id, read_result, signer_status,
-                              submit_and_wait)
+from rvcore.signspool import (ERROR_CODES, JOB_ID_RE, MAX_SPLITS, SignerUnavailable, make_spool, new_job_id, read_result, sign_timeout,
+                              signer_status, split_input_name, submit_and_wait)
 
 MIB = 1024 * 1024
 SENTINEL_MIN_AID = 2147000000
@@ -86,9 +90,13 @@ def _parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status")
     ids(sub.add_parser("put"))
+    sp = sub.add_parser("put-split")
+    ids(sp)
+    sp.add_argument("n")
     sp = sub.add_parser("sign")
     ids(sp)
-    sp.add_argument("--timeout", type=int, default=DEFAULT_SIGN_TIMEOUT)
+    sp.add_argument("--timeout", type=int, default=None)
+    sp.add_argument("--splits")
     sp.add_argument("--expect-ok", action="store_true")
     sp.add_argument("--owner-sha256")
     sp.add_argument("--expect-error")
@@ -211,7 +219,22 @@ def unsigned_sha256(layout: Layout, aid: int, bid: int) -> str:
         return ZERO_SHA
 
 
-def cmd_put(layout: Layout, aid: int, bid: int, stdin: Any) -> None:
+def parse_split_index(text: str) -> int:
+    """N untuk `put-split`: bilangan bulat desimal ASCII tanpa nol di depan, 1..MAX_SPLITS (nama berkas `split-NNN.apk` dihitung dari sini)."""
+    if re.fullmatch(r"[1-9][0-9]{0,2}", text) is None or int(text) > MAX_SPLITS:
+        raise Usage(f"N harus bilangan bulat 1..{MAX_SPLITS} tanpa nol di depan")
+    return int(text)
+
+
+def parse_splits(text: str) -> list[str]:
+    """`--splits`: 1..MAX_SPLITS hash heks-64 huruf kecil dipisah koma (tanpa elemen kosong)."""
+    items = text.split(",")
+    if not 1 <= len(items) <= MAX_SPLITS or any(EXPECT_RE.match(item) is None for item in items):
+        raise Usage(f"--splits harus 1..{MAX_SPLITS} hash heks-64 huruf kecil dipisah koma")
+    return items
+
+
+def cmd_put(layout: Layout, aid: int, bid: int, stdin: Any, dest: str = UNSIGNED) -> None:
     digest, total = hashlib.sha256(), 0
     with build_fd(layout, aid, bid, create=True) as bfd, Tmp(bfd) as tmp:
         fd = _open_tmp(tmp)
@@ -229,13 +252,17 @@ def cmd_put(layout: Layout, aid: int, bid: int, stdin: Any) -> None:
                 out.flush()
                 os.fsync(out.fileno())
         except OSError as exc:
-            raise Operational(f"gagal menulis unsigned.apk: {exc.strerror or exc}") from exc
+            raise Operational(f"gagal menulis {dest}: {exc.strerror or exc}") from exc
         try:
-            tmp.publish(UNSIGNED)
+            tmp.publish(dest)
         except OSError as exc:
-            raise Operational(f"gagal menerbitkan unsigned.apk: {exc.strerror or exc}") from exc
+            raise Operational(f"gagal menerbitkan {dest}: {exc.strerror or exc}") from exc
     print(f"ditulis={total}")
     print(f"sha256={digest.hexdigest()}")
+
+
+def cmd_put_split(layout: Layout, aid: int, bid: int, n: str, stdin: Any) -> None:
+    cmd_put(layout, aid, bid, stdin, split_input_name(parse_split_index(n)))
 
 
 def cmd_put_garbage(layout: Layout, aid: int, bid: int) -> None:
@@ -431,7 +458,7 @@ def cmd_clean(layout: Layout, aid: int, bid: int | None) -> None:
     print(f"dibersihkan={int(removed)}")
 
 
-def _verdict(res: dict[str, Any], expect_ok: bool, owner: str | None, expect_error: str | None) -> str | None:
+def _verdict(res: dict[str, Any], expect_ok: bool, owner: str | None, expect_error: str | None, n_splits: int = 0) -> str | None:
     """None bila harapan terpenuhi, selain itu alasan (satu baris Indonesia)."""
     if expect_ok:
         if not res["ok"]:
@@ -442,6 +469,12 @@ def _verdict(res: dict[str, Any], expect_ok: bool, owner: str | None, expect_err
             return "hasil sukses tetapi ukuran signed.apk nol"
         if res.get("cert_sha256") != (owner or "").lower():
             return "sertifikat penanda tangan BUKAN sertifikat pemilik (sidik jari berbeda)"
+        rows = res.get("splits") or []
+        if len(rows) != n_splits:
+            return f"jumlah hasil split {len(rows)} tidak sama dengan yang diminta ({n_splits})"
+        for row in rows:
+            if row.get("cert_sha256") != (owner or "").lower():
+                return f"sertifikat split {row.get('index')} BUKAN sertifikat pemilik (sidik jari berbeda)"
         return None
     if expect_error:
         if res["ok"]:
@@ -451,9 +484,16 @@ def _verdict(res: dict[str, Any], expect_ok: bool, owner: str | None, expect_err
     return None
 
 
-def _report(res: dict[str, Any], expect_ok: bool, owner: str | None, expect_error: str | None) -> int:
+def split_line(row: dict[str, Any]) -> str:
+    return (f"SPLIT index={row['index']} sha={row['output_sha256']} size={row['output_size']} cert={row['cert_sha256']} "
+            f"v2={int(bool(row['v2']))} v3={int(bool(row['v3']))} signers={row['signer_count']}")
+
+
+def _report(res: dict[str, Any], expect_ok: bool, owner: str | None, expect_error: str | None, n_splits: int = 0) -> int:
     print(hasil_line(res))
-    reason = _verdict(res, expect_ok, owner, expect_error)
+    for row in res.get("splits") or []:
+        print(split_line(row))
+    reason = _verdict(res, expect_ok, owner, expect_error, n_splits)
     if reason is not None:
         print(f"ALASAN: {reason}")
         return 3
@@ -471,13 +511,15 @@ def cmd_sign(layout: Layout, aid: int, bid: int, args: argparse.Namespace) -> in
     expect = args.expect_sha256
     if expect is not None and not EXPECT_RE.match(expect):
         raise Usage("--expect-sha256 harus 64 karakter heks huruf kecil")
+    splits = parse_splits(args.splits) if args.splits is not None else []
     if expect is None:
         expect = unsigned_sha256(layout, aid, bid)
+    timeout = args.timeout if args.timeout is not None else sign_timeout(DEFAULT_SIGN_TIMEOUT, len(splits))
     try:
-        res = submit_and_wait(make_spool(layout.signspool), aid, bid, timeout=args.timeout, expect_sha256=expect)
+        res = submit_and_wait(make_spool(layout.signspool), aid, bid, timeout=timeout, expect_sha256=expect, splits=splits)
     except SignerUnavailable as exc:
         raise Operational(_line(exc.message)) from exc
-    return _report(res, args.expect_ok, owner, args.expect_error)
+    return _report(res, args.expect_ok, owner, args.expect_error, len(splits))
 
 
 def cmd_bad_request(layout: Layout, aid: int, bid: int, args: argparse.Namespace) -> int:
@@ -512,7 +554,7 @@ def main(argv: list[str] | None = None, *, layout: Layout | None = None, stdin: 
         try:
             args = _parser().parse_args(args_list)
             if not args.cmd:
-                raise Usage("subperintah wajib: status put sign ls df clean (+ diagnostik: put-garbage put-symlink put-big bad-request)")
+                raise Usage("subperintah wajib: status put put-split sign ls df clean (+ diagnostik: put-garbage put-symlink put-big bad-request)")
             if args.cmd in DIAG_COMMANDS and os.environ.get("SIGNCHECK_DIAG") != "1":
                 raise Usage(f"subperintah diagnostik '{args.cmd}' hanya aktif dengan SIGNCHECK_DIAG=1")
             lay = layout or Layout(os.environ.get("DATA_DIR", "/data"))
@@ -530,6 +572,8 @@ def main(argv: list[str] | None = None, *, layout: Layout | None = None, stdin: 
                 raise Usage("build_id wajib")
             elif args.cmd == "put":
                 cmd_put(lay, aid, bid, inp)
+            elif args.cmd == "put-split":
+                cmd_put_split(lay, aid, bid, args.n, inp)
             elif args.cmd == "ls":
                 cmd_ls(lay, aid, bid)
             elif args.cmd == "put-garbage":

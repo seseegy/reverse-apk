@@ -22,6 +22,8 @@ Berjalan di VPS sendiri lewat Docker Compose.
 > `TIMEOUT_BUILD`/`TIMEOUT_SIGN`. **FR-9.24 (badging) dan FR-9.41 ditunda ke Tahap 5** — menunggu konfirmasi pemilik (PRD 09); prasyarat Tahap 5: unduh = salin-lalu-hash-lalu-bandingkan.
 > **BELUM DIUJI:** semuanya di Docker/Compose nyata, cgroup, dan RQ/Redis nyata (sandbox memakai `fakeredis`; Docker di sandbox rusak, jadi compose hanya dibuktikan lewat tes yang mem-parse YAML).
 > Bukti satu-perintah di VPS: `make verify-build` (BELUM DIUJI di Docker). Detail, tabel mount, dan gejala VPS: [docs/deploy.md](docs/deploy.md#build-apk-tahap-2b-pipeline-bench--runner--signer-status-terbukti-di-sandbox-belum-diuji-di-docker).
+>
+> **Build XAPK/APKS Tahap 3 (split APK):** `request`/`approve` kini juga untuk analisis XAPK dan APKS. Base dibangun ulang (apktool), SETIAP split lain dibuang tanda tangan lamanya lalu ditandatangani ulang dengan **kunci pemilik yang sama**; keluaran **format asal** (XAPK→XAPK, APKS→APKS) ditambah skrip teks `adb install-multiple` di folder build (aplikasi tidak memanggil adb; tanpa tautan unduh sampai Tahap 5). Sampel uji dibuat `scripts/make-test-bundles.py` (tanpa material kunci). `make verify-build` diperluas (12a–12f). **Batas jujur: tidak bisa dijanjikan 100%** untuk aplikasi dengan anti-tamper, packer, Play Integrity, atau pemeriksaan hash `.so`. **BELUM DIUJI:** Docker nyata, `adb install-multiple` pada perangkat Android 12+, XAPK/APKS nyata dari toko. **Cadangkan `secrets/signing_keystore.p12` + `secrets/signing_keystore_pass` DI LUAR VPS** — tanpa kunci itu, hasil build lama tidak bisa diperbarui di tempat. Detail: [docs/deploy.md](docs/deploy.md#build-xapkapks-tahap-3-split-apk-status-terbukti-di-sandbox-belum-diuji-di-docker-dan-di-perangkat).
 
 ## Mulai cepat
 ```bash
@@ -39,6 +41,7 @@ Tes (tanpa Docker): `pip install -r services/web/requirements.txt -r tests/requi
 
 Set berkas uji (zip bomb sintetis, APK besar, APK sampah): `scripts/make-test-apks.py --help`.
 APK uji berisi kelemahan yang sengaja ditanam (untuk memverifikasi analisis statis): `python3 scripts/sample-apk/build.py`.
+XAPK/APKS uji (untuk `make verify-build`; tanpa material kunci): `python3 scripts/make-test-bundles.py xapk|apks|splits --help` (butuh `testdata/vulnsample.apk`).
 
 ## Struktur
 ```
@@ -55,6 +58,8 @@ docs/prd/                 Dokumen kebutuhan produk per bagian
 scripts/init.sh           Penyiapan .env, secrets/, dan keystore penanda tangan
 scripts/keystore.sh       Membuat/menampilkan keystore (keytool di image signer; tidak pernah menimpa); `access`/`check` memastikan kunci terbaca signer
 scripts/signer-verify.sh  `make signer-verify`: bukti end-to-end penandatanganan (tabel OK/GAGAL yang bisa ditempel)
+scripts/verify-build.sh   `make verify-build`: bukti end-to-end pipeline build APK + XAPK/APKS (satu tabel OK/GAGAL)
+scripts/make-test-bundles.py  Pembuat sampel XAPK/APKS uji (stdlib; tanpa kunci; keluaran di testdata/, di-ignore Git)
 docker-compose.keystore.yml  Berkas tambahan: memasang keystore HANYA ke `signer` (dimuat Makefile bila keystore ada)
 ```
 
