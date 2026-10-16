@@ -553,6 +553,45 @@ Tahap 3 (satu paket, satu PR) membuat `request`/`approve`/`run_build` bekerja un
 
 **Belum ada / belum diuji (catatan Tahap 4; UI persetujuan dan unduhan sudah ada di Tahap 5, limit AI dan perilaku "berhenti rapi lalu tanya lanjut?" sudah ada di Tahap 6):** Docker/Compose, bench/Landlock nyata dalam loop chat, RQ, dan model nyata (verifikasi hanya `docker` palsu + bench palsu; cek live opsional manual).
 
+## Status Tahap 5: tab Build di web (layar persetujuan, badging, unduhan)
+
+**Sudah ada di kode** (tes di sandbox; verifikasi VPS lihat bawah). Kode: `services/web/app/routes_build.py` (router baru, didaftarkan di `main.py`), template `build.html`, `build_detail.html`, `_build_parts.html`, tab **Build** di `_analysis_head.html`, `static/js/build.js` (polling, patuh CSP), `builds.open_download` (salin-lalu-hash-lalu-bandingkan), badging di `runner/buildstage.py` + `rvcore/buildproto.py` + `worker/builds.py`, pembantu `app.webcheck`.
+
+**Rute** (semua butuh sesi pemilik; POST juga CSRF field `csrf`, pola `tokens_equal`):
+| Rute | Fungsi |
+|----|----|
+| `GET /analyses/{id}/build` | daftar build (status Indonesia, penanda “diminta oleh AI”), tombol **Siapkan ruang kerja** (`builds.init_workspace`) dan **Ajukan build dari ruang kerja** (`builds.request_build`, `requested_by=user`), “Hal yang tidak dijanjikan” + `LIMIT_NOTICE` |
+| `GET /analyses/{id}/build/{bid}?kind=&q=` | **layar persetujuan** (FR-9.18/9.40) dan halaman hasil |
+| `GET .../status` | JSON ringan (`status`, `label`, `final`) untuk polling; hanya DB |
+| `POST .../approve` | satu-satunya jalan web ke persetujuan: sesi + CSRF + kotak pernyataan wewenang (`store.approval_statement`) + `diff_sha256` tersembunyi dibandingkan oleh `builds.approve_build(via='ui')` dan CAS `store.approve_build` |
+| `POST .../reject`, `.../cancel`, `.../requeue` | `store.reject_build`, `builds.cancel_build`, kirim ulang build yang SUDAH disetujui (`approved|queued`; menolak `awaiting_approval`) |
+| `GET .../download`, `.../script` | APK/XAPK/APKS hasil dan skrip `adb install-multiple` |
+
+**Layar persetujuan.** Ringkasan dari `build.diff_summary` (counts, bytes, kinds, lines, skipped); berkas dikelompokkan per jenis (smali/res/manifest/aset/lib/lain, jenis dari segmen pertama path, aturan yang sama dengan `treediff`), diurut dari yang paling banyak baris berubah lalu ukuran; saringan `kind` (daftar tetap; nilai tak dikenal diabaikan) dan `q` (<= 80 karakter, lebih dari itu 422); penanda **diminta oleh AI** + peringatan; hash diff ditampilkan; teks wewenang dari `store.approval_statement` dengan kotak centang `required`; tombol Setujui, Tolak, Batalkan. Semua teks dari AI/diff/log (path, galat, alasan, stage_log) dirender Jinja dengan autoescape; tidak ada `|safe` (dijaga tes). Galat `BuildsError` dipetakan ke pesan Indonesia tetap lewat `?notice=<kode>` (tabel `NOTICES`; kode di luar tabel menjadi `gagal`); teks dari bench/runner/store tidak pernah dipantulkan. Persetujuan terikat hash yang tersimpan; bila ruang kerja berubah lagi sesudah diajukan, runner menghitung ulang hash atas snapshot dan menggagalkan build `workspace_changed` (halaman mengatakannya).
+
+**Keputusan tercatat (default aman; pemilik boleh mengubah):**
+| Topik | Keputusan | Alasan |
+|----|----|----|
+| Badging: runner atau worker | **runner**: `aapt2 dump badging unsigned.apk`; hasil dikembalikan sebagai bidang `badging` yang dinormalkan ketat oleh `parse_build_result` (paket harus nama Android sah, versionName hanya `[A-Za-z0-9._+~:-]` <= 64, SDK bilangan bulat; hasil runner tak tepercaya) | menambah kode kecil di tempat yang sudah memproses APK dan sudah punya aapt2 terpin; alternatif parser AndroidManifest biner murni-Python di worker berarti mem-parse berkas dari runner di proses berhak (DB, Redis) dengan parser buatan sendiri. Runner tidak punya hak atas hasil bertanda tangan, jadi yang dibaca `unsigned.apk` (manifest tidak berubah oleh zipalign/apksigner) |
+| aapt2 yang dipakai | **`/opt/apktool/aapt2`** (rootfs, root, read-only, hash terpin; `Env.aapt2`/`AAPT2_PATH`), BUKAN salinan di tmpfs `/opt/aapt-exec` | tmpfs itu dimiliki uid runner dan bisa ditulis oleh proses yang memproses APK jahat; salinan rootfs dapat dieksekusi langsung (hanya `chmod` oleh apktool yang ditolak) dan `runner-selftest` 6a sudah menjalankannya |
+| Badging tak terbaca | build **gagal** `badging_unreadable` SEBELUM signer dipanggil (PRD FR-9.24: “terbaca sebelum done”) | konsisten dengan teks FR; dampak: APK yang tidak bisa dibaca aapt2 setelah dibangun apktool tidak akan terbit. Dibatasi 30 dtk dan 4 MiB keluaran |
+| Peringatan | stage_log memuat baris tetap `badging: paket=… versionCode=… versionName=… minSdk=… targetSdk=…`, `banding: paket=sama|beda|tidak_diketahui …` (dengan paket/versi analisis asal) dan `peringatan: <kode>` (`target_sdk_di_bawah_23`, `target_sdk_tidak_diketahui`, `paket_beda_dari_analisis`, `version_code_beda_dari_analisis`); tidak memblokir. targetSdk yang tidak tertulis dianggap sama dengan minSdk (aturan Android) | FR-9.41 |
+| Unduh: tempat salinan | berkas ANONIM (`tempfile.TemporaryFile`, tanpa nama di disk) di `files/.tmp` (volume `files` hanya dipasang di web), jadi runner tidak bisa menyentuh salinan dan tidak ada sisa bila proses mati | prasyarat Tahap 2b |
+| Unduh: urutan | status `done` + milik analisis di path → rantai `open_dir_chain`/`O_NOFOLLOW` (FIFO/symlink/direktori ditolak 404) → cek ukuran dan ruang disk (+512 MiB) → salin → **hash dihitung dari SALINAN (baca ulang)** → `hmac.compare_digest` dengan `output_sha256` DB → baru dialirkan. Tidak cocok = **409**, tanpa byte. Skrip: hash dicocokkan dengan baris `install_script=` di stage_log + lint allowlist | runner yang terkompromi dapat mengubah artefak SESUDAH terbit; hash di DB hanya berguna bila yang dihash adalah byte yang akan dikirim |
+| Unduh: sumber daya | maks. 2 salinan serentak (503 `Retry-After`), disk penuh 507, ClientDisconnect/generator dibuang menutup salinan dan melepas slot (`weakref.finalize` + `finally`) | tiap salinan bisa ~1 GiB |
+| Header unduhan | `application/vnd.android.package-archive` (apk) / `application/zip` (xapk, apks) / `text/plain` (skrip), `attachment` dengan nama dari DB yang lolos `OUTPUT_NAME_RE`, `nosniff`, `Cache-Control: no-store`, CSP `sandbox` | FR-9.25 |
+| Audit unduhan | `build_download` {analysis_id, build_id, which, output_sha256, diff_sha256, size, ip} dicatat SETELAH verifikasi lulus dan SEBELUM byte pertama; unduhan yang ditolak tidak dicatat sebagai unduhan | FR-9.26 |
+| Unduhan tanpa sesi | 401 teks (pola rute berkas), bukan redirect | bukan navigasi halaman |
+| `requeue` | tombol “Kirim ulang ke antrean” untuk build `approved|queued` | Redis sempat mati saat menyetujui meninggalkan `queued` tanpa job; tidak menyetujui apa pun |
+
+**FR-9.24, FR-9.41, FR-9.34 terpenuhi di kode.** FR-9.34 (tidak ada tool AI untuk menyetujui/mengunduh) tetap dijaga tes AST/impor transitif (`app.routes_build` ditambahkan ke daftar modul terlarang) dan tes perilaku.
+
+**Belum / tidak dikerjakan (jujur):**
+- FR-9.40 “setiap berkas dapat dibuka penuh”: layar hanya menampilkan berkas yang ada di `diff_summary` (<= 8 KiB, berkas terbesar/paling berubah); **isi berkas tidak bisa dibuka di web** dan daftar lengkap ada di CLI (`buildctl diff`, `buildctl shell`). Titik simpan (FR-9.42) tidak dikerjakan.
+- Layar tidak menghitung ulang diff hidup dari bench saat dibuka (menghindari panggilan bench sampai 120 dtk saat halaman dimuat); pengamannya hash terikat + pemeriksaan ulang runner.
+- Langkah `make verify-build` 15x **tidak ditambahkan** (harness `docker` palsu `test_verify_build_script.py` terlalu besar untuk diperluas tanpa VPS). Penggantinya: pembantu `app.webcheck` (diuji terhadap aplikasi nyata di uvicorn) dan runbook manual di `docs/deploy.md` “Build web Tahap 5”.
+- **BELUM DIUJI:** `aapt2 dump badging` NYATA (aapt2 tidak ada di sandbox; parser diuji dengan teks berformat sama + aapt2 palsu; format keluaran aapt2 3.0.3 belum dicocokkan), Docker/Compose, Redis/RQ nyata, browser nyata (polling `build.js`, tombol, tata letak ponsel), unduhan APK ratusan MB sampai 1 GiB (waktu salin+hash ganda, disk `files/.tmp`), pemasangan hasil di perangkat Android, perilaku Starlette pada ClientDisconnect nyata (hanya diuji lewat penutupan stream klien).
+
 ## Status Tahap 6: limit AI, berhenti rapi, anggaran, dan batas 1 GB
 
 Tahap 6 menutup butir yang tertulis "belum ada" di Status Tahap 4. Kode: `ai/{config,agent,tools,budget,chat}.py`, `aibuild.py` (satu kait `before_create`), `routes_apk.py`, `templates/chat.html`, `static/js/app.js`, `docker-compose.yml`, `.env.example`; tes `tests/test_tahap6_limits.py`.
