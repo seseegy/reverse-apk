@@ -681,6 +681,30 @@ Ruang lingkup: `services/web/app/aibuild.py`, tiga tool di `ai/tools.py`, blok p
 
 **Tes lama yang sengaja diubah** (rincian di PR): `test_web_builds` (`build_diff_request` kini dipakai `builds.py` dan `aibuild.py`; `build_init_request` tetap hanya `builds.py`), `test_build_nb` (registri tool bertambah tepat tiga; asersi nama diperketat jadi daftar eksak), `test_verify_build_script` (docker palsu per-analisis, hitungan analisis/penghapusan/`sed`). Tidak ada tes isolasi yang dilonggarkan.
 
+### 10.21 Tahap 5: tab Build di web — persetujuan, unduhan, badging (Okt 2026)
+
+Ruang lingkup: `services/web/app/routes_build.py` (+ template `build*.html`, `static/js/build.js`), `builds.open_download`, badging di `runner/buildstage.py`/`rvcore/buildproto.py`/`worker/builds.py`, `app.webcheck`. Detail: `docs/prd/09-bundles-and-workbench.md` "Status Tahap 5", `docs/deploy.md` "Build web Tahap 5".
+
+**Permukaan baru.** (1) Sebelas rute di balik sesi login: 5 GET (daftar, halaman build/layar persetujuan, status JSON, unduh, skrip) dan 6 POST (init, request, approve, requeue, reject, cancel), semua POST dengan CSRF. (2) **Persetujuan lewat web** — sebelumnya hanya CLI. (3) **Unduhan APK hasil modifikasi** — sebelumnya tidak ada jalur sama sekali. (4) Runner menjalankan `aapt2 dump badging` pada `unsigned.apk` dan mengembalikan teks terstruktur ke worker. (5) `app.webcheck` membuat sesi pemilik dari `SECRET_KEY` (hanya lewat `docker compose exec`).
+
+**Risiko dan mitigasi.**
+| Risiko | Mitigasi | Bukti |
+|----|----|----|
+| AI/isi APK menyetujui sendiri | tidak ada tool/impor dari `app/ai/*` ke `builds`/`routes_build` (AST + impor transitif; `app.routes_build` masuk daftar terlarang); persetujuan = sesi pemilik + CSRF + pernyataan + hash diff | `test_ai_no_approve_invariant.py`, `test_web_build_ui.py` |
+| CSRF / klik tanpa sadar | field `csrf` dibandingkan `tokens_equal`, cookie `SameSite=Strict`; persetujuan butuh kotak pernyataan dicentang DAN hash diff yang cocok; tanpa pernyataan = tidak dicatat | tes 403 untuk tiap POST, pernyataan, hash salah |
+| XSS dari path diff / galat / alasan tolak / nilai `q` | autoescape Jinja, tanpa filter safe, CSP `script-src 'self'` tanpa inline; notifikasi hanya kode tetap | tes XSS di path, galat, `q`, `notice` |
+| Persetujuan basi (diff berubah setelah diajukan) | hash tersimpan dibandingkan di `builds.approve_build` dan CAS `store.approve_build`; runner menghitung ulang hash atas snapshot (`workspace_changed`) | tes lama + tes UI |
+| Artefak diganti runner terkompromi SESUDAH terbit (R-1) | **salin-lalu-hash-lalu-bandingkan**: hash dari SALINAN anonim di volume yang tidak dipasang di runner == hash DB, baru dialirkan; tidak cocok 409 tanpa byte | tes flip/grow/shrink/empty, symlink, FIFO, direktori, symlink pada folder build |
+| Penyajian berkas berbahaya | hanya `done` milik analisis di path; nama dari DB lolos `OUTPUT_NAME_RE`; `attachment` + `nosniff` + `no-store` + CSP `sandbox`; MIME tetap | tes header |
+| Disk/slot habis oleh unduhan | maks. 2 salinan serentak (503), cek ruang +512 MiB (507), salinan anonim ditutup saat selesai/terputus | tes slot, disk, putus di tengah |
+| Audit | `build_download` (analisis, build, hash hasil, hash diff, ukuran, IP) hanya untuk unduhan yang lulus verifikasi; `build_approved` `via=ui` | tes audit |
+| Runner jahat berbohong soal badging | normalisasi ketat (`normalize_badging`); badging tidak pernah dipakai untuk keputusan keamanan (hanya tampilan dan peringatan); wajib terbaca agar build tidak terbit buta | `test_build_badging.py` |
+| aapt2 diganti penyerang di tmpfs runner | memakai `/opt/apktool/aapt2` (rootfs read-only, root, hash terpin), bukan `/opt/aapt-exec` | tes default Env |
+
+**Risiko sisa (jujur).** (a) Prompt-injection tetap dapat memengaruhi *apa yang diminta AI untuk diubah*; layar persetujuan hanya menampilkan berkas dari `diff_summary` (<= 8 KiB) dan **tidak bisa membuka isi berkas** — pemilik harus memakai `buildctl diff`/`shell` untuk perubahan yang meragukan. Orang cenderung menyetujui tanpa membaca; pengamannya hanya pernyataan, penanda “diminta oleh AI”, dan kelompok/urutan berkas. (b) Persetujuan berlaku atas diff base; runner terkompromi tetap bisa menyisipkan isi saat membangun (R-2, tidak berubah) — hasil bertanda tangan kunci uji pemilik, jangan dipasang di perangkat utama tanpa kehati-hatian. (c) Unduhan sampai 1 GiB: salin + hash ganda memakan waktu dan I/O (belum diukur). (d) `app.webcheck` dan CLI berarti siapa pun dengan `docker exec` ke web sudah berdaulat penuh (sudah demikian lewat `SECRET_KEY`). (e) Unduhan dicatat sebelum byte pertama; unduhan yang terputus tetap tercatat.
+
+**Belum terbukti.** Docker/VPS, `aapt2 dump badging` nyata (format keluaran 3.0.3), browser nyata, Redis/RQ nyata, unduhan besar, perilaku Starlette pada putus-sambung klien nyata, pemasangan di perangkat Android.
+
 ### 10.22 Tahap 6: limit AI, berhenti rapi, anggaran, batas 1 GB (Okt 2026)
 
 **Permukaan baru dan keputusan.**
