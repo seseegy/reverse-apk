@@ -12,6 +12,14 @@
 # 12e hal yang sama untuk APKS (alias master, toc.pb), 12f negatif set di signer (split diganti, split hilang, META-INF basi) + kontrol positif. Sampel dibuat di folder sementara host
 # (mktemp -d, dihapus saat selesai) dan TIDAK memuat material kunci; tanda tangan dibuat signer dengan keystore pemilik. Langkah lama (1-13) tidak diubah selain ringkasan.
 #
+# Tahap 4 (tool build AI): sesudah 12f ditambah 14a..14n (tabel TETAP satu; tidak ada langkah 13 di skrip, penomoran mengikuti brief). Tiga tool AI (bench_diff, request_build,
+# get_build_status) dipanggil TANPA LLM dan TANPA kunci API lewat `python -m app.aitoolcheck` di kontainer web, yang memanggil `tools.run_tool` (jalur kode yang SAMA dengan chat):
+# 14a modul+skema, 14b analisis uji+init+bench_diff awal (hash == `buildctl diff`), 14c request diff kosong -> diff_kosong, 14d ubah via shell -> bench_diff 1 M, 14e request_build ->
+# awaiting_approval (hash sama), 14f hash salah / permintaan sama dipakai ulang / perubahan baru -> build_tertunda, 14g get_build_status menunggu, 14h build id analisis lain ditolak
+# (pesan identik dengan id ngawur), 14i tak ada tool approve/cancel/download + gerbang `--shell 0`, 14j persetujuan PEMILIK lewat buildctl lalu get_build_status sampai done dengan
+# verifikasi tanda tangan, 14k permintaan XAPK (tanpa menyetujui), 14l keluaran tool tanpa path rahasia/URL/nama keystore/nilai artefak, 14m tool tidak pernah menyetujui (audit
+# via=cli), 14n kebersihan. Persetujuan masih HANYA lewat CLI pemilik sampai Tahap 5. Analisis uji tambahan (B, paket) dibersihkan oleh trap seperti analisis utama.
+#
 # Prinsip: bash di host TIDAK PERNAH mem-parse JSON. Semua keputusan bergantung isi dibuat DI DALAM kontainer (app.buildctl, signer-selftest --check-apk, tamu
 # python di runner) dan dilaporkan sebagai kode keluar 0/3/64 plus baris `kunci=nilai`; skrip ini hanya membaca baris itu dengan sed. Host tidak menulis/menghapus
 # apa pun di volume (semua lewat kontainer uid 10001). Tidak ada `exec` ke runner (A-05): kontainer runner hanya `run --rm --no-deps -T`. Analisis uji dibuat sendiri
@@ -72,7 +80,21 @@ N12C="12c XAPK verifikasi"
 N12D="12d XAPK isi"
 N12E="12e APKS build+verifikasi"
 N12F="12f negatif set"
-ORDER=(N1 N2 N3 N4 N5 N6 N7 N7B N8 N9 N10 N11 N12 N12A N12B N12C N12D N12E N12F)
+N14A="14a tool build: modul+skema"
+N14B="14b tool build: analisis uji + bench_diff awal"
+N14C="14c tool build: request diff kosong"
+N14D="14d tool build: ubah via shell + bench_diff"
+N14E="14e tool build: request_build"
+N14F="14f tool build: permintaan kedua"
+N14G="14g tool build: get_build_status menunggu"
+N14H="14h tool build: negatif lintas analisis"
+N14I="14i tool build: tanpa tool persetujuan + gerbang"
+N14J="14j tool build: persetujuan pemilik -> selesai"
+N14K="14k tool build: permintaan XAPK"
+N14L="14l tool build: tanpa kebocoran"
+N14M="14m tool build: pagar persetujuan"
+N14N="14n tool build: kebersihan"
+ORDER=(N1 N2 N3 N4 N5 N6 N7 N7B N8 N9 N10 N11 N12 N12A N12B N12C N12D N12E N12F N14A N14B N14C N14D N14E N14F N14G N14H N14I N14J N14K N14L N14M N14N)
 
 # ------------------------------------------------------------------------------------------------ tabel
 ROWS_ST=(); ROWS_STEP=(); ROWS_NOTE=()
@@ -444,10 +466,22 @@ cleanup_aid() { # urutan TETAP: cancel -> wait -> delete (delete ditolak `busy` 
     echo "✗ $CLEAN_NOTE" >&2
   fi
 }
+X14=()                                                                           # id analisis uji TAMBAHAN langkah 14 (B, paket); dibersihkan dengan urutan yang sama
+cleanup_extras() { # cleanup_extras: cancel -> wait -> delete tiap analisis tambahan; yang gagal tetap di X14 dan menambah CLEAN_NOTE
+  local keep="$AID" x left=()
+  for x in ${X14[@]+"${X14[@]}"}; do
+    AID="$x"
+    cleanup_aid
+    [ -n "$AID" ] && left+=("$AID")
+  done
+  X14=(${left[@]+"${left[@]}"})
+  AID="$keep"
+}
 on_exit() {
   trap - EXIT INT TERM
   if [ "$NO_TABLE" = 1 ]; then exit 1; fi
   cleanup_aid
+  cleanup_extras
   [ "$SC_DIRTY" = 1 ] && sc clean "$SENT_AID" >/dev/null 2>&1                    # slot sentinel signcheck tidak boleh tertinggal (langkah 12f dihentikan)
   [ -n "$BT" ] && rm -rf -- "$BT"                                                # sampel sementara di host (bukan di volume)
   [ "$INTERRUPTED" = 1 ] && row GAGAL "dihentikan" "skrip dihentikan sebelum selesai; build uji dibatalkan dan analisis uji dibersihkan"
@@ -1166,13 +1200,343 @@ step_bundles() { # Tahap 3: 12a..12f; 12b-12e butuh $AID kosong (analisis uji la
   fi
   step12f
 }
+# ------------------------------------------------------------------------------------------------ Tahap 4: langkah 14a-14n (tool build AI tanpa LLM)
+# `atc` memanggil `python -m app.aitoolcheck` di kontainer web: pembungkus tipis di atas tools.run_tool/tools.schemas (jalur kode tool yang sama dengan chat; tanpa LLM, tanpa kunci API).
+# Keluarannya HANYA baris `kunci=nilai` (ok, kode, pesan, ...); seluruh keluaran dikumpulkan di $ATC_ALL untuk pemeriksaan kebocoran 14l (isinya tidak pernah dicetak ke tabel).
+ATC_ALL=""; B14=""; H14=""; M14=""; F14_BAD=""; S6_OK=0; PRE14_WHY=""; APPROVED_14=0; XB14=""; XBUILD14=""
+# shellcheck disable=SC2086
+atc() { OUT="$(exec 9>&-; $COMPOSE exec -T web python -m app.aitoolcheck "$@" </dev/null 2>&1 | tr -d '\r')"; RC=$?; ATC_ALL+="$OUT"$'\n'; }
+atc_why() { # alasan singkat dari keluaran aitoolcheck terakhir (tanpa menyalin nilai panjang)
+  if [ -n "$(lv ok)" ]; then printf 'ok=%s kode=%s %s' "$(lv ok)" "$(lv kode)" "$(lv pesan)"; else printf 'kode keluar %s: %s' "$RC" "$(printf '%s\n' "$OUT" | tail -n 3 | tr '\n' ' ')"; fi
+}
+tool_names() { printf '%s\n' "$OUT" | sed -n 's/^tool\.[0-9]*=//p'; }
+halt14() { # halt14 DARI SAMPAI "alasan": baris DILEWATI untuk langkah 14 dari DARI sampai SAMPAI (inklusif)
+  local v on=0
+  for v in N14A N14B N14C N14D N14E N14F N14G N14H N14I N14J N14K N14L N14M N14N; do
+    [ "$v" = "$1" ] && on=1
+    [ "$on" = 1 ] && row DILEWATI "${!v}" "$3"
+    [ "$v" = "$2" ] && on=0
+  done
+}
+sed_marker_in() { # sed_marker_in ANALISIS MARKER: ganti app_name di $WS/project analisis itu lewat shell nyata (pola sed_marker)
+  # shellcheck disable=SC2016
+  bc shell "$1" 'sed -i "s|\(<string name=.app_name.>\)[^<]*|\1'"$2"'|" "$WS/project/res/values/strings.xml"' --timeout 60
+  shell_ok
+}
+count_builds() { # count_builds ANALISIS -> jumlah build (dari buildctl status --analysis), RC 0 bila analisis ada
+  bc status --analysis "$1"
+  [ "$RC" -eq 0 ] || return 1
+  local list n=0 item
+  local -a items=()
+  list="$(lv builds)"
+  IFS=, read -r -a items <<<"$list"
+  for item in ${items[@]+"${items[@]}"}; do [ -n "$item" ] && n=$((n + 1)); done
+  echo "$n"
+}
+all_builds_in() { # all_builds_in ANALISIS status... : RC 0 bila SEMUA build analisis itu berstatus salah satu dari daftar
+  local aid="$1" item st ok l
+  shift
+  bc status --analysis "$aid"
+  [ "$RC" -eq 0 ] || return 1
+  local -a items=()
+  IFS=, read -r -a items <<<"$(lv builds)"
+  for item in ${items[@]+"${items[@]}"}; do
+    [ -n "$item" ] || continue
+    st="${item#*:}"; ok=0
+    for l in "$@"; do [ "$st" = "$l" ] && ok=1; done
+    [ "$ok" = 1 ] || { BAD_ST="${item}"; return 1; }
+  done
+  return 0
+}
+BAD_ST=""
+step14a() {
+  local n t bad=""
+  atc schema --shell 1
+  if [ "$RC" -ne 0 ] || [ "$(lv ok)" != 1 ]; then
+    row GAGAL "$N14A" "modul app.aitoolcheck tidak jalan (image web lama? jalankan make up lalu ulangi): $(atc_why)"
+    return 1
+  fi
+  n="$(tool_names)"
+  for t in bench_diff request_build get_build_status; do
+    printf '%s\n' "$n" | grep -q -x "$t" || bad="$bad; tool $t TIDAK ada di skema (shell=1)"
+  done
+  printf '%s\n' "$n" | grep -q -E 'approve|sign|download|cancel|delete|artifact|init' && bad="$bad; skema memuat nama tool penyetujuan/penandatanganan/unduh/pembatalan/hapus/artefak/init"
+  atc schema --shell 0
+  for t in bench_diff request_build get_build_status; do
+    tool_names | grep -q -x "$t" && bad="$bad; tool $t muncul padahal shell=0 (gerbang tidak menyembunyikan)"
+  done
+  if [ -n "$bad" ]; then row GAGAL "$N14A" "${bad#; }"; return 1; fi
+  row OK "$N14A" "app.aitoolcheck jalan tanpa kunci API; shell=1 memuat tepat bench_diff, request_build, get_build_status (tanpa nama approve/sign/download/cancel/delete/artifact/init); shell=0 menyembunyikan ketiganya"
+}
+step14b() {
+  local dup aid status hb
+  echo "• langkah 14b: analisis APK uji kedua untuk tool build (bisa beberapa menit)…" >&2
+  bc_in analyze - --uniq
+  dup="$(lv duplicate)"; aid="$(lv analysis_id)"; status="$(lv status)"
+  if [ "$dup" = 1 ]; then row GAGAL "$N14B" "duplicate=1: APK sampel sudah ada sebagai analisis lain; menolak melanjutkan (analisis milik pemilik TIDAK disentuh)"; return 1; fi
+  if [ "$dup" = 0 ] && is_num "$aid"; then AID="$aid"; fi
+  if [ "$RC" -ne 0 ] || [ "$status" != done ] || [ -z "$AID" ]; then row GAGAL "$N14B" "analisis uji gagal (status=${status:--}): $(err_text)"; return 1; fi
+  bc init "$AID"
+  if [ "$RC" -ne 0 ] || [ "$(lv created)" != 1 ]; then row GAGAL "$N14B" "init harus created=1: $(err_text) created=$(lv created)"; return 1; fi
+  bc diff "$AID"; hb="$(lv diff_sha256)"
+  if [ "$RC" -ne 0 ] || ! is_hex64 "$hb"; then row GAGAL "$N14B" "buildctl diff awal gagal: $(err_text)"; return 1; fi
+  H0B="$hb"
+  atc call "$AID" bench_diff
+  if [ "$RC" -ne 0 ] || [ "$(lv ok)" != 1 ]; then row GAGAL "$N14B" "tool bench_diff gagal: $(atc_why) (bench_mati = kontainer bench bermasalah: make logs)"; return 1; fi
+  if [ "$(lv counts.added)$(lv counts.modified)$(lv counts.removed)" != 000 ] || [ "$(lv jumlah_berubah)" != 0 ]; then
+    row GAGAL "$N14B" "bench_diff awal harus kosong (added=$(lv counts.added) modified=$(lv counts.modified) removed=$(lv counts.removed) jumlah_berubah=$(lv jumlah_berubah))"
+    return 1
+  fi
+  if [ "$(lv diff_sha256)" != "$hb" ]; then row GAGAL "$N14B" "hash bench_diff ($(short "$(lv diff_sha256)")…) beda dari buildctl diff ($(short "$hb")…): tool tidak memakai diff kanonik yang sama"; return 1; fi
+  row OK "$N14B" "analysis_id=$AID (analisis uji kedua) init created=1; bench_diff: 0 perubahan, diff_sha256 $(short "$hb")… sama dengan buildctl diff"
+}
+H0B=""
+step14c() {
+  local n
+  atc call "$AID" request_build
+  if [ "$(lv ok)" != 0 ] || [ "$(lv kode)" != diff_kosong ]; then
+    row GAGAL "$N14C" "request_build dengan diff kosong harus ditolak kode diff_kosong (dapat: $(atc_why))"
+    return 1
+  fi
+  n="$(count_builds "$AID")"
+  if [ "$n" != 0 ]; then row GAGAL "$N14C" "build terbentuk dari diff kosong (jumlah build=${n:--}; harus 0)"; return 1; fi
+  row OK "$N14C" "request_build dengan diff kosong -> ok=0 kode=diff_kosong; tidak ada build tercipta"
+}
+step14d() {
+  local hc
+  M14="VB$(rand_hex)"
+  if ! sed_marker_in "$AID" "$M14"; then row GAGAL "$N14D" "sed lewat shell gagal: $(err_text) exit_code=$(lv exit_code)"; return 1; fi
+  bc diff "$AID"; hc="$(lv diff_sha256)"
+  if [ "$RC" -ne 0 ] || ! is_hex64 "$hc" || [ "$hc" = "$H0B" ]; then row GAGAL "$N14D" "buildctl diff sesudah sed tidak berubah/gagal: $(err_text)"; return 1; fi
+  H14="$hc"
+  atc call "$AID" bench_diff
+  if [ "$RC" -ne 0 ] || [ "$(lv ok)" != 1 ]; then row GAGAL "$N14D" "tool bench_diff gagal: $(atc_why)"; return 1; fi
+  if [ "$(lv counts.modified)" != 1 ] || [ "$(lv counts.added)" != 0 ] || [ "$(lv counts.removed)" != 0 ] || [ "$(lv daftar.1.op)" != M ] || [[ "$(lv daftar.1.path)" != *res/values/strings.xml ]]; then
+    row GAGAL "$N14D" "bench_diff harus tepat satu 'M res/values/strings.xml' (modified=$(lv counts.modified) added=$(lv counts.added) removed=$(lv counts.removed) daftar.1=$(lv daftar.1.op) $(lv daftar.1.path))"
+    return 1
+  fi
+  if [ "$(lv diff_sha256)" != "$H14" ]; then row GAGAL "$N14D" "hash bench_diff ($(short "$(lv diff_sha256)")…) beda dari buildctl diff ($(short "$H14")…)"; return 1; fi
+  row OK "$N14D" "shell nyata mengubah app_name -> $M14; bench_diff: modified=1 'M res/values/strings.xml', diff_sha256 $(short "$H14")… sama dengan buildctl diff"
+}
+step14e() {
+  local b st h
+  atc call "$AID" request_build
+  b="$(lv build_id)"
+  if [ "$RC" -ne 0 ] || [ "$(lv ok)" != 1 ] || ! is_num "$b"; then row GAGAL "$N14E" "request_build gagal: $(atc_why)"; return 1; fi
+  B14="$b"
+  [ "$(lv status)" = awaiting_approval ] || { row GAGAL "$N14E" "status hasil request_build harus awaiting_approval (dapat: $(lv status))"; return 1; }
+  [ "$(lv diff_sha256)" = "$H14" ] || { row GAGAL "$N14E" "hash build ($(short "$(lv diff_sha256)")…) beda dari hash bench_diff 14d ($(short "$H14")…)"; return 1; }
+  bc status "$B14"; st="$(lv status)"; h="$(lv diff_sha256)"
+  if [ "$RC" -ne 0 ] || [ "$st" != awaiting_approval ] || [ "$h" != "$H14" ]; then row GAGAL "$N14E" "buildctl status build $B14 tidak sama: status=${st:--} hash=$(short "$h")…"; return 1; fi
+  atc call "$AID" get_build_status --args "{\"build_id\": $B14}"
+  if [ "$(lv diminta_oleh_ai)" != 1 ]; then row GAGAL "$N14E" "build $B14 tidak tercatat diminta oleh AI (diminta_oleh_ai=$(lv diminta_oleh_ai))"; return 1; fi
+  row OK "$N14E" "request_build -> build $B14 awaiting_approval, hash $(short "$H14")… sama dengan buildctl diff; buildctl status sama; tercatat diminta oleh AI"
+}
+step14f() {
+  local wrong hr n bad="" b2
+  wrong="$([ "${H14:0:1}" = 0 ] && echo 1 || echo 0)${H14:1}"
+  atc call "$AID" request_build --args "{\"diff_sha256\": \"$wrong\"}"
+  if [ "$(lv ok)" != 0 ] || [ "$(lv kode)" != hash_tidak_cocok ]; then bad="$bad; hash model salah harus kode hash_tidak_cocok (dapat: $(atc_why))"; fi
+  atc call "$AID" request_build
+  b2="$(lv build_id)"
+  if [ "$(lv ok)" != 1 ] || [ "$(lv dipakai_ulang)" != 1 ] || [ "$b2" != "$B14" ]; then bad="$bad; permintaan sama saat tertunda harus dipakai_ulang=1 id $B14 (dapat: $(atc_why) dipakai_ulang=$(lv dipakai_ulang) build_id=${b2:--})"; fi
+  if sed_marker_in "$AID" "${M14}b"; then
+    atc call "$AID" request_build
+    if [ "$(lv ok)" != 0 ] || [ "$(lv kode)" != build_tertunda ]; then bad="$bad; perubahan baru saat ada build tertunda harus kode build_tertunda (dapat: $(atc_why))"; fi
+  else
+    bad="$bad; sed kedua lewat shell gagal: $(err_text)"
+  fi
+  # pulihkan ruang kerja ke isi 14d agar build 14e masih cocok dengan diff-nya saat disetujui (14j)
+  if sed_marker_in "$AID" "$M14"; then
+    bc diff "$AID"; hr="$(lv diff_sha256)"
+    [ "$hr" = "$H14" ] || { bad="$bad; ruang kerja tidak kembali ke hash 14d (${hr:0:12}…)"; F14_BAD=1; }
+  else
+    bad="$bad; pemulihan ruang kerja gagal: $(err_text)"; F14_BAD=1
+  fi
+  n="$(count_builds "$AID")"
+  [ "$n" = 1 ] || bad="$bad; jumlah build analisis harus tetap 1 (dapat: ${n:--})"
+  if [ -n "$bad" ]; then row GAGAL "$N14F" "${bad#; }"; return 1; fi
+  row OK "$N14F" "hash model salah -> hash_tidak_cocok; permintaan sama -> dipakai_ulang=1 (id $B14, tanpa baris baru); perubahan baru -> build_tertunda; tetap 1 build; ruang kerja dipulihkan ke hash 14d"
+}
+step14g() {
+  atc call "$AID" get_build_status
+  local bad=""
+  if [ "$RC" -ne 0 ] || [ "$(lv ok)" != 1 ]; then row GAGAL "$N14G" "get_build_status gagal: $(atc_why)"; return 1; fi
+  [ "$(lv status)" = awaiting_approval ] || bad="$bad; status=$(lv status) (harus awaiting_approval)"
+  [ "$(lv artefak_tercatat)" = 0 ] || bad="$bad; artefak_tercatat=$(lv artefak_tercatat) (harus 0)"
+  [ -z "$(lv verifikasi_tanda_tangan)" ] || bad="$bad; verifikasi_tanda_tangan=$(lv verifikasi_tanda_tangan) (harus kosong sebelum build)"
+  [[ "$(lv langkah_pemilik)" == *"buildctl approve"* ]] || bad="$bad; langkah_pemilik tidak memuat 'buildctl approve'"
+  [ "$(lv jangan_klaim_selesai)" = 1 ] || bad="$bad; jangan_klaim_selesai=$(lv jangan_klaim_selesai) (harus 1)"
+  if [ -n "$bad" ]; then row GAGAL "$N14G" "${bad#; }"; return 1; fi
+  row OK "$N14G" "get_build_status: awaiting_approval, artefak_tercatat=0, verifikasi kosong, langkah pemilik memuat buildctl approve, jangan_klaim_selesai=1"
+}
+step14h() {
+  local dup aid status hb b1 m k1 p1 bad=""
+  echo "• langkah 14h: analisis APK uji ketiga (milik 'orang lain') untuk negatif lintas analisis (bisa beberapa menit)…" >&2
+  bc_in analyze - --uniq
+  dup="$(lv duplicate)"; aid="$(lv analysis_id)"; status="$(lv status)"
+  if [ "$dup" = 1 ]; then row GAGAL "$N14H" "duplicate=1: APK sampel sudah ada sebagai analisis lain; menolak melanjutkan"; return 1; fi
+  if [ "$dup" = 0 ] && is_num "$aid"; then X14+=("$aid"); XB14="$aid"; fi
+  if [ "$RC" -ne 0 ] || [ "$status" != done ] || [ -z "$XB14" ]; then row GAGAL "$N14H" "analisis pembanding gagal (status=${status:--}): $(err_text)"; return 1; fi
+  bc init "$XB14"
+  [ "$RC" -eq 0 ] && [ "$(lv created)" = 1 ] || { row GAGAL "$N14H" "init analisis pembanding gagal: $(err_text)"; return 1; }
+  m="VB$(rand_hex)"
+  sed_marker_in "$XB14" "$m" || { row GAGAL "$N14H" "sed analisis pembanding gagal: $(err_text)"; return 1; }
+  bc request "$XB14"
+  b1="$(lv build_id)"; hb="$(lv diff_sha256)"
+  if [ "$RC" -ne 0 ] || ! is_num "$b1" || ! is_hex64 "$hb"; then row GAGAL "$N14H" "buildctl request analisis pembanding gagal: $(err_text)"; return 1; fi
+  atc call "$AID" get_build_status --args "{\"build_id\": $b1}"
+  if [ "$(lv ok)" != 0 ] || [ "$(lv kode)" != build_bukan_milik_analisis ]; then bad="$bad; build analisis lain harus ditolak kode build_bukan_milik_analisis (dapat: $(atc_why))"; fi
+  printf '%s\n' "$OUT" | grep -q -e "$hb" && bad="$bad; keluaran penolakan memuat hash diff milik analisis lain"
+  k1="$(lv pesan)"
+  atc call "$AID" get_build_status --args '{"build_id": 999999999}'
+  p1="$(lv pesan)"
+  if [ "$(lv kode)" != build_bukan_milik_analisis ] || [ "$p1" != "$k1" ]; then bad="$bad; id ngawur harus memberi kode DAN pesan yang IDENTIK dengan id milik analisis lain (tanpa oracle keberadaan)"; fi
+  if [ -n "$bad" ]; then row GAGAL "$N14H" "${bad#; }"; return 1; fi
+  row OK "$N14H" "build $b1 milik analisis $XB14 diminta dari analisis $AID -> build_bukan_milik_analisis tanpa data build itu; id 999999999 -> kode dan pesan identik"
+}
+step14i() {
+  local t bad=""
+  for t in approve_build cancel_build download_artifact; do
+    atc call "$AID" "$t" --args "{\"build_id\": $B14}"
+    if [ "$(lv ok)" != 0 ] || [ "$(lv kode)" != tool_tidak_ada ]; then bad="$bad; tool $t seharusnya tidak ada (dapat: $(atc_why))"; fi
+  done
+  atc call "$AID" bench_diff --shell 0
+  if [ "$(lv ok)" != 0 ] || [ "$(lv kode)" != fitur_nonaktif ]; then bad="$bad; bench_diff dengan shell=0 harus kode fitur_nonaktif (dapat: $(atc_why))"; fi
+  atc call "$AID" request_build --shell 0
+  if [ "$(lv ok)" != 0 ] || [ "$(lv kode)" != fitur_nonaktif ]; then bad="$bad; request_build dengan shell=0 harus kode fitur_nonaktif (dapat: $(atc_why))"; fi
+  # sebelum persetujuan pemilik: semua build analisis uji hanya boleh awaiting_approval/cancelled (tool tidak mengubah status apa pun)
+  PRE14_WHY=""
+  all_builds_in "$AID" awaiting_approval cancelled || PRE14_WHY="build analisis $AID berstatus ${BAD_ST#*:} setelah panggilan tool (harus awaiting_approval/cancelled)"
+  if [ -n "$XB14" ]; then all_builds_in "$XB14" awaiting_approval cancelled || PRE14_WHY="$PRE14_WHY; build analisis $XB14 berstatus ${BAD_ST#*:}"; fi
+  [ -z "$PRE14_WHY" ] || bad="$bad; $PRE14_WHY"
+  if [ -n "$bad" ]; then row GAGAL "$N14I" "${bad#; }"; return 1; fi
+  row OK "$N14I" "approve_build, cancel_build, download_artifact -> tool_tidak_ada; shell=0 -> fitur_nonaktif; semua build uji tetap awaiting_approval setelah semua panggilan tool"
+}
+step14j() {
+  local t0 st="" gl="" why=""
+  echo "• langkah 14j: persetujuan pemilik (CLI) lalu get_build_status sampai selesai (menunggu paling lama ${WAIT_MAX} dtk)…" >&2
+  bc approve "$B14" --diff-sha256 "$H14"
+  if [ "$RC" -ne 0 ] || [ "$(lv enqueued)" != 1 ]; then row GAGAL "$N14J" "buildctl approve gagal atau tidak masuk antrean: $(err_text) enqueued=$(lv enqueued)"; return 1; fi
+  APPROVED_14=1
+  t0=$SECONDS
+  while :; do
+    atc call "$AID" get_build_status --args "{\"build_id\": $B14}"
+    st="$(lv status)"
+    is_final "$st" && break
+    [ -z "$st" ] && [ "$(lv ok)" != 1 ] && break
+    [ $((SECONDS - t0)) -lt "$WAIT_MAX" ] || break
+    sleep 5
+  done
+  if [ "$st" != done ]; then
+    row GAGAL "$N14J" "get_build_status tidak mencapai done (status=${st:--} kode_galat=$(lv kode_galat) pesan=$(lv pesan_galat) petunjuk=$(lv petunjuk)$([ "$(lv ok)" != 1 ] && printf ' tool: %s' "$(atc_why)"))"
+    return 1
+  fi
+  [ "$(lv artefak_tercatat)" = 1 ] || why="artefak_tercatat=$(lv artefak_tercatat) (harus 1)"
+  [ "$(lv verifikasi_tanda_tangan)" = 1 ] || why="$why; verifikasi_tanda_tangan=$(lv verifikasi_tanda_tangan) (harus 1)"
+  [ "$(lv jangan_klaim_selesai)" = 0 ] || why="$why; jangan_klaim_selesai=$(lv jangan_klaim_selesai) (harus 0 saat done)"
+  [ "$(lv source_kind)" = apk ] || why="$why; source_kind=$(lv source_kind) (harus apk)"
+  gl="$(lv diminta_oleh_ai)"
+  [ "$gl" = 1 ] || why="$why; diminta_oleh_ai=$gl (harus 1)"
+  if [ -n "$why" ]; then row GAGAL "$N14J" "${why#; }"; return 1; fi
+  row OK "$N14J" "pemilik menyetujui lewat buildctl approve; get_build_status akhirnya done dalam $((SECONDS - t0)) dtk: artefak_tercatat=1, verifikasi_tanda_tangan=1, source_kind=apk"
+}
+step14k() {
+  local dup aid status m b
+  if [ -z "$BT" ] || [ ! -f "$BT/sampel.xapk" ]; then row DILEWATI "$N14K" "dilewati: sampel XAPK tidak tersedia (langkah 12a)"; return 0; fi
+  echo "• langkah 14k: analisis paket XAPK uji (bisa beberapa menit)…" >&2
+  bc_file "$BT/sampel.xapk" analyze - --uniq --name "vb-sampel-tool.xapk"
+  dup="$(lv duplicate)"; aid="$(lv analysis_id)"; status="$(lv status)"
+  if [ "$dup" = 1 ]; then row GAGAL "$N14K" "duplicate=1: paket sampel sudah ada sebagai analisis lain; menolak melanjutkan"; return 1; fi
+  if [ "$dup" = 0 ] && is_num "$aid"; then X14+=("$aid"); XBUILD14="$aid"; fi
+  if [ "$RC" -ne 0 ] || [ "$status" != done ] || [ -z "$XBUILD14" ]; then row GAGAL "$N14K" "analisis paket gagal (status=${status:--}): $(err_text)"; return 1; fi
+  bc init "$XBUILD14"
+  [ "$RC" -eq 0 ] && [ "$(lv created)" = 1 ] || { row GAGAL "$N14K" "init paket gagal: $(err_text)"; return 1; }
+  m="VB$(rand_hex)"
+  sed_marker_in "$XBUILD14" "$m" || { row GAGAL "$N14K" "sed pada paket gagal: $(err_text)"; return 1; }
+  atc call "$XBUILD14" request_build
+  b="$(lv build_id)"
+  if [ "$RC" -ne 0 ] || [ "$(lv ok)" != 1 ] || [ "$(lv status)" != awaiting_approval ] || ! is_num "$b"; then row GAGAL "$N14K" "request_build pada paket gagal: $(atc_why)"; return 1; fi
+  [ "$(lv source_kind)" = xapk ] || { row GAGAL "$N14K" "source_kind permintaan harus xapk (dapat: $(lv source_kind))"; return 1; }
+  atc call "$XBUILD14" get_build_status --args "{\"build_id\": $b}"
+  if [ "$(lv source_kind)" != xapk ] || [ "$(lv status)" != awaiting_approval ]; then row GAGAL "$N14K" "get_build_status paket: source_kind=$(lv source_kind) status=$(lv status) (harus xapk awaiting_approval)"; return 1; fi
+  bc cancel "$b"
+  row OK "$N14K" "analisis paket XAPK $XBUILD14: request_build -> build $b awaiting_approval source_kind=xapk; get_build_status sama; dibatalkan oleh pemilik (buildctl cancel), tidak disetujui"
+}
+step14l() {
+  local pat bad="" name sha cert
+  for pat in "/data/" "secrets" "keystore" ".p12" ".jks" "signing_" "signwork" "://"; do
+    printf '%s' "$ATC_ALL" | grep -q -F -- "$pat" && bad="$bad; pola:$pat"
+  done
+  if [ -n "$B14" ] && [ "$APPROVED_14" = 1 ]; then
+    bc status "$B14"
+    name="$(lv output_name)"; sha="$(lv output_sha256)"; cert="$(lv cert_sha256)"
+    [ -n "$name" ] && printf '%s' "$ATC_ALL" | grep -q -F -- "$name" && bad="$bad; pola:output_name"
+    [ -n "$sha" ] && printf '%s' "$ATC_ALL" | grep -q -F -- "$sha" && bad="$bad; pola:output_sha256"
+    [ -n "$cert" ] && printf '%s' "$ATC_ALL" | grep -q -F -- "$cert" && bad="$bad; pola:cert_sha256"
+  fi
+  if [ -n "$bad" ]; then row GAGAL "$N14L" "keluaran tool memuat pola terlarang (nilai tidak dicetak):${bad}"; return 1; fi
+  row OK "$N14L" "seluruh keluaran aitoolcheck 14a-14k bebas dari path volume data, kata secrets/keystore/.p12/.jks/signing_/signwork, tautan URL, dan nilai artefak (output_name, output_sha256, cert_sha256 dari buildctl status)"
+}
+step14m() {
+  local bad="" want id n via
+  if [ -n "$PRE14_WHY" ]; then bad="$bad; sebelum persetujuan pemilik: $PRE14_WHY"; fi
+  atc audit-approvals "$AID"
+  want="$APPROVED_14"
+  n="$(lv approved_n)"; via="$(lv approved_via.1)"
+  if [ "$RC" -ne 0 ] || [ "$n" != "$want" ]; then bad="$bad; audit build_approved analisis $AID = ${n:--} (harus $want = jumlah buildctl approve yang dijalankan skrip)"; fi
+  if [ "$want" = 1 ] && [ "$via" != cli ]; then bad="$bad; persetujuan tercatat via='${via:--}' (harus cli: hanya pemilik)"; fi
+  for id in $XB14 $XBUILD14; do
+    atc audit-approvals "$id"
+    [ "$(lv approved_n)" = 0 ] || bad="$bad; analisis $id tercatat punya persetujuan (approved_n=$(lv approved_n)); skrip tidak menyetujui apa pun di sana"
+  done
+  if [ -n "$bad" ]; then row GAGAL "$N14M" "${bad#; }"; return 1; fi
+  row OK "$N14M" "tool tidak pernah mengubah status build; audit build_approved untuk analisis uji = $want, via=cli (dilakukan skrip sebagai pemilik); analisis pembanding dan paket tanpa persetujuan"
+}
+step14n() {
+  cleanup_extras
+  cleanup_aid
+  if [ -n "$AID" ] || [ "${#X14[@]}" -gt 0 ]; then
+    row GAGAL "$N14N" "${CLEAN_NOTE:-analisis uji langkah 14 tertinggal (aid=${AID:-})}"
+    return 1
+  fi
+  row OK "$N14N" "build uji dibatalkan, ditunggu, lalu semua analisis uji langkah 14 dihapus"
+}
+step_aitools() { # Tahap 4: 14a..14n; berantai: gagal di 14a/14b/14c/14d/14e menghentikan sisanya (DILEWATI), 14n selalu dijalankan bila ada yang dibuat
+  if ! step14a; then halt14 N14B N14N "dilewati: prasyarat tool build (langkah 14a) gagal"; return; fi
+  if [ -n "$AID" ]; then
+    halt14 N14B N14N "dilewati: analisis uji aid=$AID masih ada (lihat baris kebersihan); langkah 14 butuh analisis kosong"
+    return
+  fi
+  if ! step14b; then halt14 N14C N14M "dilewati: analisis uji/bench_diff awal (langkah 14b) gagal"; step14n; return; fi
+  if ! step14c; then halt14 N14D N14M "dilewati: request diff kosong (langkah 14c) gagal"; step14n; return; fi
+  if ! step14d; then halt14 N14E N14M "dilewati: ubah via shell (langkah 14d) gagal"; step14n; return; fi
+  if ! step14e; then halt14 N14F N14M "dilewati: request_build (langkah 14e) gagal"; step14n; return; fi
+  step14f
+  step14g
+  step14h
+  step14i
+  if [ "$S6_OK" != 1 ]; then
+    row DILEWATI "$N14J" "dilewati: build nyata langkah 6 tidak OK (jalur runner/signer tidak sehat)"
+  elif [ -n "$F14_BAD" ]; then
+    row DILEWATI "$N14J" "dilewati: ruang kerja tidak kembali ke hash 14d (langkah 14f)"
+  else
+    step14j
+  fi
+  step14k
+  step14l
+  step14m
+  step14n
+}
 run_all() {
   step1 || { halt_from N2 "dilewati: prasyarat (langkah 1) gagal"; return; }
   step2 || { halt_from N3 "dilewati: analisis uji tidak tersedia (langkah 2)"; return; }
   step3 || { halt_from N4 "dilewati: bench/diff dasar gagal (langkah 3)"; return; }
   step4 || { halt_from N5 "dilewati: perubahan string via shell gagal (langkah 4)"; return; }
   step5
+  S6_OK=0
   if step6; then
+    S6_OK=1
     step7
     step7b
     if [ "$ART_OK" = 1 ]; then
@@ -1190,6 +1554,7 @@ run_all() {
   step11
   step12
   step_bundles
+  step_aitools
   if [ -n "$BIG_MB" ]; then
     row INFO "BIG_MB uji APK besar" "BIG_MB=$BIG_MB dicatat; pipeline build tidak menguji APK besar di sini — uji besar signer: BIG_MB=$BIG_MB make signer-verify"
   fi
