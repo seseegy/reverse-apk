@@ -7,7 +7,7 @@
 
 {% block header %}{% include "_header.html" %}{% endblock %}
 
-{#- Layar persetujuan (FR-9.18/9.40). Path berkas, galat, dan log berasal dari APK/AI: tak tepercaya, selalu di-escape (tanpa |safe). -#}
+{#- Layar persetujuan (FR-9.18/9.40). Path berkas, galat, dan log berasal dari APK/AI: tak tepercaya, selalu di-escape (tanpa filter safe). -#}
 {% block content %}
 <div class="container page container-wide"{% if poll_url %} data-build-poll="{{ poll_url }}" data-build-status="{{ b.status }}"{% endif %}>
   <a class="back-link" href="/analyses/{{ an.id }}/build">{{ icon('arrow-left', 16) }}<span>Semua build</span></a>

@@ -42,7 +42,7 @@ def test_analysis_tab_labels(client, seeded):
     # Tab bisa membawa lencana angka (Berkas 3) atau teks bantu pembaca layar (Percakapan "(asisten sedang bekerja)"):
     # yang diperiksa hanya nama tabnya, di awal teks.
     labels = [re.sub(r"<[^>]+>|\s+", " ", t).strip() for t in re.findall(r"<a[^>]*>(.*?)</a>", nav, re.S)]
-    expected = ["Ringkasan", "Temuan", "Jaringan", "Kode", "Percakapan", "Berkas", "Manifes"]
+    expected = ["Ringkasan", "Temuan", "Jaringan", "Kode", "Percakapan", "Berkas", "Manifes", "Build"]
     assert len(labels) == len(expected) and all(l == n or l.startswith(n + " ") for l, n in zip(labels, expected)), labels
 
 

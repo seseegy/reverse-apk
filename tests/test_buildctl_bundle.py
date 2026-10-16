@@ -99,7 +99,7 @@ def test_artifact_info_bundle_menampilkan_split_hash_ukuran_verifikasi_dan_skrip
     assert r["skrip_lokasi"] == f"builds/{aid}/{bid}/{meta['script_name']}"
     assert r["sertifikat"].startswith("sama") and r["cert_sha256"] == sha(b"cert")
     assert "100%" in r["batas"] and "Play Integrity" in r["batas"] and "anti-tamper" in r["batas"]
-    assert "tautan" in r["unduh"]
+    assert "tab Build" in r["unduh"] and "di-hash ulang" in r["unduh"]
 
 
 def test_artifact_info_apks_nama_entri_dari_paket(ctl, env):
@@ -171,7 +171,7 @@ def test_status_bundle_menampilkan_format_skrip_peringatan_dan_batas(ctl, env):
     assert r.code == 0 and r["source_kind"] == "xapk" and r["output_format"] == "xapk", r.text
     assert r["install_script"] == meta["script_name"] and r["install_script_lokasi"] == f"builds/{aid}/{bid}/{meta['script_name']}"
     assert r["peringatan"] == "versi_split_beda,entri_dibuang=2"
-    assert "100%" in r["batas"] and "tautan" in r["unduh"]
+    assert "100%" in r["batas"] and "tab Build" in r["unduh"]
     assert_wellformed(r)
 
 

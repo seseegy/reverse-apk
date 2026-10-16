@@ -153,6 +153,38 @@ sys.exit(0)
 '''
 
 
+# aapt2 PALSU (Tahap 5, badging): keluaran bentuk `aapt2 dump badging`, perilaku diatur lewat REC/aapt.json (mode ok|nopackage|fail|sleep|flood).
+BADGING_TEXT = ("package: name='com.contoh.app' versionCode='7' versionName='1.2.3' platformBuildVersionName='14' platformBuildVersionCode='34' compileSdkVersion='34'\n"
+                "sdkVersion:'21'\ntargetSdkVersion:'34'\nuses-permission: name='android.permission.INTERNET'\nlaunchable-activity: name='com.contoh.Main'\n")
+FAKE_AAPT2 = r'''#!@PY@
+import json, os, sys, time
+REC = @REC@
+try:
+    beh = json.load(open(os.path.join(REC, "aapt.json")))
+except OSError:
+    beh = {}
+with open(os.path.join(REC, "aapt_calls.jsonl"), "a") as fh:
+    fh.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "env": dict(os.environ), "apk_exists": os.path.isfile(sys.argv[-1])}) + "\n")
+mode = beh.get("mode", "ok")
+if mode == "fail":
+    sys.stderr.write("aapt2: error: gagal membuka\n")
+    sys.exit(1)
+if mode == "sleep":
+    time.sleep(300)
+text = beh.get("text", @TEXT@)
+if mode == "nopackage":
+    text = "sdkVersion:'21'\n"
+sys.stdout.write(text)
+sys.stdout.flush()
+if mode == "flood":
+    line = ("uses-permission: name='" + "x" * 200 + "'\n").encode()
+    out = sys.stdout.buffer
+    for _ in range(40000):
+        out.write(line)
+    out.flush()
+'''
+
+
 def load_daemon(monkeypatch, data: Path, **env):
     monkeypatch.setenv("DATA_DIR", str(data))
     monkeypatch.setenv("TOOL_HOME_ROOT", str(data.parent / "toolhome"))
@@ -184,6 +216,8 @@ def rig(tmp_path, monkeypatch):
         p.mkdir()
     (bindir / "apktool").write_text(FAKE_APKTOOL.replace("@PY@", sys.executable).replace("@REC@", repr(str(rec))))
     (bindir / "apktool").chmod(0o755)
+    (bindir / "aapt2").write_text(FAKE_AAPT2.replace("@PY@", sys.executable).replace("@REC@", repr(str(rec))).replace("@TEXT@", repr(BADGING_TEXT)))
+    (bindir / "aapt2").chmod(0o755)
     layout = Layout(data)
     base = mktree(layout.base_tree(AID), BASE_FILES)
     project = mktree(layout.project_dir(AID), {**BASE_FILES, **EDIT})
@@ -194,10 +228,12 @@ def rig(tmp_path, monkeypatch):
     spool.ensure_dirs()
     env = buildstage.Env(layout=layout, spool=spool, stop=threading.Event(), home_root=tmp_path / "toolhome", kill_group=daemon.kill_group, sweep_group=daemon.sweep_group,
                          pump_output=daemon.pump_output, max_output_bytes=3 * 1024 ** 3, max_output_files=600000, say=lambda m: None,
-                         path_env=f"{bindir}:/usr/bin:/bin", tick=0.05, heartbeat_every=0.05, output_check_every=0.05)
+                         path_env=f"{bindir}:/usr/bin:/bin", tick=0.05, heartbeat_every=0.05, output_check_every=0.05, aapt2=str(bindir / "aapt2"))
     r = SimpleNamespace(tmp=tmp_path, data=data, rec=rec, bin=bindir, layout=layout, base=base, project=project, build_dir=build_dir, daemon=daemon, spool=spool, env=env)
     r.diff = lambda: treediff.compute_diff(base, project).diff_sha256
     r.behave = lambda **kw: (rec / "behavior.json").write_text(json.dumps(kw))
+    r.aapt = lambda **kw: (rec / "aapt.json").write_text(json.dumps(kw))
+    r.aapt_calls = lambda: [json.loads(ln) for ln in (rec / "aapt_calls.jsonl").read_text().splitlines()] if (rec / "aapt_calls.jsonl").exists() else []
     r.req = lambda **over: BuildRequest(over.pop("aid", AID), over.pop("bid", BID), over.pop("diff", None) or r.diff(), over.pop("sha", G), over.pop("timeout", 60))
     r.job_id = "a5-build-abcdef12"
     r.run = lambda **over: buildstage.run(env, r.job_id, r.req(**over))
@@ -1150,3 +1186,86 @@ def test_runner_selftest_mount_section_is_static_correct():
     assert "# 7. Mount tahap build" in SELFTEST_SRC and SELFTEST_SRC.index("# 7. Mount tahap build") > SELFTEST_SRC.index("# 6c.")
     assert 'FORBIDDEN_VOLUMES = ("benchspool", "signspool", "signwork", "files", "db")' in SELFTEST_SRC
     assert SELFTEST_SRC.rstrip().endswith("sys.exit(1 if failed else 0)")
+
+
+# ======================================================================================== badging (Tahap 5; FR-9.24 / FR-9.41)
+REAL_BADGING = """package: name='com.contoh.app' versionCode='7' versionName='1.2.3' platformBuildVersionName='14' platformBuildVersionCode='34' compileSdkVersion='34' compileSdkVersionCodename='14'
+sdkVersion:'21'
+targetSdkVersion:'34'
+uses-permission: name='android.permission.INTERNET'
+application-label:'Contoh'
+"""
+
+
+def test_parse_badging_text_reads_package_versions_and_sdk_levels():
+    got = buildstage.parse_badging_text(REAL_BADGING)
+    assert got == {"package": "com.contoh.app", "version_code": 7, "version_name": "1.2.3", "min_sdk": 21, "target_sdk": 34}
+
+
+def test_parse_badging_text_prefers_min_sdk_version_and_tolerates_preview_codenames_and_missing_lines():
+    text = "package: name='a.b' versionCode='1'\nsdkVersion:'21'\nminSdkVersion:'24'\ntargetSdkVersion:'VanillaIceCream'\n"
+    got = buildstage.parse_badging_text(text)
+    assert got["min_sdk"] == 24 and got["target_sdk"] is None and got["version_name"] == ""
+    assert buildstage.parse_badging_text("sdkVersion:'21'\n") is None
+    assert buildstage.parse_badging_text("package: versionCode='1'\n") is None, "tanpa name"
+    assert buildstage.parse_badging_text("") is None
+
+
+def test_parse_badging_text_bounds_field_lengths_and_numbers():
+    text = "package: name='" + "p" * 5000 + "' versionCode='99999999999999999999' versionName='" + "v" * 5000 + "'\n"
+    got = buildstage.parse_badging_text(text)
+    assert len(got["package"]) == buildstage.BADGING_FIELD_MAX and len(got["version_name"]) == buildstage.BADGING_FIELD_MAX and got["version_code"] is None
+
+
+def test_successful_build_reports_badging_from_aapt2_on_the_unsigned_apk(rig):
+    res = rig.run()
+    assert res["status"] == "ok"
+    assert res["badging"] == {"package": "com.contoh.app", "version_code": 7, "version_name": "1.2.3", "min_sdk": 21, "target_sdk": 34}
+    (call,) = rig.aapt_calls()
+    unsigned = str(rig.build_dir / "unsigned.apk")
+    assert call["argv"] == ["dump", "badging", unsigned] and call["apk_exists"] is True
+    assert call["cwd"] == str(rig.tmp / "toolhome" / rig.job_id) and call["env"]["HOME"] == call["cwd"]
+    assert set(call["env"]) <= {"PATH", "HOME", "LANG", "LC_CTYPE"}, "environment minimal"
+    parsed = buildproto.parse_build_result(res)
+    assert parsed["ok"] and parsed["badging"]["package"] == "com.contoh.app" and rig.names() == ["build.log", "unsigned.apk"]
+
+
+def test_aapt2_is_not_run_when_the_build_failed(rig):
+    rig.behave(mode="fail")
+    res = rig.run()
+    assert res["status"] == "failed" and rig.aapt_calls() == []
+
+
+@pytest.mark.parametrize("mode", ["fail", "nopackage"])
+def test_unreadable_badging_is_null_and_does_not_fail_the_runner_stage(rig, mode):
+    rig.aapt(mode=mode)
+    res = rig.run()
+    assert res["status"] == "ok" and res["badging"] is None, "worker yang memutuskan (FR-9.24); runner hanya melapor"
+    assert buildproto.parse_build_result(res)["badging"] is None
+
+
+def test_missing_aapt2_binary_gives_null_badging(rig):
+    rig.env.aapt2 = str(rig.tmp / "tidak-ada" / "aapt2")
+    res = rig.run()
+    assert res["status"] == "ok" and res["badging"] is None
+
+
+def test_hanging_aapt2_is_killed_at_the_badging_timeout(rig, monkeypatch):
+    monkeypatch.setattr(buildstage, "BADGING_TIMEOUT", 0.6)
+    rig.aapt(mode="sleep")
+    t0 = time.monotonic()
+    res = rig.run()
+    assert res["status"] == "ok" and res["badging"] is None and time.monotonic() - t0 < 20
+
+
+def test_flooding_aapt2_output_is_capped_and_still_parsed_from_the_head(rig, monkeypatch):
+    monkeypatch.setattr(buildstage, "BADGING_MAX_BYTES", 64 * 1024)
+    rig.aapt(mode="flood")
+    res = rig.run()
+    assert res["status"] == "ok" and res["badging"]["package"] == "com.contoh.app"
+    assert len(json.dumps(res).encode()) < buildproto.RESULT_MAX_BYTES
+
+
+def test_default_aapt2_is_the_pinned_rootfs_copy_not_the_runner_writable_tmpfs():
+    env_default = buildstage.Env.__dataclass_fields__["aapt2"].default_factory()
+    assert env_default == os.environ.get("AAPT2_PATH", "/opt/apktool/aapt2") and "/opt/aapt-exec" not in env_default
