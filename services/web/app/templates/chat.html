@@ -25,7 +25,7 @@
   {% else %}
   <section class="chat-app" data-chat data-analysis-id="{{ an.id }}" data-csrf="{{ csrf }}"
            data-session-id="{{ session_id or '' }}" data-ready="{{ 'true' if has_index else 'false' }}"
-           data-max-file="{{ file_limits.max_file_bytes }}" data-default-model="{{ models[0].slug if models else '' }}"
+           data-max-file="{{ file_limits.max_file_bytes }}" data-default-model="{{ models[0].slug if models else '' }}" data-continue-text="{{ continue_text }}"
            {% if resume_stream %}data-resume-stream="{{ resume_stream }}" data-resume-model="{{ resume_model }}" data-resume-elapsed="{{ resume_elapsed }}"{% endif %}>
 
     <aside class="chat-side">
@@ -54,7 +54,16 @@
           <span class="muted">/ <span data-b-limit>{{ budget.today_limit|num(None) if budget.today_limit else '∞' }}</span> kredit</span></div>
         {% if budget.today_limit %}
         <div class="meter{% if pct >= 90 %} is-bad{% elif pct >= 70 %} is-warn{% endif %}" data-b-meter aria-hidden="true"><span data-b-bar data-pct="{{ [pct, 100]|min|round(1) }}"></span></div>
+        <div class="budget-line hint">Sisa hari ini <span class="muted mono"><span data-b-today-left>{{ budget.today_remaining|num(3) }}</span> kredit</span></div>
         {% endif %}
+        {# Anggaran SESI (Tahap 6): selalu ada barisnya bila batas sesi diisi, supaya JS bisa menampilkannya begitu sesi pertama terbentuk. #}
+        {% if budget.session_limit %}
+        <div class="budget-line" data-b-session-row>Anggaran sesi ini
+          <span class="muted mono"><span data-b-session>{{ (budget.session or 0)|num(3) }}</span> / <span data-b-session-limit>{{ budget.session_limit|num(None) }}</span> kredit</span></div>
+        <div class="meter{% if budget.session_pct >= 90 %} is-bad{% elif budget.session_pct >= 70 %} is-warn{% endif %}" data-b-session-meter aria-hidden="true"><span data-b-session-bar data-pct="{{ budget.session_pct }}"></span></div>
+        <div class="budget-line hint">Sisa sesi <span class="muted mono"><span data-b-session-left>{{ (budget.session_remaining if budget.session_remaining is not none else budget.session_limit)|num(3) }}</span> kredit</span></div>
+        {% endif %}
+        <p class="budget-warn" data-b-warn role="status" {% if not budget.warn and not budget.daily_exhausted and not budget.session_exhausted %}hidden{% endif %}>{% if budget.daily_exhausted %}Anggaran harian habis. Naikkan AI_DAILY_BUDGET_CREDITS atau tunggu besok.{% elif budget.session_exhausted %}Anggaran sesi habis. Mulai sesi baru atau naikkan AI_SESSION_BUDGET_CREDITS.{% elif budget.warn == 'session' %}Anggaran sesi ini hampir habis (80% atau lebih).{% elif budget.warn == 'today' %}Anggaran harian hampir habis (80% atau lebih).{% endif %}</p>
         {% endif %}
       </div>
       <p class="muted hint">Potongan kode yang Anda tanyakan dikirim ke provider AI. Secret diredaksi lebih dulu
@@ -94,6 +103,13 @@
           {% endif %}
           <div class="msg-body" data-md data-citations='{{ m.citations|tojson|forceescape }}'>{{ m.content }}</div>
           {% if m.outputs %}<div class="fcards" aria-label="Berkas yang dibuat asisten">{% for f in m.outputs %}{{ fcard(f) }}{% endfor %}</div>{% endif %}
+          {# Kartu "berhenti karena batas" (Tahap 6): teks dari server; tombol Lanjutkan HANYA bila batasnya pulih di giliran baru (anggaran/build per sesi: tanpa tombol). #}
+          {% if stop_card and stop_card.note and loop.last and m.role == 'assistant' %}
+          <div class="msg-note stop-card" data-stop-card data-stopped="{{ stop_card.stopped }}" role="status">
+            <span>{{ stop_card.note }}</span>
+            {% if stop_card.can_continue %}<button type="button" class="btn btn-ghost btn-sm" data-continue>Lanjutkan</button>{% endif %}
+          </div>
+          {% endif %}
         </article>
         {% endfor %}
       </div>

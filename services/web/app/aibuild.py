@@ -223,7 +223,7 @@ def _requested(row: Any, reused: bool, counts: dict[str, int] | None) -> dict[st
 
 
 def request(scope: Scope, expected_sha256: object, redactor: Redactor | None = None, *, build_requests: int = 0,
-            count_bench: Callable[[], None] | None = None) -> dict[str, Any]:
+            count_bench: Callable[[], None] | None = None, before_create: Callable[[], None] | None = None) -> dict[str, Any]:
     """Ajukan build dari diff SAAT INI (status `awaiting_approval`). Urutan fail-closed, murah dulu:
     gerbang -> argumen -> analisis/apktool/source_kind -> tolak murah bila ada build aktif non-awaiting (tanpa bench) -> hitung ulang diff dari bench ->
     kosong / baseline rusak / hash model beda -> pakai ulang awaiting berhash sama atau tolak -> batas 1 build baru per giliran -> `store.create_build`.
@@ -260,6 +260,8 @@ def request(scope: Scope, expected_sha256: object, redactor: Redactor | None = N
         raise _tertunda(active)
     if build_requests >= 1:
         raise BuildScopeError("batas_giliran")
+    if before_create is not None:
+        before_create()                 # batas per SESI (Tahap 6): hanya untuk build yang benar-benar akan dibuat; melempar galat tool sendiri
     summary = build_summary(diff)
     with closing(scope.db()) as conn:
         try:

@@ -43,6 +43,11 @@ def _int(name: str, default: int, lo: int = 1, hi: int = 10**6) -> int:
 # Batas TOTAL hasil tool per giliran. 0 = TANPA BATAS (bawaan). Isi AI_MAX_TURN_TOOL_CHARS bila ingin membatasi: tiap langkah agent
 # mengirim ulang SEMUA hasil sebelumnya, jadi total yang besar membuat permintaan makin besar dan bisa melewati konteks model.
 DEFAULT_TURN_TOOL_CHARS = 0
+# Batas alur bengkel (PRD 09 FR-9.36). Bawaan sengaja terbatas (berbeda dengan AI_MAX_TURN_TOOL_CHARS): shell memakai waktu nyata dan keluarannya mengisi konteks.
+# 900 dtk = 15 menit shell per giliran (satu perintah maksimum 120 dtk); 400.000 karakter ≈ 33 keluaran penuh (12.000) ≈ 100 ribu token; 5 build baru per sesi.
+DEFAULT_SHELL_SECONDS_PER_TURN = 900
+DEFAULT_SHELL_TURN_OUTPUT_CHARS = 400_000
+DEFAULT_BUILD_MAX_PER_SESSION = 5
 
 
 @dataclass(frozen=True)
@@ -77,6 +82,12 @@ class AIConfig:
     shell_max_timeout_s: int = 120            # batas atas yang boleh diminta AI
     shell_max_calls_per_turn: int = 200       # jumlah perintah per giliran (0 = tanpa batas)
     shell_max_output_chars: int = 12000       # keluaran per perintah yang dikirim kembali ke model (setelah redaksi)
+    # Batas per GILIRAN untuk alur bengkel (FR-9.36), selain jumlah perintah di atas. Semuanya 0 = tanpa batas. Melewati batas = hasil tool galat yang jelas bagi model
+    # (bukan exception), lalu giliran berhenti rapi dengan ringkasan dan UI menawarkan "Lanjutkan" (stopped = shell_budget).
+    shell_max_seconds_per_turn: int = DEFAULT_SHELL_SECONDS_PER_TURN        # total WAKTU semua perintah shell dalam satu giliran
+    shell_max_turn_output_chars: int = DEFAULT_SHELL_TURN_OUTPUT_CHARS      # total KELUARAN shell (setelah redaksi dan pemotongan) yang dikirim ke model dalam satu giliran
+    # Batas per SESI chat: jumlah permintaan build BARU oleh AI (permintaan yang dipakai ulang tidak dihitung). 0 = tanpa batas. Melewati batas = tool galat `batas_sesi` (stopped = build_limit).
+    build_max_per_session: int = DEFAULT_BUILD_MAX_PER_SESSION
     shell_spool_dir: str = "/data/benchspool"
     # Jaringan untuk shell AI (menguji API). Kosong = TANPA jaringan. Isi: host (api.contoh.com), subdomain (*.contoh.com), atau * (semua host PUBLIK;
     # alamat internal selalu ditolak oleh proxy egress).
@@ -167,6 +178,9 @@ def load_ai_config() -> AIConfig:
         shell_max_timeout_s=_int("AI_SHELL_MAX_TIMEOUT", 120, 1, 3600),
         shell_max_calls_per_turn=_int("AI_SHELL_MAX_CALLS_PER_TURN", 200, 0, 100_000),
         shell_max_output_chars=_int("AI_SHELL_MAX_OUTPUT_CHARS", 12000, 500, 1_000_000),
+        shell_max_seconds_per_turn=_int("AI_SHELL_MAX_SECONDS_PER_TURN", DEFAULT_SHELL_SECONDS_PER_TURN, 0, 86_400),
+        shell_max_turn_output_chars=_int("AI_SHELL_MAX_TURN_OUTPUT_CHARS", DEFAULT_SHELL_TURN_OUTPUT_CHARS, 0, 1_000_000_000),
+        build_max_per_session=_int("AI_BUILD_MAX_PER_SESSION", DEFAULT_BUILD_MAX_PER_SESSION, 0, 1000),
         shell_spool_dir=os.environ.get("AI_SHELL_SPOOL", "/data/benchspool").strip() or "/data/benchspool",
         shell_net_allow=_net_allow(os.environ.get("AI_SHELL_NET_ALLOW", "")),
         shell_net_ports=_net_ports(os.environ.get("AI_SHELL_NET_PORTS", "443")),
