@@ -103,7 +103,7 @@ class Scope:
     poll: float = 0.1
 
 
-def _gate(scope: Scope) -> None:
+def check_gate(scope: Scope) -> None:
     sid = scope.session_id
     if scope.enabled is not True or type(sid) is not int or not 1 <= sid <= MAX_PROTO_ID:
         raise BuildScopeError("fitur_nonaktif")
@@ -181,7 +181,7 @@ _BENCH_STATUS = {shellspool.STATUS_FAILED: "bench_mati", shellspool.STATUS_TIMEO
 def current_diff(scope: Scope) -> dict[str, Any]:
     """Diff kanonik `project/` terhadap baseline untuk analisis di `scope`, DIHITUNG ULANG dari bench (tidak ada hash yang dipercaya dari luar). Hasil dinormalkan oleh
     `shellspool.parse_diff_result`. Ruang kerja belum init / bench mati / hasil rusak -> BuildScopeError (fail closed)."""
-    _gate(scope)
+    check_gate(scope)
     try:
         res = shellspool.run_op(scope.spool, shellspool.build_diff_request(scope.analysis_id), shellspool.parse_diff_result, cancel=scope.cancel,
                                 pickup_timeout=scope.pickup_timeout, poll=scope.poll)
@@ -228,7 +228,7 @@ def request(scope: Scope, expected_sha256: object, redactor: Redactor | None = N
     gerbang -> argumen -> analisis/apktool/source_kind -> tolak murah bila ada build aktif non-awaiting (tanpa bench) -> hitung ulang diff dari bench ->
     kosong / baseline rusak / hash model beda -> pakai ulang awaiting berhash sama atau tolak -> batas 1 build baru per giliran -> `store.create_build`.
     `expected_sha256` (opsional, dari model) hanya pembanding. `build_requests` = jumlah build baru yang sudah dibuat pada giliran ini (dihitung pemanggil)."""
-    _gate(scope)
+    check_gate(scope)
     if expected_sha256 is not None and (type(expected_sha256) is not str or not HEX64_RE.fullmatch(expected_sha256)):
         raise BuildScopeError("argumen_tidak_valid")
     aid = scope.analysis_id
@@ -315,7 +315,7 @@ def _status_dict(row: Any, redactor: Redactor | None) -> dict[str, Any]:
 def status(scope: Scope, build_id: object, redactor: Redactor | None = None) -> dict[str, Any]:
     """Status satu build milik analisis ini (hanya membaca). `build_id` None -> build aktif, lalu build terbaru; analisis tanpa build -> sukses `ada_build=False`.
     `build_id` diisi -> harus bilangan bulat murni 1..MAX_PROTO_ID dan milik analisis ini; tak ada / milik analisis lain -> galat IDENTIK (tanpa oracle keberadaan)."""
-    _gate(scope)
+    check_gate(scope)
     if build_id is not None and (type(build_id) is not int or not 1 <= build_id <= MAX_PROTO_ID):
         raise BuildScopeError("argumen_tidak_valid")
     with closing(scope.db()) as conn:

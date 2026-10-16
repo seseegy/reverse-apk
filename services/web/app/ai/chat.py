@@ -136,6 +136,7 @@ def run_in_thread(turn: Turn, *, cfg: AIConfig, prices: PriceTable, analysis_id:
                 uid = store.add_chat_message(conn, session_id, "user", user_text)
                 attached = [dict(f) for f in store.attach_uploads(conn, uid, analysis_id, attachment_ids or [])]
             ctx = T.ToolContext(analysis_id, work, cfg, db, Redactor(cfg.redact_secrets), files=files, cancel=turn.cancel)
+            ctx.session_id = session_id      # dari parameter yang diberikan rute chat (sesi milik analisis ini), BUKAN dari model; tool build menolak bila None
             if cfg.shell_enabled:
                 # sha256 APK untuk $APK di bench: dibaca dari DB (BUKAN dari pesan atau argumen model), hanya bila shell menyala.
                 with closing(db()) as conn:
