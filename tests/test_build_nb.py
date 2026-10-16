@@ -12,6 +12,7 @@ import ast
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -175,8 +176,9 @@ def test_ai_tools_registry_is_unchanged_and_has_nothing_about_approve_build_or_s
     from app.ai import tools
     assert set(tools.TOOLS) == {"class_info", "edit_file", "find_callees", "find_paths", "find_xrefs", "get_class", "get_findings", "get_manifest", "get_method",
                                 "get_overview", "list_classes", "list_dir", "list_files", "list_packages", "list_strings", "read_file", "search_code", "shell_run",
-                                "view_image", "write_file"}
-    assert not [k for k in tools.TOOLS if any(w in k for w in ("approve", "build", "sign", "download", "init", "diff"))]
+                                "view_image", "write_file", "bench_diff", "request_build", "get_build_status"}
+    assert not [k for k in tools.TOOLS if re.search(r"approve|sign|download|cancel|delete|artifact|init", k)]
+    assert {k for k in tools.TOOLS if "build" in k or "diff" in k} == {"bench_diff", "request_build", "get_build_status"}
 
 
 def test_no_ai_module_imports_builds_buildctl_or_enqueue_build():

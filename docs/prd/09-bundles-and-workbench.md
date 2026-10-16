@@ -1,6 +1,6 @@
 # 09 — Paket multi-APK & bengkel modifikasi
 
-> **Status: Bagian A (XAPK/APKS) dan Bagian C (shell AI) SEBAGIAN SUDAH ADA; Bagian B (membangun & menandatangani APK) baru sampai FONDASI + DAEMON PENANDA TANGAN (B-1a skema + state machine, keystore, toolchain B-1b, `signer-daemon` Tahap 2a); belum ada tahap `build`, UI, atau AI untuk build — lihat "Status Bagian B, Tahap 1" dan "Status Tahap 2a".** Shell AI (PR C, lihat "Status PR C") **mati secara bawaan** dan sengaja lebih sempit dari rancangan: tanpa build/tanda tangan, tanpa `bench_diff`/`request_build`/`get_build_status`, dan tanpa `apktool`/`jadx` di dalam `bench`. Selama Bagian B belum dikerjakan, tidak ada penulisan APK dan tidak ada tanda tangan. **Sub-paket B-1b (toolchain) SUDAH ada**: image `signer` (Build-Tools 37.0.0 dipin SHA-256, profil Compose `build`, mati secara bawaan) + `signer-selftest` + `make tools-check`. **Tahap 1 (fondasi data & kunci) SUDAH ada**: tabel `build` + state machine persetujuan manual di `rvcore.store` (migrasi v5) dan keystore yang dibuat `make init`; BELUM ada tahap `build` di worker, antarmuka persetujuan, maupun tool AI (lihat "Status paket B-1b" dan "Status Bagian B, Tahap 1"). **Tahap 2a (`signer-daemon` nyata dengan keystore pemilik) SUDAH ada di kode**: antrean `signspool`, penandatanganan `zipalign` → `apksigner sign` → `apksigner verify` dengan sertifikat harus sama dengan keystore pemilik, pemasangan keystore HANYA ke `signer`, `make signer-verify`; uji Docker/cgroup menunggu VPS (lihat "Status Tahap 2a").
+> **Status: Bagian A (XAPK/APKS) dan Bagian C (shell AI) SEBAGIAN SUDAH ADA; Bagian B (membangun & menandatangani APK) baru sampai FONDASI + DAEMON PENANDA TANGAN (B-1a skema + state machine, keystore, toolchain B-1b, `signer-daemon` Tahap 2a); belum ada tahap `build`, UI, atau AI untuk build — lihat "Status Bagian B, Tahap 1" dan "Status Tahap 2a".** Shell AI (PR C, lihat "Status PR C") **mati secara bawaan** dan sengaja lebih sempit dari rancangan: tanpa build/tanda tangan di dalam `bench` (tool `bench_diff`/`request_build`/`get_build_status` ditambahkan di Tahap 4, lihat "Status Tahap 4"), dan tanpa `apktool`/`jadx` di dalam `bench`. Selama Bagian B belum dikerjakan, tidak ada penulisan APK dan tidak ada tanda tangan. **Sub-paket B-1b (toolchain) SUDAH ada**: image `signer` (Build-Tools 37.0.0 dipin SHA-256, profil Compose `build`, mati secara bawaan) + `signer-selftest` + `make tools-check`. **Tahap 1 (fondasi data & kunci) SUDAH ada**: tabel `build` + state machine persetujuan manual di `rvcore.store` (migrasi v5) dan keystore yang dibuat `make init`; BELUM ada tahap `build` di worker, antarmuka persetujuan, maupun tool AI (lihat "Status paket B-1b" dan "Status Bagian B, Tahap 1"). **Tahap 2a (`signer-daemon` nyata dengan keystore pemilik) SUDAH ada di kode**: antrean `signspool`, penandatanganan `zipalign` → `apksigner sign` → `apksigner verify` dengan sertifikat harus sama dengan keystore pemilik, pemasangan keystore HANYA ke `signer`, `make signer-verify`; uji Docker/cgroup menunggu VPS (lihat "Status Tahap 2a").
 
 ## Tujuan
 Dua kemampuan baru, dikerjakan terpisah supaya risikonya terkendali:
@@ -147,10 +147,10 @@ Konsekuensinya diterima dengan sadar: `web` kini membaca berkas hasil dari konta
 | ID | Kebutuhan | Prioritas |
 |----|-----------|-----------|
 | FR-9.30 | Tool AI **`shell_run`**: `command` (teks), `timeout` (detik, dibatasi). Berjalan di ruang kerja analisis yang sedang dibuka | P1 |
-| FR-9.31 | Tool **`bench_diff`**: ringkasan perubahan ruang kerja dibanding hasil apktool asli | P1 |
-| FR-9.32 | Tool **`request_build`** (`catatan`): membuat permintaan build berstatus `awaiting_approval` (FR-9.16). **Tidak** membangun apa pun; AI tidak bisa menyetujui sendiri | P1 |
-| FR-9.33 | Tool **`get_build_status`**: status dan log `apktool b` terpangkas, supaya AI bisa memperbaiki kesalahan | P1 |
-| FR-9.34 | Tidak ada tool untuk menyetujui, menandatangani, mengunduh, atau memasang. Persetujuan hanya lewat UI dengan CSRF | P1 |
+| FR-9.31 | Tool **`bench_diff`**: ringkasan perubahan ruang kerja dibanding hasil apktool asli (**ada, Tahap 4**) | P1 |
+| FR-9.32 | Tool **`request_build`** (`diff_sha256?` pembanding; **tanpa `catatan`** untuk mengurangi permukaan injeksi; **ada, Tahap 4**): membuat permintaan build berstatus `awaiting_approval` (FR-9.16). **Tidak** membangun apa pun; AI tidak bisa menyetujui sendiri | P1 |
+| FR-9.33 | Tool **`get_build_status`**: status, kode galat, dan pesan/log tahap tersanitasi (allowlist baris), supaya AI bisa memperbaiki kesalahan (**ada, Tahap 4**) | P1 |
+| FR-9.34 | Tidak ada tool untuk menyetujui, menandatangani, mengunduh, atau memasang (**terpenuhi, dijaga tes AST**). Persetujuan hanya oleh pemilik: saat ini CLI (`buildctl approve`), UI dengan CSRF di Tahap 5 | P1 |
 | FR-9.35 | Setiap perintah dan keluarannya tampil di percakapan (terlipat), tersimpan di `chat_message.tool_calls`, dan dihitung ke anggaran | P1 |
 | FR-9.36 | Batas per giliran: jumlah perintah, total keluaran (`AI_MAX_TOOL_CHARS`), total waktu; pada batas, AI diberi tahu dan giliran selesai dengan rapi (pola `stopped` yang sudah ada di `agent.py`) | P1 |
 | FR-9.37 | Keluaran shell melewati redaksi secret yang sama sebelum dikirim ke provider (`AI_REDACT_SECRETS`) | P1 |
@@ -284,7 +284,7 @@ Kedua master pada sampel APKS default **identik** (173 entri, CRC sama semua). I
 | Rancangan | Yang dikerjakan | Alasan |
 |----|----|----|
 | FR-9.30 `shell_run` | **Ya** | |
-| FR-9.31 `bench_diff`, FR-9.32 `request_build`, FR-9.33 `get_build_status`, FR-9.34 | **Tidak** | Bergantung Bagian B (build, `signer`, persetujuan) yang belum ada. AI **tidak** punya tool untuk membangun, menandatangani, atau menyetujui apa pun |
+| FR-9.31 `bench_diff`, FR-9.32 `request_build`, FR-9.33 `get_build_status`, FR-9.34 | **Tidak pada PR C; SUDAH ada sejak Tahap 4** (lihat "Status Tahap 4" di bawah) | Pada PR C bergantung Bagian B yang belum ada. Sejak Tahap 4 AI dapat membuat permintaan `awaiting_approval` dan membaca status, tetapi tidak punya tool untuk membangun langsung, menandatangani, atau menyetujui apa pun |
 | Alat `apktool`, `jadx`, `aapt2`, `zipalign` di `bench` | **Tidak** (hanya `bash`, `coreutils`, `grep/sed/awk`, `find`, `unzip/zip`, `file`, `xxd`, `diff`, `patch`, `python3`) | Tanpa Java image tetap kecil; hasil apktool/jadx sudah ada di `$WORK`. Konsekuensi: AI bisa mengubah **salinan** smali/resource di `$WS`, tetapi tidak bisa membangun APK |
 | FR-9.14/9.39 ruang kerja "salinan `apktool`" dibuat lazily | Ruang kerja `bench/<id>/` **kosong**, dibuat saat perintah pertama; AI menyalin sendiri dari `$WORK` | Lebih sederhana; tidak ada salinan otomatis berukuran ratusan MB |
 | FR-9.35 perintah dan keluaran tampil (terlipat), tersimpan di `chat_message.tool_calls` | **Ya**, dibatasi (perintah 2000, stdout 6000, stderr 3000 karakter, sudah diredaksi) | |
@@ -532,3 +532,21 @@ Tahap 3 (satu paket, satu PR) membuat `request`/`approve`/`run_build` bekerja un
 **BELUM DIUJI (butuh Docker di VPS):** `docker compose config`/`up` dengan berkas tambahan, bind-mount secret nyata dan modenya, tmpfs/`noexec` nyata, healthcheck, **`mem_limit: 512m`/`pids_limit`/`cpus` (cgroup memory tidak ada di sandbox)**, pembuatan ulang `signer` saat berkas kunci diganti (V11), EOF stdin lewat `docker compose exec -T` (V12), pewarisan izin volume `builds`/`signspool`, SELinux/ACL/userns. Perintah VPS V0–V12, hasil yang diharapkan, dan gejala: `docs/deploy.md`.
 
 **Belum ada (sengaja; Tahap 2b dan seterusnya):** stage `build` di runner/worker, op bench, `run_build` di worker, antarmuka web dan persetujuan yang memanggil signer, tampilan diff (`treediff`), tool AI (`request_build`, `get_build_status`), UI, XAPK, anggaran AI. **Wajib sebelum runner diberi akses tulis ke volume `builds` (2b):** menutup R3 (uid sama untuk semua penulis `builds`; penukaran `.sign-signed.tmp` antara verify dan penerbitan) dan menyadari R10 (signer = oracle penandatanganan bagi siapa pun yang dapat menulis `builds/`+`signspool/`).
+
+## Status Tahap 4: tool AI `bench_diff`, `request_build`, `get_build_status`
+
+**Sudah ada** (hidup bersama `AI_SHELL_ENABLED=1`; tidak ada env baru). Kode: `services/web/app/aibuild.py` (helper berlingkup-analisis), tiga tool di `ai/tools.py` (+ `ToolContext.session_id`, penghitung bersama dengan `shell_run`), blok `BUILD_PROMPT_BLOCK` di `ai/agent.py`, `services/web/app/aitoolcheck.py` (pembantu verifikasi tanpa LLM), langkah `make verify-build` 14a–14n. Detail kontrak: [05](05-chat-agent.md) "Tool build AI (Tahap 4)"; langkah VPS dan gejala: `docs/deploy.md`.
+
+**Keputusan kebijakan (asumsi bawaan; pemilik boleh mengubah):**
+| Topik | Keputusan | Alasan |
+|----|----|----|
+| Build tertunda | satu build aktif per analisis; permintaan identik yang masih `awaiting_approval` dipakai ulang; lainnya `build_tertunda`; satu build baru per giliran | membatasi volume tanpa hitungan tambahan; `BUILD_KEEP` tetap oleh worker |
+| Mengganti permintaan | hanya pemilik (`buildctl cancel`); AI tidak punya tool pembatalan | menjaga tepat tiga tool |
+| `catatan` | dihapus dari `request_build` | tidak ada di rancangan akhir; kurangi permukaan injeksi. Layar persetujuan Tahap 5 menampilkan diff + `diminta_oleh_ai` |
+| Init ruang kerja | tetap `buildctl init <id>` oleh pemilik (`tidak_ada_ruang_kerja` bila belum); lazy-init (FR-9.39) ditunda | tidak ada tool init pada Tahap 4 |
+| `artefak_tercatat` | `status == done` menurut DB (bukan jaminan berkas ada) | nama jujur untuk "artefak ada" |
+| Pratinjau diff | **dilepas**: `bench_diff` tanpa argumen `paths`/pratinjau isi berkas; hanya ringkasan + hash | brief mengizinkan opsional; menghindari perintah shell yang disusun server. Isi berkas dilihat AI lewat `shell_run`, pemilik lewat `buildctl diff` |
+
+**Persetujuan masih CLI-only sampai Tahap 5.** Jalur AI hanya menghasilkan `awaiting_approval`; `approve_build`, penandatanganan, unduhan, dan pembacaan artefak tidak terjangkau dari kode tool (tes AST/impor transitif + tes perilaku).
+
+**Belum ada / belum diuji:** UI persetujuan dan unduhan (Tahap 5); anggaran/limit AI yang baru dan perilaku "berhenti rapi lalu tanya lanjut?" (Tahap 6); Docker/Compose, bench/Landlock nyata dalam loop chat, RQ, dan model nyata (verifikasi hanya `docker` palsu + bench palsu; cek live opsional manual).

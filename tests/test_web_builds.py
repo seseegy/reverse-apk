@@ -554,14 +554,14 @@ def test_builds_py_uses_no_string_path_mutation_of_builds_and_does_not_import_ai
 
 
 def test_builds_py_is_the_only_module_that_builds_init_requests():
-    """G-AI: `shellspool.build_init_request` hanya dirujuk `app/builds.py` (op `init` bukan jalur AI); op `diff` juga hanya dari sana."""
+    """G-AI: `shellspool.build_init_request` hanya dirujuk `app/builds.py` (op `init` bukan jalur AI). Op `diff` (baca-saja) dirujuk `app/builds.py` dan `app/aibuild.py` (Tahap 4)."""
     refs: dict[str, set[str]] = {}
     for p in (ROOT / "services").rglob("*.py"):
         _t, names = _names(p)
         for n in ("build_init_request", "build_diff_request"):
             if n in names and p.name != "shellspool.py":
                 refs.setdefault(n, set()).add(str(p.relative_to(ROOT)))
-    assert refs == {"build_init_request": {"services/web/app/builds.py"}, "build_diff_request": {"services/web/app/builds.py"}}, refs
+    assert refs == {"build_init_request": {"services/web/app/builds.py"}, "build_diff_request": {"services/web/app/builds.py", "services/web/app/aibuild.py"}}, refs
 
 
 def test_build_summary_caps_are_below_the_store_limit(W):

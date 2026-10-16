@@ -5,7 +5,7 @@ Memberi pengguna antarmuka tanya-jawab ke kode APK. Model menelusuri kode sendir
 
 ## Prinsip
 1. **Read-only**: tool hanya membaca artefak analisis yang sudah ada.
-2. **Tanpa efek samping**: tidak ada shell, jaringan, tulis berkas di luar folder berkas AI, atau eksekusi APK. **Satu pengecualian, MATI secara bawaan**: dengan `AI_SHELL_ENABLED=1` AI mendapat tool `shell_run` yang menjalankan perintah bash di kontainer `bench` terpisah (tanpa rahasia, tiap perintah dikurung Landlock ke satu analisis; tanpa jaringan secara bawaan, dan hanya bila pemilik mengisi `AI_SHELL_NET_ALLOW` lewat proxy keluar berdaftar putih; lihat [09](09-bundles-and-workbench.md) "Status PR C" dan "Status PR D"). Tidak ada eksekusi di proses `web`, dan APK tetap tidak pernah dijalankan.
+2. **Tanpa efek samping**: tidak ada shell, jaringan, tulis berkas di luar folder berkas AI, atau eksekusi APK. **Satu pengecualian, MATI secara bawaan**: dengan `AI_SHELL_ENABLED=1` AI mendapat tool `shell_run` yang menjalankan perintah bash di kontainer `bench` terpisah (tanpa rahasia, tiap perintah dikurung Landlock ke satu analisis; tanpa jaringan secara bawaan, dan hanya bila pemilik mengisi `AI_SHELL_NET_ALLOW` lewat proxy keluar berdaftar putih; lihat [09](09-bundles-and-workbench.md) "Status PR C" dan "Status PR D"). Tidak ada eksekusi di proses `web`, dan APK tetap tidak pernah dijalankan. Dengan gerbang yang sama AI juga mendapat tiga tool build (`bench_diff`, `request_build`, `get_build_status`; Tahap 4): ia hanya dapat MEMBUAT permintaan build berstatus `awaiting_approval` dan membaca statusnya; menyetujui, membatalkan, menandatangani, mengunduh, dan membaca artefak TIDAK terjangkau dari kode tool (dijaga tes AST). Persetujuan masih CLI-only sampai Tahap 5.
 3. **Terikat sesi**: semua tool dibatasi pada satu `analysis_id`.
 4. **Bisa diaudit**: setiap tool call dicatat dan terlihat di UI.
 
@@ -33,9 +33,23 @@ Memberi pengguna antarmuka tanya-jawab ke kode APK. Model menelusuri kode sendir
 | `view_image` | `path` | melihat gambar lampiran (`lampiran/<id>`) atau gambar di APK (`apktool/res/...png`); hanya ditawarkan ke model bertanda `vision` | gambar ≤ `AI_MAX_IMAGE_MB` |
 | `shell_run` | `command`, `timeout?` | `exit_code`, `stdout`, `stderr` (kepala+ekor, diredaksi), `ringkas`; **hanya ditawarkan bila `AI_SHELL_ENABLED=1`** | perintah ≤ 8000 karakter; timeout bawaan 60 dtk (maks. `AI_SHELL_MAX_TIMEOUT`); keluaran ≤ `AI_SHELL_MAX_OUTPUT_CHARS`; ≤ `AI_SHELL_MAX_CALLS_PER_TURN` per giliran; dijalankan di `bench`, bukan di `web` |
 
+| `bench_diff` | – | `ringkas`, `diff_sha256`, `counts` (added/modified/removed), `jumlah_berubah`, `daftar` (maks. 40 `{op A|M|D, path}`), `terpotong`, `peringatan`; tanpa isi berkas; **hanya ditawarkan bila `AI_SHELL_ENABLED=1`** | dihitung ulang dari bench tiap panggilan dan dihitung sebagai satu operasi ruang kerja (`AI_SHELL_MAX_CALLS_PER_TURN`); keluaran ≤ `AI_MAX_TOOL_CHARS` (daftar dipendekkan, `terpotong=true`) |
+
+> Pratinjau unified-diff opsional per path **dilepas** (tidak diimplementasikan pada Tahap 4); isi berkas dibaca lewat `shell_run`.
+| `request_build` | `diff_sha256?` (pembanding saja) | `build_id`, `status=awaiting_approval`, `diff_sha256`, `dipakai_ulang`, `source_kind`, `langkah_pemilik`, `jangan_klaim_selesai`; **hanya bila `AI_SHELL_ENABLED=1`** | hash selalu dihitung ulang dari bench; hash model yang beda ditolak (`hash_tidak_cocok`); `diff_kosong`; satu build aktif per analisis (identik dan masih menunggu → dipakai ulang, selain itu `build_tertunda`); satu build baru per giliran; APK, XAPK, dan APKS |
+| `get_build_status` | `build_id?` | `status`, `tahap`, `kode_galat` + `pesan_galat`/`petunjuk` tersanitasi, `artefak_tercatat` (menurut DB, bukan jaminan berkas ada), `verifikasi_tanda_tangan`, `source_kind`, `jumlah_split`, `diminta_oleh_ai`, `langkah_pemilik`, `jangan_klaim_selesai`; **hanya bila `AI_SHELL_ENABLED=1`** | `build_id` harus milik analisis ini (analisis lain dan id ngawur → jawaban identik `build_bukan_milik_analisis`); maks. 3 panggilan per giliran; tidak pernah memuat path, keystore, atau tautan unduh |
+
 `read_file` juga membaca `lampiran/<id|nama>` dan `hasil_ai/<path>`.
 
 Validasi: semua path dinormalisasi dan harus berada di bawah akar yang diizinkan (`work/<analysis_id>/` untuk APK, `files/<analysis_id>/` untuk lampiran/berkas AI); tolak `..`, symlink keluar, dan berkas biner besar.
+
+## Tool build AI (Tahap 4)
+- **Alur di prompt** (blok `BUILD APK`, hanya saat shell menyala): ubah lewat `shell_run` di `$WS/project` → `bench_diff` → `request_build` → minta pemilik menyetujui secara manual (CLI `buildctl approve <id> --diff-sha256 <hash>`; tombol web Tahap 5) → `get_build_status`. AI diminta jujur: jangan klaim "selesai" sebelum status `done`, ubah seminimal mungkin, laporkan galat build apa adanya, dan akui batas (anti-tamper/packer/Play Integrity/hash `.so`).
+- **Cakupan**: tool tidak punya argumen `analysis_id`/`session_id`; analisis dan sesi berasal dari konteks chat (`ToolContext`), `build_id` diverifikasi milik analisis ini. `requested_by` build = `ai:<session_id>`.
+- **Hasil = data tidak tepercaya**: dibungkus `<hasil_tool>` + peringatan; pesan galat berasal dari tabel teks tetap (tidak pernah teks bench/DB/runner); `error_text` dan log tahap disanitasi (path, URL, nama keystore, karakter kontrol/bidi, `<` `>`, redaksi secret).
+- **Kode galat stabil**: `fitur_nonaktif`, `argumen_tidak_valid`, `batas_giliran`, `analisis_belum_siap`, `apktool_tidak_ada`, `paket_belum_didukung`, `tidak_ada_ruang_kerja`, `bench_mati`, `bench_timeout`, `dibatalkan`, `pohon_terlalu_besar`, `diff_kosong`, `hash_tidak_cocok`, `build_tertunda`, `baseline_tidak_utuh`, `build_bukan_milik_analisis`, `ringkasan_terlalu_besar`, `gagal`.
+- **Audit**: `ai_build_tool` (analisis, nama tool, hasil/kode; tanpa path atau isi diff). Persetujuan tercatat `build_approved` dengan `via=cli`.
+- **Verifikasi tanpa model**: `make verify-build` langkah 14a–14n lewat `python -m app.aitoolcheck` (jalur kode yang sama dengan chat); cek live dengan model nyata opsional/manual (`make ai-check` hanya menguji provider). Lihat `docs/deploy.md`.
 
 ## Kebutuhan fungsional
 | ID | Kebutuhan | Prioritas |

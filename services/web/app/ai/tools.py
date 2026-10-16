@@ -31,7 +31,7 @@ from rvcore import shellspool, store
 
 from . import redact as redact_mod
 from .config import AIConfig
-from .. import callgraph, codeindex, decompile
+from .. import aibuild, callgraph, codeindex, decompile
 from .. import userfiles as U
 from .logutil import describe, log
 
@@ -62,6 +62,9 @@ class ToolContext:
     ui_detail: dict[str, Any] | None = None    # rincian tool terakhir untuk kartu langkah di UI (perintah + keluaran, SUDAH diredaksi); diambil agent
     shell_calls: int = 0                       # jumlah shell_run pada giliran ini (batas: cfg.shell_max_calls_per_turn)
     bench_sha256: str | None = None            # sha256 APK analisis ini (untuk $APK di bench); diisi pemanggil, BUKAN dari model
+    session_id: int | None = None              # sesi chat ini (untuk `requested_by` build); diisi chat.run_in_thread, BUKAN dari model; None = tool build ditolak
+    build_requests: int = 0                    # build baru yang dibuat pada giliran ini (batas 1)
+    status_calls: int = 0                      # get_build_status pada giliran ini (batas STATUS_CALLS_MAX)
     _written_seen: int = 0
 
     def take_detail(self) -> dict[str, Any] | None:
@@ -924,6 +927,105 @@ def _clip_tail(text: str, limit: int) -> str:
     return text[:head] + f"\n…[{len(text) - head - tail} karakter dihilangkan]…\n" + text[-tail:]
 
 
+# ---------------------------------------------------------------- build oleh AI (Tahap 4): bench_diff, request_build, get_build_status
+# Hanya MEMBUAT permintaan `awaiting_approval` dan MEMBACA status. Tidak ada tool/jalur untuk menyetujui, membatalkan, menandatangani, mengunduh, atau membaca artefak
+# (dijaga tests/test_ai_no_approve_invariant.py). Logika ada di app/aibuild.py; di sini hanya pembungkus: gerbang, penghitung anggaran, audit, pemetaan galat.
+STATUS_CALLS_MAX = 3                        # pagar keras pemeriksaan status per giliran (bukan env/bawaan anggaran baru)
+
+
+class BuildToolError(ToolError):
+    """Galat tool build dengan kode stabil (Indonesia). Teks = '[kode] pesan'; pesan dari tabel tetap aibuild, tanpa teks bench/DB."""
+
+    def __init__(self, kode: str, pesan: str) -> None:
+        super().__init__(f"[{kode}] {pesan}")
+        self.kode = kode
+
+
+def _build_audit(ctx: ToolContext, tool: str, hasil: str) -> None:
+    """Catat TANPA catatan, path, atau isi diff."""
+    try:
+        with closing(ctx.db()) as conn:
+            store.audit(conn, "ai_build_tool", {"analysis_id": ctx.analysis_id, "tool": tool, "hasil": hasil})
+    except Exception as exc:  # noqa: BLE001 - kegagalan audit tidak boleh menutupi hasil, tetapi harus terlihat di log
+        log.error("audit ai_build_tool gagal: analysis=%s: %s", ctx.analysis_id, type(exc).__name__)
+
+
+def _build_scope(ctx: ToolContext) -> "aibuild.Scope":
+    """Lingkup dari KONTEKS chat (analisis, sesi), bukan dari model. Fail closed: shell mati atau sesi tidak dikenal -> fitur_nonaktif (lapis kedua; schemas() juga menyembunyikan)."""
+    cfg = ctx.cfg
+    if not cfg.shell_enabled or ctx.session_id is None:
+        raise BuildToolError("fitur_nonaktif", "Fitur build oleh AI tidak aktif untuk sesi ini.")
+    return aibuild.Scope(analysis_id=ctx.analysis_id, session_id=ctx.session_id, db=ctx.db, spool=shellspool.make_spool(cfg.shell_spool_dir), cancel=ctx.cancel, enabled=True)
+
+
+def _count_bench_call(ctx: ToolContext) -> None:
+    """Penghitung YANG SAMA dengan shell_run (`ctx.shell_calls`, batas AI_SHELL_MAX_CALLS_PER_TURN; 0 = tanpa batas). Dipanggil hanya sebelum bench benar-benar disentuh."""
+    limit = ctx.cfg.shell_max_calls_per_turn
+    if limit and ctx.shell_calls >= limit:
+        raise BuildToolError("batas_giliran", f"batas {limit} operasi ruang kerja per giliran tercapai; rangkum yang sudah Anda ketahui dan tanyakan kepada pengguna bila perlu lanjut.")
+    ctx.shell_calls += 1
+
+
+def _build_guard(ctx: ToolContext, tool: str, fn: Callable[[], dict]) -> dict:
+    try:
+        result = fn()
+    except aibuild.BuildScopeError as exc:
+        _build_audit(ctx, tool, exc.kode)
+        raise BuildToolError(exc.kode, exc.pesan) from None
+    except BuildToolError as exc:
+        _build_audit(ctx, tool, exc.kode)
+        raise
+    _build_audit(ctx, tool, "ok")
+    return result
+
+
+def _fit_daftar(result: dict, limit: int) -> dict:
+    """Batas keluaran deterministik: `daftar` dipendekkan SEBELUM run_tool (yang tidak boleh memangkas diam-diam), lalu `terpotong`/`daftar_ditampilkan` dihitung ulang."""
+    daftar = result["daftar"]
+    while daftar and len(json.dumps(result, ensure_ascii=False)) > limit:
+        daftar = daftar[: len(daftar) // 2]
+        result["daftar"] = daftar
+        result["terpotong"] = True
+        result["daftar_ditampilkan"] = len(daftar)
+    return result
+
+
+def bench_diff(ctx: ToolContext, args: dict) -> dict:
+    scope = _build_scope(ctx)
+
+    def work() -> dict:
+        _count_bench_call(ctx)
+        view = aibuild.diff_view(aibuild.current_diff(scope), ctx.redactor.text)
+        c = view["counts"]
+        view["ringkas"] = f"{view['jumlah_berubah']} perubahan (tambah {c['added']}, ubah {c['modified']}, hapus {c['removed']})"
+        view["daftar_ditampilkan"] = len(view["daftar"])
+        view["catatan"] = "Ringkasan baca-saja dari ruang kerja: hanya daftar path dan hash, tanpa isi berkas. Pakai shell_run untuk memeriksa isi."
+        return _fit_daftar(view, ctx.cfg.max_tool_chars)
+    return _build_guard(ctx, "bench_diff", work)
+
+
+def request_build(ctx: ToolContext, args: dict) -> dict:
+    scope = _build_scope(ctx)
+
+    def work() -> dict:
+        res = aibuild.request(scope, args.get("diff_sha256"), ctx.redactor.text, build_requests=ctx.build_requests, count_bench=lambda: _count_bench_call(ctx))
+        if not res["dipakai_ulang"]:
+            ctx.build_requests += 1
+        return res
+    return _build_guard(ctx, "request_build", work)
+
+
+def get_build_status(ctx: ToolContext, args: dict) -> dict:
+    scope = _build_scope(ctx)
+
+    def work() -> dict:
+        if ctx.status_calls >= STATUS_CALLS_MAX:
+            raise BuildToolError("batas_giliran", f"pemeriksaan status sudah {STATUS_CALLS_MAX} kali pada giliran ini; laporkan statusnya kepada pengguna dan tanyakan apakah perlu dicek lagi.")
+        ctx.status_calls += 1
+        return aibuild.status(scope, args.get("build_id"), ctx.redactor.text)
+    return _build_guard(ctx, "get_build_status", work)
+
+
 TOOLS: dict[str, tuple[Callable[[ToolContext, dict], dict], dict]] = {
     "get_overview": (get_overview, {"description": "Ringkasan aplikasi: paket, versi, jumlah temuan, tanda tangan, jaringan.",
                                     "properties": {}}),
@@ -938,6 +1040,21 @@ TOOLS: dict[str, tuple[Callable[[ToolContext, dict], dict], dict]] = {
                               "properties": {"command": {"type": "string", "description": "perintah bash (satu skrip pendek boleh, mis. dengan && atau |)"},
                                              "timeout": {"type": "integer", "description": "batas waktu detik (bawaan 60, maksimum dibatasi server)"}},
                               "required": ["command"]}),
+    "bench_diff": (bench_diff, {"description": "Lihat perubahan ruang kerja build Anda (project/ di bench) terhadap baseline: jumlah tambah/ubah/hapus, daftar path (maks 40; op A=tambah, "
+                                               "M=ubah, D=hapus) dan hash diff (diff_sha256). Hanya teks ringkasan, tanpa isi berkas; periksa isi dengan shell_run. Dihitung ulang dari bench "
+                                               "setiap kali dipanggil dan dihitung sebagai satu operasi ruang kerja (batas perintah per giliran). Gunakan sebelum request_build. "
+                                               "tidak_ada_ruang_kerja berarti pemilik harus menjalankan buildctl init.",
+                                "properties": {}}),
+    "request_build": (request_build, {"description": "Ajukan build APK dari perubahan ruang kerja SAAT INI. Hanya membuat permintaan berstatus menunggu persetujuan: Anda TIDAK bisa menyetujui, "
+                                                    "membatalkan, menandatangani, atau mengunduhnya; pemilik harus menyetujui sendiri secara manual. Diff dihitung ulang dari bench "
+                                                    "(diff_kosong bila tidak ada perubahan). diff_sha256 opsional hanya pembanding dari bench_diff; bila beda ditolak. Satu build aktif per analisis "
+                                                    "(permintaan sama dipakai ulang), maks satu build baru per giliran. Setelah berhasil, BERHENTI dan minta pemilik menyetujui; jangan klaim selesai.",
+                                     "properties": {"diff_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "opsional: hash dari bench_diff untuk memastikan diff yang sama"}}}),
+    "get_build_status": (get_build_status, {"description": "Status build analisis ini (menunggu persetujuan, antre, dibangun, ditandatangani, selesai, gagal): tahap, kode galat dan pesan yang "
+                                                           "sudah disanitasi, apakah artefak tercatat selesai menurut basis data (bukan jaminan berkas masih ada), hasil verifikasi tanda tangan, "
+                                                           "format dan jumlah split XAPK/APKS. Tanpa build_id = build aktif/terbaru; build_id harus milik analisis ini. Tidak pernah memuat path, "
+                                                           "keystore, atau tautan unduh. Jangan menyatakan selesai sebelum status = selesai; maks 3 kali per giliran.",
+                                            "properties": {"build_id": {"type": "integer", "minimum": 1, "description": "opsional: id build milik analisis ini"}}}),
     "get_manifest": (get_manifest, {"description": "Manifest ter-parse: izin, flag, komponen dan status exported.", "properties": {}}),
     "list_packages": (list_packages, {"description": "Daftar package beserta jumlah class (kode aplikasi).",
                                       "properties": {"prefix": {"type": "string", "description": "awalan package, mis. com.example"},
@@ -1029,6 +1146,9 @@ VISION_ONLY = frozenset({"view_image"})     # tidak ditawarkan ke model yang tid
 SHELL_ONLY = frozenset({"shell_run"})       # hanya ditawarkan bila AI_SHELL_ENABLED=1
 
 
+BUILD_ONLY = frozenset({"bench_diff", "request_build", "get_build_status"})      # gerbang SAMA dengan shell (tanpa shell AI tidak bisa mengubah project/); tiap tool juga menolak sendiri
+
+
 # Deskripsi shell_run yang dilihat model: bila jaringan aktif, klaim "TANPA jaringan" DIHAPUS (tanpa menambah teks; pernyataan yang bertentangan membuat model ragu
 # atau menolak memakai jaringan). Teks dasar yang berubah = galat keras, bukan penggantian diam-diam yang meleset.
 _SHELL_NET_DESC_REWRITES = (
@@ -1052,7 +1172,7 @@ def schemas(vision: bool = True, shell: bool = False, net: bool = False) -> list
         "name": name, "description": _describe(name, spec, net and shell),
         "parameters": {"type": "object", "properties": spec["properties"], "required": spec.get("required", []),
                        "additionalProperties": False}}} for name, (_fn, spec) in TOOLS.items()
-            if (vision or name not in VISION_ONLY) and (shell or name not in SHELL_ONLY)]
+            if (vision or name not in VISION_ONLY) and (shell or name not in SHELL_ONLY | BUILD_ONLY)]
 
 
 def run_tool(ctx: ToolContext, name: str, raw_args: str) -> tuple[str, bool]:

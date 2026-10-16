@@ -93,6 +93,44 @@ def bget(i):
 
 
 FINAL = ("done", "failed", "cancelled", "rejected")
+KEYS = ("ws", "marker", "builds", "deleted", "inited", "kind", "aid", "apk_names", "extras_n", "bundle_sha", "sigs")     # keadaan PER analisis (Tahap 4: beberapa analisis uji hidup bersamaan)
+
+
+def switch(aid):
+    """Jadikan analisis `aid` yang aktif; keadaan analisis sebelumnya disimpan di S["all"]."""
+    all_ = S.setdefault("all", {})
+    if aid == cur_aid() or str(aid) not in all_:
+        return
+    all_[str(cur_aid())] = {k: S[k] for k in KEYS if k in S}
+    st = all_.pop(str(aid))
+    for k in KEYS:
+        S.pop(k, None)
+    S.update(st)
+
+
+def owner_of_build(i):
+    if str(i) in S["builds"]:
+        return cur_aid()
+    for k, st in S.get("all", {}).items():
+        if str(i) in st["builds"]:
+            return int(k)
+    return None
+
+
+def route(a):
+    sub, rest = a[0], a[1:]
+    target = None
+    try:
+        if sub in ("init", "diff", "shell", "request", "delete"):
+            target = int(rest[0])
+        elif sub == "status" and rest[0] == "--analysis":
+            target = int(rest[1])
+        elif sub in ("status", "wait", "cancel", "approve", "artifact-info"):
+            target = owner_of_build(int(rest[0]))
+    except (ValueError, IndexError):
+        target = None
+    if target is not None:
+        switch(target)
 
 
 def active():
@@ -147,6 +185,7 @@ def status_lines(b):
 
 
 def buildctl(a):
+    route(a)
     sub, rest = a[0], a[1:]
     if sub == "analyze":
         data = sys.stdin.buffer.read()
@@ -159,8 +198,13 @@ def buildctl(a):
             done(3, kv(kode="analisis_gagal", alasan="x"))
         if sc.get("dup"):
             done(0, kv(duplicate=1, apk_id=5, analysis_id=9, sha256="a" * 64, status="done", elapsed="0.1"))
-        if S.get("analyzed") and S["deleted"]:                       # analisis baru sesudah analisis sebelumnya dihapus: keadaan per-analisis dikosongkan
-            S.update(ws=0, marker="", builds={}, deleted=False, inited=False, aid=cur_aid() + 1)
+        if S.get("analyzed"):                                        # analisis baru: keadaan analisis sebelumnya disimpan (Tahap 4: bisa hidup bersamaan), yang baru kosong
+            all_ = S.setdefault("all", {})
+            all_[str(cur_aid())] = {k: S[k] for k in KEYS if k in S}
+            newaid = max(int(k) for k in all_) + 1
+            for k in KEYS:
+                S.pop(k, None)
+            S.update(ws=0, marker="", builds={}, deleted=False, inited=False, aid=newaid, sigs={})
         S["kind"] = kind
         if kind != "apk":
             import zipfile as _zf, io as _io
@@ -190,8 +234,13 @@ def buildctl(a):
         if sc.get("shell_fail"):
             done(3, kv(status="ok", exit_code=1))
         if "sed -i" in cmd:
-            S["ws"] += 1
-            S["marker"] = re.search(r"VB[0-9a-f]{12}", cmd).group(0)
+            sig = re.search(r"VB[0-9a-f]{12}b?", cmd).group(0)          # isi yang sama = hash yang sama (14f memulihkan ruang kerja ke isi sebelumnya)
+            sigs = S.setdefault("sigs", {})
+            if sig not in sigs:
+                S["ws"] += 1
+                sigs[sig] = S["ws"]
+            S["ws"] = sigs[sig]
+            S["marker"] = sig[:14]
             done(0, kv(status="ok", exit_code=0, duration_ms=5, truncated=0) + "\no| \ne| ")
         done(0, kv(status="ok", exit_code=0, duration_ms=5, truncated=0) + '\no| <string name="app_name">VulnSample')
     if sub == "request":
@@ -199,7 +248,8 @@ def buildctl(a):
             done(3, kv(kode="build_aktif", alasan="ada build aktif"))
         i = S["next"]
         S["next"] += 1
-        S["builds"][str(i)] = {"id": i, "n": len(S["builds"]) + 1, "status": "awaiting_approval", "hash": wsh(), "released": False, "hold": False, "dir": False, "kind": S.get("kind", "apk")}
+        S["builds"][str(i)] = {"id": i, "n": len(S["builds"]) + 1 + (100 if S.get("tool_phase") else 0), "status": "awaiting_approval", "hash": wsh(), "released": False,
+                               "hold": False, "dir": False, "kind": S.get("kind", "apk")}
         done(0, kv(build_id=i, diff_sha256=wsh(), status="awaiting_approval", added=0, modified=1, removed=0))
     if sub == "approve":
         i, h, hold = int(rest[0]), rest[rest.index("--diff-sha256") + 1], "--hold" in rest
@@ -211,6 +261,7 @@ def buildctl(a):
                 done(3, kv(kode="diff_berubah", alasan="x"))
             b["status"] = "queued"
             b["hold"] = hold
+            S.setdefault("approvals", []).append({"aid": cur_aid(), "via": "cli"})
         elif b["status"] == "queued" and h != b["hash"]:
             done(3, kv(kode="diff_berubah", alasan="x"))
         if not hold:
@@ -297,13 +348,121 @@ def buildctl(a):
         done(0, base)
     if sub == "delete":
         log("delete", analysis=int(rest[0]))
-        if active():
+        if active() or (sc.get("atc_stuck_delete") and S.get("tool_phase")):
             done(3, kv(hasil="busy", builds_ada=1, bench_ada=1, work_ada=1) + "\n" + kv(kode="busy", alasan="x"))
         S["deleted"] = True
         S["builds"] = {}
         left = 1 if sc.get("delete_left") else 0
         done(3 if left else 0, kv(hasil="deleted", builds_ada=left, bench_ada=0, work_ada=0) + (("\n" + kv(kode="sisa_direktori", alasan="x")) if left else ""))
     done(64, "")
+
+
+ATC_TOOLS = ["get_overview", "shell_run", "bench_diff", "request_build", "get_build_status"]
+NEWT = ("bench_diff", "request_build", "get_build_status")
+OTHER_MSG = "Build itu tidak ada untuk analisis ini."
+
+
+def aitoolcheck(a):
+    """app.aitoolcheck palsu: meniru KEPUTUSAN tool (kode galat, hash, pakai ulang, cakupan analisis) di atas keadaan buildctl palsu yang sama."""
+    sub, rest = a[0], a[1:]
+    S["tool_phase"] = True
+    log("aitoolcheck", sub=sub, argv_atc=a)
+    if sc.get("atc_missing"):
+        done(1, "No module named app.aitoolcheck")
+    if sub == "schema":
+        shell = rest[rest.index("--shell") + 1] if "--shell" in rest else "1"
+        names = list(ATC_TOOLS) if shell == "1" else ["get_overview"]
+        if shell == "0" and sc.get("atc_gate_leak"):
+            names += list(NEWT)
+        if shell == "1":
+            names = [n for n in names if n not in sc.get("atc_drop_tool", [])]
+            names += sc.get("atc_extra_tools", [])
+        done(0, kv(ok=1, kode="", **{"tool.%d" % n: t for n, t in enumerate(names, 1)}))
+    if sub == "audit-approvals":
+        aid = int(rest[0])
+        vias = [x["via"] for x in S.get("approvals", []) if x["aid"] == aid]
+        done(0, kv(ok=1, kode="", approved_n=len(vias), **{"approved_via.%d" % n: v for n, v in enumerate(vias, 1)}))
+    aid, tool = int(rest[0]), rest[1]
+    args = json.loads(rest[rest.index("--args") + 1]) if "--args" in rest else {}
+    shell = rest[rest.index("--shell") + 1] if "--shell" in rest else "1"
+    switch(aid)
+
+    def refuse(kode, pesan):
+        done(3, kv(ok=0, kode=kode, pesan=pesan))
+
+    def okd(d):
+        done(0, kv(ok=1, kode="", **d))
+    if tool not in NEWT and tool not in sc.get("atc_extra_tools", []) and tool not in sc.get("atc_call_extra", []):
+        refuse("tool_tidak_ada", "tool tidak ada")
+    if tool not in NEWT:
+        okd({"ringkas": "disetujui"})
+    if shell != "1":
+        refuse("fitur_nonaktif", "Fitur build oleh AI tidak aktif untuk sesi ini.")
+    if tool == "bench_diff":
+        if not S.get("inited"):
+            refuse("tidak_ada_ruang_kerja", "belum ada ruang kerja")
+        d = {"ringkas": "x", "diff_sha256": wsh() if not sc.get("atc_hash_wrong") else "e" * 64, "counts.added": 0, "counts.modified": 1 if S["ws"] else 0, "counts.removed": 0,
+             "jumlah_berubah": 1 if S["ws"] else 0, "terpotong": 0}
+        if S["ws"]:
+            d.update({"daftar.1.op": "M", "daftar.1.path": "res/values/strings.xml"})
+        okd(d)
+    if tool == "request_build":
+        want = args.get("diff_sha256")
+        act = active()
+        if act and act[0]["status"] != "awaiting_approval":
+            refuse("build_tertunda", "ada build aktif")
+        if S["ws"] == 0 and not sc.get("atc_create_on_empty"):
+            refuse("diff_kosong", "tidak ada perubahan")
+        if want and want != wsh() and not sc.get("atc_ignore_model_hash"):
+            refuse("hash_tidak_cocok", "hash beda")
+        if act and not sc.get("atc_new_build_on_pending"):
+            if act[0]["hash"] == wsh() and not sc.get("atc_no_reuse"):
+                b = act[0]
+                okd({"ringkas": "x", "build_id": b["id"], "status": b["status"], "diff_sha256": b["hash"], "dipakai_ulang": 1, "source_kind": b.get("kind", "apk"),
+                     "langkah_pemilik": "buildctl approve %d --diff-sha256 %s" % (b["id"], b["hash"]), "jangan_klaim_selesai": 1})
+            refuse("build_tertunda", "ada build menunggu dengan diff berbeda")
+        i = S["next"]
+        S["next"] += 1
+        h = wsh() if not sc.get("atc_new_build_hash") else "9" * 64
+        b = {"id": i, "n": 100 + len(S["builds"]), "status": "awaiting_approval", "hash": h, "released": False, "hold": False, "dir": False, "kind": S.get("kind", "apk"),
+             "by_ai": not sc.get("atc_not_ai")}
+        S["builds"][str(i)] = b
+        okd({"ringkas": "x", "build_id": i, "status": b["status"] if not sc.get("atc_status_wrong") else "queued", "diff_sha256": h, "dipakai_ulang": 0, "source_kind": b["kind"],
+             "langkah_pemilik": "buildctl approve %d --diff-sha256 %s" % (i, h), "jangan_klaim_selesai": 1})
+    # get_build_status
+    bid = args.get("build_id")
+    if bid is not None:
+        b = bget(int(bid))
+        if b is None:
+            other = owner_of_build(int(bid))
+            if other is not None and sc.get("atc_status_leak_other"):
+                switch(other)
+                b = bget(int(bid))
+            else:
+                refuse("build_bukan_milik_analisis", OTHER_MSG if not (sc.get("atc_pesan_beda") and other is not None) else "milik analisis lain")
+    else:
+        act = active()
+        bs = sorted(S["builds"].values(), key=lambda x: x["id"])
+        b = act[0] if act else (bs[-1] if bs else None)
+        if b is None:
+            okd({"ringkas": "belum ada build", "ada_build": 0})
+    if sc.get("ai_approves") and b["status"] == "awaiting_approval":                 # simulasi cacat: tool AI menyetujui build
+        S.setdefault("approvals", []).append({"aid": cur_aid(), "via": "ai"})
+        b.update(status="queued", released=True)
+    if b["status"] == "queued" and b["released"]:
+        if sc.get("atc_build_fail"):
+            b.update(status="failed", error_code="runner_gagal", error_text="apktool gagal")
+        else:
+            settle(b)
+    d = {"ringkas": "x", "ada_build": 1, "build_id": b["id"], "status": b["status"], "diminta_oleh_ai": 1 if b.get("by_ai") else 0, "source_kind": b.get("kind", "apk"),
+         "artefak_tercatat": 1 if b["status"] == "done" else 0, "verifikasi_tanda_tangan": ("" if b.get("verify_ok") in (None, "") else b["verify_ok"]) if not sc.get("atc_verify_missing") else "",
+         "kode_galat": b.get("error_code", ""), "pesan_galat": b.get("error_text", ""), "petunjuk": sc.get("atc_leak", ""), "diff_sha256": b["hash"],
+         "jangan_klaim_selesai": 0 if b["status"] == "done" else 1}
+    if b["status"] == "awaiting_approval":
+        d["langkah_pemilik"] = "buildctl approve %d --diff-sha256 %s" % (b["id"], b["hash"])
+    if sc.get("atc_leak_name") and b["status"] == "done":
+        d["petunjuk"] = b["name"]
+    okd(d)
 
 
 def signcheck(a):
@@ -433,6 +592,8 @@ def main():
         if c[:1] == ["ls"]:
             log("ls", svc=svc, path=c[-1])
             done(0, "g%d-1\n" % cur_aid() if (svc == "signer" and sc.get("signwork_left")) else "")
+        if svc == "web" and c[:3] == ["python", "-m", "app.aitoolcheck"]:
+            aitoolcheck(c[3:])
         if svc == "web" and c[:3] == ["python", "-m", "app.buildctl"]:
             log("buildctl", sub=c[3], argv_ctl=c[3:])
             buildctl(c[3:])
@@ -724,8 +885,9 @@ def test_the_script_deletes_only_its_own_test_analysis_and_exactly_once(rig):
     res, _ = run_ok(rig)
     assert res.returncode == 0
     deletes = rig.kinds("delete")
-    # Tahap 3: analisis APK uji (langkah 2) + analisis XAPK (12b) + analisis APKS (12e), masing-masing dihapus tepat sekali
-    assert [d["analysis"] for d in deletes] == [AID, AID + 1, AID + 2]
+    # Tahap 3: analisis APK uji (langkah 2) + analisis XAPK (12b) + analisis APKS (12e); Tahap 4: analisis langkah 14 (A, pembanding, paket). Masing-masing dihapus tepat sekali.
+    ids = [d["analysis"] for d in deletes]
+    assert ids[:3] == [AID, AID + 1, AID + 2] and sorted(ids) == [AID + n for n in range(6)]
 
 
 def test_calls_follow_the_documented_step_order(rig):
@@ -752,9 +914,9 @@ def test_step_4_uses_the_real_shell_with_an_unexpanded_ws_and_a_random_marker(ri
     run_ok(rig)
     cmds = [c["command"] for c in rig.kinds("shell")]
     sed = [c for c in cmds if "sed -i" in c]
-    assert len(sed) == 4                                          # langkah 4, langkah 9, lalu satu per analisis paket (12b XAPK, 12e APKS)
+    assert len(sed) == 9                                          # langkah 4, 9, paket 12b/12e, lalu Tahap 4: 14d, 14f (ubah + pulihkan), 14h, 14k
     markers = {re.search(r"VB[0-9a-f]{12}", c).group(0) for c in sed}
-    assert len(markers) == 4
+    assert len(markers) == 7                                      # 14f memakai penanda 14d lagi (dengan akhiran) untuk memulihkan ruang kerja
     for c in cmds:
         assert "$WS/project/res/values/strings.xml" in c          # `$WS` TIDAK diekspansi di host
     assert any("grep -o" in c for c in cmds)
@@ -922,7 +1084,8 @@ def test_step_5_each_broken_guard_is_a_failure_and_the_run_continues_cleanly(rig
     assert res.returncode == 1
     assert status_of(rows, "5 negatif persetujuan") == "GAGAL"
     assert status_of(rows, "6 build nyata") in ("OK", "GAGAL")     # alur lanjut; pembersihan tetap jalan
-    assert [d["analysis"] for d in rig.kinds("delete")] == [AID, AID + 1, AID + 2]
+    ids = [d["analysis"] for d in rig.kinds("delete")]
+    assert ids[:3] == [AID, AID + 1, AID + 2] and sorted(ids) == [AID + n for n in range(6)]
 
 
 # ================================================================================ langkah 7, 7b, 8
@@ -1309,7 +1472,7 @@ def test_analisis_paket_lewat_stdin_dengan_uniq_nama_menurut_format(ran):
     an = [c for c in rig.kinds("analyze") if c["kind"] == "analyze" and c.get("name")]
     assert [a["name"] for a in an][0].endswith(".xapk") and [a["name"] for a in an][1].endswith(".apks")
     ctl = [c["argv_ctl"] for c in rig.kinds("buildctl") if c["argv_ctl"][0] == "analyze"]
-    for argv in ctl[1:]:
+    for argv in ctl[1:3]:                                                # 12b dan 12e; analisis berikutnya milik Tahap 4 (14b/14h APK tanpa --name, 14k XAPK)
         assert argv[:3] == ["analyze", "-", "--uniq"] and "--name" in argv
     base = len((rig.repo / "testdata/vulnsample.apk").read_bytes())
     assert all(a["stdin"] > base for a in an)                            # bukan APK tunggal: paket berisi base + split + extras
