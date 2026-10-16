@@ -11,7 +11,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25               # naik dari 10: suite Tahap 3 ±3900 tes (±10 menit; tes verify-build menjalankan skrip bash dengan >200 panggilan docker palsu per jalan)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
