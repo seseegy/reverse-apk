@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from rvcore import buildproto, signspool, store
+from rvcore import buildproto, bundle, bundleout, installscript, signspool, store
 from rvcore.db import connect
 from rvcore.fsutil import open_dir_chain, rmtree_at
 from rvcore.paths import MAX_PROTO_ID, Layout
@@ -45,13 +45,20 @@ log = logging.getLogger("reverse-apk.builds")
 POLL_INTERVAL = 1.0
 RUNNER_STALE_AFTER = 45.0              # detik tanpa detak jantung runner setelah job diambil = runner mati
 GRACE = 60.0                           # runner seharusnya sudah berhenti pada timeout + GRACE; +GRACE lagi -> menyerah
-JOB_TIMEOUT_MARGIN = 600               # job_timeout RQ = TIMEOUT_BUILD + TIMEOUT_SIGN + ini
+JOB_TIMEOUT_MARGIN = 600               # job_timeout RQ = TIMEOUT_BUILD + TIMEOUT_SIGN + ini (APK tunggal; tidak berubah dari 2b)
+BUNDLE_JOB_MARGIN = 3800               # paket: 600 + SIGN_PER_FILE_S x 199 + ASSEMBLE_TIMEOUT (1200) dibulatkan; WAJIB sama dengan web.app.builds (tes paritas)
+ASSEMBLE_TIMEOUT = 1200                # tenggat perakitan paket akhir (ASUMSI: laju rekompresi belum diukur)
+ASSEMBLE_RESERVE = 1024 * 1024 * 1024  # cadangan disk di atas ukuran upload saat merakit
+BUNDLE_KINDS = ("xapk", "apks")
 QUEUE_NAME = "jobs"                    # sama dengan worker.QUEUE_NAME (dijaga tes main)
 RESULT_LIMIT = 64 * 1024               # signkeys.read_small MENOLAK (tidak memotong) hasil runner yang lebih besar
 HEARTBEAT_LIMIT = 16 * 1024
 UNSIGNED, SIGNED, SRC = "unsigned.apk", "signed.apk", "src"
 SCRATCH = frozenset({SRC, UNSIGNED, SIGNED})
 SIGN_TMP_PREFIX = ".sign-"
+# Sisa sementara paket (Tahap 3): masukan/keluaran per split, berkas antara runner, dan tmp perakitan. Paket akhir/skrip (`*-modified-<id>*`) TIDAK cocok.
+SCRATCH_RE = re.compile(r"(?:split|signed)-\d{3}\.apk(?:\.part)?\Z")
+SCRATCH_PREFIXES = (SIGN_TMP_PREFIX, ".split-", ".alias-", ".bundle-", ".install-")
 STAGE_TAIL = 1500
 NAME_BASE_MAX = 80
 HASH_BLOCK = 1024 * 1024
@@ -62,7 +69,16 @@ SIGN_TEXT = {
     "sign_cert_mismatch": "Sertifikat penanda tangan tidak sama dengan sertifikat keystore pemilik (atau tidak bisa dipastikan); hasil dibuang.",
     "sign_bad_result": "Hasil penandatanganan tidak koheren atau tidak memenuhi syarat (v2 dan v3, tepat satu penanda tangan); hasil dibuang.",
     "artifact_changed": "APK berubah di antara build, penandatanganan, dan penamaan (hash tidak sama atau berkas tidak aman); hasil dibuang.",
+    "bundle_changed": "Paket unggahan atau rencana split berubah di antara build dan perakitan; hasil dibuang.",
+    "assemble_failed": "Perakitan paket akhir gagal (berkas sementara, ruang disk, atau verifikasi); hasil dibuang.",
+    "assemble_timeout": "Perakitan paket akhir melewati batas waktu; hasil dibuang.",
+    "no_space": "Ruang disk tidak cukup untuk merakit paket akhir; hasil dibuang.",
 }
+
+
+def job_margin(source_kind: str) -> int:
+    """Margin `job_timeout` RQ: paket (xapk/apks) memakai margin besar, APK tunggal tetap 600 (2b)."""
+    return BUNDLE_JOB_MARGIN if source_kind in BUNDLE_KINDS else JOB_TIMEOUT_MARGIN
 
 
 def _env_int(name: str, default: int, lo: int, hi: int) -> int:
@@ -94,7 +110,10 @@ class BuildConfig:
 
     @property
     def job_timeout(self) -> int:
-        return self.timeout_build + self.timeout_sign + JOB_TIMEOUT_MARGIN
+        return self.job_timeout_for("apk")
+
+    def job_timeout_for(self, source_kind: str) -> int:
+        return self.timeout_build + self.timeout_sign + job_margin(source_kind)
 
 
 class _Fail(Exception):
@@ -116,7 +135,7 @@ class _Run:
     row: Any
     analysis: Any
     lines: list[str] = field(default_factory=list)      # stage_log yang sudah terkumpul (ringkasan build, signing_mulai)
-    published: str | None = None                       # nama artefak yang sudah diterbitkan (dihapus bila build tidak berakhir `done`)
+    published: list[str] = field(default_factory=list)  # nama artefak yang sudah diterbitkan (SEMUA dihapus bila build tidak berakhir `done`)
     done: bool = False
 
     @property
@@ -210,6 +229,9 @@ def _build(run: _Run) -> None:
         raise _Fail("internal", "Folder build tidak aman atau tidak bisa disiapkan; build dibatalkan.") from None
 
     result = _run_runner(run)
+    kind = run.row["source_kind"]
+    if result["source_kind"] != kind:                           # runner melaporkan format lain dari yang diminta: tidak dipercaya
+        raise _Fail("bundle_changed", SIGN_TEXT["bundle_changed"])
     run.lines.append(_summary(result))
     t_sign = store.now()
     run.lines.append(f"signing_mulai={t_sign:.6f}")
@@ -218,15 +240,23 @@ def _build(run: _Run) -> None:
     except store.BuildStateError:                              # pembatalan menang (CAS cancel_requested = 0), atau baris sudah final
         raise _Cancel() from None
 
+    if kind != "apk":
+        _precheck_bundle(run, result)                           # upload ditukar/rencana beda: gagal SEBELUM signer dipanggil
     signed = _sign(run, result)
-    problem = _check_sign_result(signed, _owner_cert(cfg), result["output_sha256"])
+    problem = _check_sign_result(signed, _owner_cert(cfg), result["output_sha256"], result["splits"])
     if problem is not None:
         raise _Fail(problem[0], problem[1])
-    name = _publish(run, signed)
-    run.lines.append(f"tanda_tangan: {signed['elapsed']:.1f} dtk (v2 dan v3, 1 penanda tangan)")
+    if kind == "apk":
+        name, out_sha, out_size = _publish(run, signed), signed["output_sha256"], signed["output_size"]
+        run.lines.append(f"tanda_tangan: {signed['elapsed']:.1f} dtk (v2 dan v3, 1 penanda tangan)")
+    else:
+        pub = _assemble_publish(run, result, signed)
+        name, out_sha, out_size = pub["name"], pub["sha256"], pub["size"]
+        run.lines.append(f"tanda_tangan: {signed['elapsed']:.1f} dtk ({1 + len(result['splits'])} berkas, v2 dan v3, 1 penanda tangan, satu sertifikat)")
+        run.lines.extend(pub["lines"])
     try:
-        store.finish_build(run.conn, run.bid, output_name=name, output_sha256=signed["output_sha256"], output_size=signed["output_size"],
-                           output_format="apk", cert_sha256=signed["cert_sha256"], verify_ok=1, stage_log="\n".join(run.lines))
+        store.finish_build(run.conn, run.bid, output_name=name, output_sha256=out_sha, output_size=out_size,
+                           output_format=kind, cert_sha256=signed["cert_sha256"], verify_ok=1, stage_log="\n".join(run.lines))
     except store.BuildStateError:                              # pembatalan terlambat (atau baris sudah `failed` oleh pemulihan)
         raise _Cancel() from None
     run.done = True
@@ -259,7 +289,7 @@ def _run_runner(run: _Run) -> dict[str, Any]:
     spool = Spool(cfg.layout.spool)
     spool.ensure_dirs()
     try:
-        job = buildproto.build_build_request(run.aid, run.bid, run.row["diff_sha256"], run.analysis["sha256"], cfg.timeout_build)
+        job = buildproto.build_build_request(run.aid, run.bid, run.row["diff_sha256"], run.analysis["sha256"], cfg.timeout_build, run.row["source_kind"])
     except ValueError as exc:
         raise _Fail("internal", f"Permintaan ke runner tidak valid: {exc}") from None
     job_id = job["job_id"]
@@ -356,6 +386,10 @@ def _summary(result: dict[str, Any]) -> str:
     line = f"build: {result['elapsed']:.1f} dtk, {result['output_size']} B"
     if result["peak_mem_mib"] is not None:
         line += f", puncak memori {result['peak_mem_mib']} MiB"
+    if result["source_kind"] != "apk":
+        line += f"\nsplit_n={len(result['splits'])}"
+        if result["warnings"]:
+            line += "\nperingatan=" + ",".join(result["warnings"])
     return line
 
 
@@ -380,8 +414,9 @@ def _sign(run: _Run, result: dict[str, Any]) -> dict[str, Any]:
     watcher = threading.Thread(target=watch, daemon=True)
     watcher.start()
     try:
-        res = signspool.submit_and_wait(signspool.make_spool(cfg.layout.signspool), run.aid, run.bid, timeout=cfg.timeout_sign,
-                                        expect_sha256=result["output_sha256"], cancel=cancel)
+        res = signspool.submit_and_wait(signspool.make_spool(cfg.layout.signspool), run.aid, run.bid,
+                                        timeout=signspool.sign_timeout(cfg.timeout_sign, len(result["splits"])),
+                                        expect_sha256=result["output_sha256"], splits=[sp["sha256"] for sp in result["splits"]], cancel=cancel)
     except signspool.SignerUnavailable as exc:
         raise _Fail("signer_unavailable", exc.message) from None
     finally:
@@ -395,7 +430,7 @@ def _sign(run: _Run, result: dict[str, Any]) -> dict[str, Any]:
     return res
 
 
-def _check_sign_result(res: dict[str, Any], owner: str | None, runner_sha: str) -> tuple[str, str] | None:
+def _check_sign_result(res: dict[str, Any], owner: str | None, runner_sha: str, runner_splits: Any = ()) -> tuple[str, str] | None:
     """Semua syarat WAJIB (desain §8.3), tidak bergantung pada `parse_result`: None bila lolos, selain itu (kode, teks)."""
     def bad(code: str) -> tuple[str, str]:
         return code, SIGN_TEXT[code]
@@ -414,6 +449,21 @@ def _check_sign_result(res: dict[str, Any], owner: str | None, runner_sha: str) 
         return bad("sign_bad_result")
     if res.get("input_sha256") != runner_sha:
         return bad("artifact_changed")
+    rows = res.get("splits", [])
+    if not isinstance(rows, list) or len(rows) != len(runner_splits):
+        return bad("sign_bad_result")                           # signer bergaya 2b yang mengabaikan `splits` berakhir di sini (gagal-tertutup)
+    for position, (row, sent) in enumerate(zip(rows, runner_splits), 1):
+        if not isinstance(row, dict) or row.get("index") != position or type(row.get("index")) is not int:
+            return bad("sign_bad_result")
+        size, out_sha = row.get("output_size"), row.get("output_sha256")
+        if type(size) is not int or size <= 0 or not isinstance(out_sha, str) or buildproto.HEX64_RE.match(out_sha) is None:
+            return bad("sign_bad_result")
+        if row.get("v2") is not True or row.get("v3") is not True or type(row.get("signer_count")) is not int or row["signer_count"] != 1:
+            return bad("sign_bad_result")
+        if row.get("input_sha256") != sent["sha256"]:
+            return bad("artifact_changed")
+        if row.get("cert_sha256") != owner:
+            return bad("sign_cert_mismatch")
     return None
 
 
@@ -423,12 +473,145 @@ def _sanitise(value: Any) -> str:
     return re.sub(r"_+", "_", text).lstrip("._-")[:NAME_BASE_MAX]
 
 
-def artifact_name(package: Any, filename_display: Any, build_id: int) -> str:
-    """`<base>-modified-<build_id>.apk` — turunan SISTEM saja: paket dari manifes, atau stem nama berkas, atau `app`. TIDAK dari catatan/AI/`requested_by`."""
+def _base_name(package: Any, filename_display: Any) -> str:
     stem = Path(filename_display).stem if isinstance(filename_display, str) and filename_display else ""
-    base = _sanitise(package) or _sanitise(stem) or "app"
-    name = f"{base}-modified-{build_id}.apk"
-    return name if store._OUTPUT_NAME_RE.fullmatch(name) else f"app-modified-{build_id}.apk"
+    return _sanitise(package) or _sanitise(stem) or "app"
+
+
+def artifact_name(package: Any, filename_display: Any, build_id: int, fmt: str = "apk") -> str:
+    """`<base>-modified-<build_id>.<apk|xapk|apks>` — turunan SISTEM saja: paket dari manifes, atau stem nama berkas, atau `app`. TIDAK dari catatan/AI/`requested_by`."""
+    ext = fmt if fmt in ("apk", *BUNDLE_KINDS) else "apk"
+    name = f"{_base_name(package, filename_display)}-modified-{build_id}.{ext}"
+    return name if store._OUTPUT_NAME_RE.fullmatch(name) else f"app-modified-{build_id}.{ext}"
+
+
+def install_script_name(package: Any, filename_display: Any, build_id: int) -> str:
+    """Skrip pasang bersaudara dengan paket: `<base>-modified-<build_id>-install.sh` (<= 111 karakter < batas 120)."""
+    name = f"{_base_name(package, filename_display)}-modified-{build_id}-install.sh"
+    return name if store._OUTPUT_NAME_RE.fullmatch(name) else f"app-modified-{build_id}-install.sh"
+
+
+def _bundle_fail(exc: Exception) -> _Fail:
+    """BundleError/AssembleError -> _Fail dengan kode yang diterima store (<= 40 karakter) dan teks Indonesia tertutup."""
+    code = getattr(exc, "code", "")
+    if code in ("bundle_changed", "artifact_changed", "assemble_failed", "assemble_timeout", "no_space"):
+        return _Fail(code, SIGN_TEXT[code])
+    if code in buildproto.BUILD_ERROR_CODES:
+        return _Fail(code, buildproto.ERROR_TEXT[code])
+    return _Fail("bundle_invalid", buildproto.ERROR_TEXT["bundle_invalid"])
+
+
+def _plan_matches(plan: bundle.SplitSet, kind: str, result: dict[str, Any]) -> bool:
+    """Rencana yang dihitung worker sendiri dari upload == laporan runner (format, plan_sha256, alias ⊆ kandidat, jumlah split)."""
+    aliases = result["aliases"]
+    candidates = {plan.apk_order.index(n) for n in plan.alias_candidates}
+    return (plan.format == kind and plan.plan_sha256 == result["plan_sha256"] and set(aliases) <= candidates
+            and len(bundleout.final_split_names(plan, aliases)) == len(result["splits"]))
+
+
+def _precheck_bundle(run: _Run, result: dict[str, Any]) -> None:
+    """Lintasan 1 saja (tanpa salinan memfd) sebelum menandatangani: hemat bila upload sudah berubah. Pemeriksaan sebenarnya diulang di `_assemble_publish`."""
+    try:
+        ufd = open_dir_chain(run.cfg.layout.uploads)
+    except OSError:
+        raise _Fail("bundle_changed", SIGN_TEXT["bundle_changed"]) from None
+    try:
+        with bundle.begin_upload(ufd, run.analysis["sha256"], bundle.UPLOAD_COPY_MAX_WORKER_MB * 1024 * 1024) as handle, handle.zipfile() as zf:
+            plan = bundle.plan_from_zip(zf)
+    except bundle.BundleError as exc:
+        raise _bundle_fail(exc) from None
+    finally:
+        os.close(ufd)
+    if not _plan_matches(plan, run.row["source_kind"], result):
+        raise _Fail("bundle_changed", SIGN_TEXT["bundle_changed"])
+
+
+def _assemble_check(run: _Run, started: float, last: list[float]) -> Any:
+    """`check()` untuk perakit: tenggat `ASSEMBLE_TIMEOUT` dan pembatalan DB (dibatasi 2x per detik agar tidak membebani SQLite)."""
+    def check() -> None:
+        now = time.monotonic()
+        if now - started > ASSEMBLE_TIMEOUT:
+            raise _Fail("assemble_timeout", SIGN_TEXT["assemble_timeout"])
+        if now - last[0] >= 0.5:
+            last[0] = now
+            if store.is_build_cancel_requested(run.conn, run.bid):
+                raise _Cancel()
+    return check
+
+
+def _assemble_publish(run: _Run, result: dict[str, Any], signed: dict[str, Any]) -> dict[str, Any]:
+    """Perakitan format asal (design 3.6). Urutan TETAP: salinan upload (hash ulang) -> rencana == laporan runner -> skrip tmp -> paket tmp (hash saat disalin,
+    verifikasi ulang) -> rename skrip lalu paket (A-17) -> cek inode -> hash skrip dibaca ulang. Nama dan urutan entri SELALU dari upload, tak pernah dari runner."""
+    cfg, kind = run.cfg, run.row["source_kind"]
+    started = time.monotonic()
+    check = _assemble_check(run, started, [started])
+    try:
+        bfd = open_dir_chain(cfg.layout.builds, str(run.aid), str(run.bid))
+    except OSError:
+        raise _changed() from None
+    try:
+        try:
+            ufd = open_dir_chain(cfg.layout.uploads)
+        except OSError:
+            raise _Fail("bundle_changed", SIGN_TEXT["bundle_changed"]) from None
+        try:
+            copy = bundle.open_upload(ufd, run.analysis["sha256"], bundle.UPLOAD_COPY_MAX_WORKER_MB * 1024 * 1024, check)
+        except bundle.BundleError as exc:
+            raise _bundle_fail(exc) from None
+        finally:
+            os.close(ufd)
+        with copy:
+            try:
+                plan = bundle.plan_from_zip(copy.zip)
+            except bundle.BundleError as exc:
+                raise _bundle_fail(exc) from None
+            aliases = result["aliases"]
+            final = bundleout.final_split_names(plan, aliases)
+            if not _plan_matches(plan, kind, result) or len(final) != len(signed["splits"]):
+                raise _Fail("bundle_changed", SIGN_TEXT["bundle_changed"])
+            st = os.statvfs(bfd)
+            if st.f_bavail * st.f_frsize < copy.size + ASSEMBLE_RESERVE:
+                raise _Fail("no_space", SIGN_TEXT["no_space"])
+            token = uuid.uuid4().hex[:12]
+            tmp_pkg, tmp_script = f".bundle-{token}.tmp", f".install-{token}.tmp"
+            pkg_name = artifact_name(run.analysis["package"], run.analysis["filename_display"], run.bid, kind)
+            script_name = install_script_name(run.analysis["package"], run.analysis["filename_display"], run.bid)
+            obb = [i.filename for i in copy.zip.infolist() if kind == "xapk" and not i.is_dir() and i.filename.lower().endswith(".obb")]
+            try:
+                text = installscript.render(kind, pkg_name, run.analysis["package"] or "", plan.base, final, obb)
+            except ValueError:
+                raise _Fail("assemble_failed", SIGN_TEXT["assemble_failed"]) from None
+            if installscript.lint(text):
+                raise _Fail("assemble_failed", SIGN_TEXT["assemble_failed"])
+            base = bundleout.SignedFile(SIGNED, signed["output_sha256"], signed["output_size"])
+            parts = [bundleout.SignedFile(signspool.split_output_name(r["index"]), r["output_sha256"], r["output_size"]) for r in signed["splits"]]
+            try:
+                bundleout.write_new_file(bfd, tmp_script, text.encode("utf-8"))
+                built = bundleout.assemble(bfd, tmp_pkg, copy.zip, plan, aliases, base, parts, check)
+                ident_pkg, ident_script = os.lstat(tmp_pkg, dir_fd=bfd), os.lstat(tmp_script, dir_fd=bfd)
+            except (bundleout.AssembleError, OSError) as exc:
+                raise _bundle_fail(exc if isinstance(exc, bundleout.AssembleError) else bundleout.AssembleError("assemble_failed", "")) from None
+        check()
+        _rename_over(bfd, tmp_script, script_name)
+        run.published.append(script_name)
+        check()                                                  # batal/tenggat di antara dua rename: _cleanup menghapus skrip yang sudah terbit
+        _rename_over(bfd, tmp_pkg, pkg_name)
+        run.published.append(pkg_name)
+        for name, ident in ((script_name, ident_script), (pkg_name, ident_pkg)):
+            try:
+                after = os.lstat(name, dir_fd=bfd)
+            except OSError:
+                raise _changed() from None
+            if (after.st_dev, after.st_ino) != (ident.st_dev, ident.st_ino) or not stat.S_ISREG(after.st_mode):
+                raise _changed()
+        try:
+            script_sha, _size = bundleout.hash_file_at(bfd, script_name)
+        except bundleout.AssembleError as exc:
+            raise _bundle_fail(exc) from None
+        lines = [f"install_script={script_name} sha256={script_sha}", *built.notes]
+        return {"name": pkg_name, "sha256": built.sha256, "size": built.size, "lines": lines}
+    finally:
+        os.close(bfd)
 
 
 def _changed(detail: str = "") -> _Fail:
@@ -465,7 +648,7 @@ def _publish(run: _Run, signed: dict[str, Any]) -> str:
             os.close(fd)
         name = artifact_name(run.analysis["package"], run.analysis["filename_display"], run.bid)
         _rename_over(bfd, SIGNED, name)
-        run.published = name
+        run.published.append(name)
         try:
             after = os.lstat(name, dir_fd=bfd)
         except OSError:
@@ -524,8 +707,9 @@ def _finish_cancel(run: _Run) -> None:
         log.warning("build %s tidak bisa ditandai dibatalkan: %s", run.bid, exc)
 
 
-def _scrub_build_dir(layout: Layout, aid: int, bid: int, also: str | None = None) -> None:
-    """Hapus sisa sementara di `builds/<aid>/<bid>` lewat rantai-dirfd (src/, unsigned.apk, signed.apk, .sign-*, dan `also`). Idempoten; rantai yang ditanam symlink
+def _scrub_build_dir(layout: Layout, aid: int, bid: int, also: Any = None) -> None:
+    """Hapus sisa sementara di `builds/<aid>/<bid>` lewat rantai-dirfd (src/, unsigned.apk, signed.apk, .sign-*, sisa paket `split-NNN.apk`/`signed-NNN.apk`/`.split-*`/
+    `.alias-*`/`.bundle-*`/`.install-*`, dan nama-nama `also`: str atau daftar). Idempoten; rantai yang ditanam symlink
     DITOLAK (gagal-tertutup: tidak ada yang dihapus lewat symlink). Galat hanya di-log."""
     try:
         bfd = open_dir_chain(layout.builds, str(aid), str(bid))
@@ -534,9 +718,10 @@ def _scrub_build_dir(layout: Layout, aid: int, bid: int, also: str | None = None
     except OSError as exc:
         log.warning("build %s: pembersihan dilewati, jalur builds tidak aman (%s)", bid, errno.errorcode.get(exc.errno or 0, "OSError"))
         return
+    extra = {also} if isinstance(also, str) else set(also or ())
     try:
         for name in os.listdir(bfd):
-            if name in SCRATCH or name.startswith(SIGN_TMP_PREFIX) or name == also:
+            if name in SCRATCH or name.startswith(SCRATCH_PREFIXES) or SCRATCH_RE.match(name) or name in extra:
                 try:
                     rmtree_at(bfd, name)
                 except OSError as exc:
@@ -549,7 +734,7 @@ def _scrub_build_dir(layout: Layout, aid: int, bid: int, also: str | None = None
 
 def _cleanup(run: _Run) -> None:
     try:
-        _scrub_build_dir(run.cfg.layout, run.aid, run.bid, also=None if run.done else run.published)
+        _scrub_build_dir(run.cfg.layout, run.aid, run.bid, also=() if run.done else tuple(run.published))
     except Exception:  # noqa: BLE001 - pembersihan tidak boleh menutupi hasil build
         log.exception("pembersihan build %s gagal", run.bid)
 
@@ -658,7 +843,7 @@ def requeue_orphans(redis_conn: Any, queue_name: str = QUEUE_NAME) -> list[int]:
                         store.queue_build(db, build_id)
                     except store.BuildStateError:
                         continue
-                queue.enqueue("tasks.run_build", build_id, job_id=f"build-{build_id}-{uuid.uuid4().hex[:8]}", job_timeout=cfg.job_timeout,
+                queue.enqueue("tasks.run_build", build_id, job_id=f"build-{build_id}-{uuid.uuid4().hex[:8]}", job_timeout=cfg.job_timeout_for(row["source_kind"]),
                               result_ttl=300, failure_ttl=86400)
                 requeued.append(build_id)
         finally:

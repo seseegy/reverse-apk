@@ -63,8 +63,27 @@ class FakeRunner:
         (bdir / "build.log").write_text("I: Building apk file...\n")
         data = b"PK-unsigned-" + job_id.encode()
         (bdir / "unsigned.apk").write_bytes(data)
-        return {"status": "ok", "output_size": len(data), "output_sha256": sha(data), "elapsed": 1.5, "peak_mem_mib": 123,
-                "apktool_log_tail": "I: Building apk file...", "files": 10, "bytes": 100}
+        res = {"status": "ok", "output_size": len(data), "output_sha256": sha(data), "elapsed": 1.5, "peak_mem_mib": 123,
+               "apktool_log_tail": "I: Building apk file...", "files": 10, "bytes": 100}
+        kind = job.get("source_kind", "apk")
+        if kind != "apk":
+            res.update(FakeRunner.bundle_fields(runner.layout, job, bdir, kind))
+        return res
+
+    @staticmethod
+    def bundle_fields(layout: Layout, job: dict, bdir: Path, kind: str) -> dict:
+        """Bidang paket seperti runner nyata: rencana dari upload, alias = semua kandidat, `split-NNN.apk` tanpa nama."""
+        import zipfile
+        from rvcore import bundle
+        with zipfile.ZipFile(layout.upload_path(job["sha256"])) as zf:
+            plan = bundle.plan_from_zip(zf)
+        aliases = [plan.apk_order.index(n) for n in plan.alias_candidates]
+        splits = []
+        for k, name in enumerate([n for i, n in enumerate(plan.apk_order) if i not in aliases], 1):
+            body = b"PK-split-" + name.encode()
+            (bdir / f"split-{k:03d}.apk").write_bytes(body)
+            splits.append({"index": k, "sha256": sha(body), "size": len(body)})
+        return {"source_kind": kind, "plan_sha256": plan.plan_sha256, "aliases": aliases, "splits": splits, "warnings": []}
 
     def wait_cancel(self, job_id: str, seconds: float = 10.0) -> bool:
         deadline = time.monotonic() + seconds
@@ -137,7 +156,14 @@ class FakeSigner:
         data = (bdir / "unsigned.apk").read_bytes()
         out = data + b"+SIGNED"
         (bdir / "signed.apk").write_bytes(out)
-        return signed_result(sha(data), out)
+        rows = []
+        for k, want in enumerate(job.get("splits") or [], 1):
+            body = (bdir / f"split-{k:03d}.apk").read_bytes()
+            signed = body + b"+SIGNED"
+            (bdir / f"signed-{k:03d}.apk").write_bytes(signed)
+            rows.append({"index": k, "input_sha256": sha(body), "output_sha256": sha(signed), "output_size": len(signed), "cert_sha256": OWNER,
+                         "v2": True, "v3": True, "signer_count": 1})
+        return signed_result(sha(data), out, **({"splits": rows} if rows or job.get("splits") is not None else {}))
 
     def wait_cancel(self, job_id: str, seconds: float = 10.0) -> bool:
         deadline = time.monotonic() + seconds
@@ -188,7 +214,7 @@ class Rig:
     def __init__(self, root: str | os.PathLike[str]) -> None:
         self.root = Path(root)
         self.layout = Layout(self.root / "data")
-        for d in (self.layout.builds, self.layout.signspool, self.layout.spool, self.layout.work):
+        for d in (self.layout.builds, self.layout.signspool, self.layout.spool, self.layout.work, self.layout.uploads):
             d.mkdir(parents=True, exist_ok=True)
         migrate(self.layout.db_path)
         self._n = 0
@@ -214,13 +240,30 @@ class Rig:
             conn.close()
         return aid
 
-    def build(self, aid: int, *, note: str = "", requested_by: str = "user", upto: str = "queued") -> int:
+    def bundle_analysis(self, data: bytes, fmt: str, package: str | None = "com.contoh.app", filename: str = "contoh.xapk") -> int:
+        """Analisis dari paket XAPK/APKS: upload `<sha>.apk` ditulis di `uploads/` (hash = sha256 analisis), `options.bundle.format` terisi."""
+        digest = sha(data)
+        self.layout.uploads.mkdir(parents=True, exist_ok=True)
+        (self.layout.uploads / f"{digest}.apk").write_bytes(data)
+        conn = self.conn()
+        try:
+            with tx(conn):
+                apk_id, aid = store.create_apk_with_analysis(conn, sha256=digest, md5=digest[:32], filename=filename, size=len(data), options={"bundle": {"format": fmt}})
+            if package is not None:
+                store.update_apk_meta(conn, apk_id, package=package)
+            store.set_stage(conn, aid, "apktool", store.OK)
+            assert store.finish_analysis(conn, aid, store.DONE)
+        finally:
+            conn.close()
+        return aid
+
+    def build(self, aid: int, *, note: str = "", requested_by: str = "user", upto: str = "queued", source_kind: str = "apk") -> int:
         """Build baru sampai status `upto` (awaiting_approval | approved | queued)."""
         self._n += 1
         diff = sha(f"diff-{self._n}".encode())
         conn = self.conn()
         try:
-            bid = store.create_build(conn, aid, requested_by=requested_by, source_kind="apk", diff_sha256=diff, diff_summary={"n": 1}, note=note)
+            bid = store.create_build(conn, aid, requested_by=requested_by, source_kind=source_kind, diff_sha256=diff, diff_summary={"n": 1}, note=note)
             if upto != "awaiting_approval":
                 store.approve_build(conn, bid, diff_sha256=diff, statement_sha256=store.approval_statement_sha256(), statement_version=1)
             if upto == "queued":

@@ -38,6 +38,8 @@ HEARTBEAT_STALE_AFTER = 30.0                 # detik; worker menulis tiap 10 dtk
 SUMMARY_MAX_CHARS = 7000                     # store menolak > 8192; sisanya untuk pembungkus
 TRACE_FILE = "assets/reverse-apk-modified.txt"
 JOB_TIMEOUT_MARGIN = 600                     # sama dengan worker.builds.JOB_TIMEOUT_MARGIN
+BUNDLE_JOB_MARGIN = 3800                     # sama dengan worker.builds.BUNDLE_JOB_MARGIN (paket xapk/apks; dijaga tes paritas)
+BUNDLE_KINDS = ("xapk", "apks")
 HASH_BLOCK = 1024 * 1024
 OPEN_ARTIFACT = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
@@ -71,6 +73,11 @@ def _env_int(name: str, default: int, lo: int, hi: int) -> int:
     except ValueError:
         return default
     return max(lo, min(hi, value))
+
+
+def job_margin(source_kind: str) -> int:
+    """Margin `job_timeout` RQ menurut format: paket memakai margin besar, APK tunggal tetap 600 (sama dengan `worker.builds.job_margin`)."""
+    return BUNDLE_JOB_MARGIN if source_kind in BUNDLE_KINDS else JOB_TIMEOUT_MARGIN
 
 
 def job_timeout_from_env() -> int:
@@ -194,8 +201,13 @@ def request_build(d: Deps, analysis_id: int, requested_by: str = "user", note: s
             options = json.loads(row["options"] or "{}")
         except (ValueError, RecursionError):
             options = {}
-        if isinstance(options, dict) and options.get("bundle"):
-            raise BuildsError("paket_belum_didukung", "Paket XAPK/APKS belum didukung untuk build (Tahap 3); hanya APK biasa.")
+        source_kind = "apk"
+        marked = options.get("bundle") if isinstance(options, dict) else None
+        if marked:
+            fmt = marked.get("format") if isinstance(marked, dict) else None
+            if fmt not in BUNDLE_KINDS:
+                raise BuildsError("paket_belum_didukung", "Format paket ini belum didukung untuk build; hanya APK, XAPK, dan APKS.")
+            source_kind = fmt
         stage = next((s["status"] for s in store.get_stages(conn, analysis_id) if s["name"] == "apktool"), None)
         if stage not in (store.OK, store.WARN):
             raise BuildsError("apktool_tidak_ada", "Hasil apktool tidak tersedia untuk analisis ini; tidak bisa dibangun.")
@@ -207,7 +219,7 @@ def request_build(d: Deps, analysis_id: int, requested_by: str = "user", note: s
     summary = build_summary(diff)
     with closing(d.db()) as conn:
         try:
-            build_id = store.create_build(conn, analysis_id, requested_by=requested_by, source_kind="apk", diff_sha256=diff["diff_sha256"], diff_summary=summary, note=note)
+            build_id = store.create_build(conn, analysis_id, requested_by=requested_by, source_kind=source_kind, diff_sha256=diff["diff_sha256"], diff_summary=summary, note=note)
         except store.BuildInputError as exc:
             raise BuildsError("masukan_tidak_valid", str(exc)) from None
         except store.BuildStateError as exc:
@@ -263,7 +275,7 @@ def approve_build(d: Deps, build_id: int, diff_sha256: str, *, statement_version
         return result
     try:
         if not _has_job(d.redis, build_id):
-            jobs.enqueue_build(d.redis, build_id, d.job_timeout)
+            jobs.enqueue_build(d.redis, build_id, d.job_timeout + job_margin(row["source_kind"]) - JOB_TIMEOUT_MARGIN)
         result["enqueued"] = True
     except redis.RedisError as exc:
         result["galat"] = f"antrean (Redis) tidak terjangkau: {type(exc).__name__}"
