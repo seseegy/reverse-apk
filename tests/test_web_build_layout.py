@@ -12,7 +12,7 @@ from contextlib import closing
 import pytest
 from conftest import BROWSER, ROOT
 from rvcore import shellspool, store
-from test_web_build_ui import mk_build, new_analysis
+from test_web_build_ui import mk_build, mk_done, new_analysis
 from web_rig import FakeBench, live_redis
 
 from app import builds, context, routes_build
@@ -94,3 +94,61 @@ def test_long_error_and_rejection_texts_are_wrapped_in_break_paragraphs(client, 
 def query_analysis(bid: int) -> int:
     from conftest import query
     return query("SELECT analysis_id FROM build WHERE id = ?", bid)[0][0]
+
+
+# ====================================================================================== invarian CSS: hasil build dan log
+def test_hex_blocks_and_stage_log_have_wrap_rules_and_readable_size():
+    h, log = rule(".build-hash"), rule(".build-log")
+    assert "overflow-wrap: anywhere" in h and "word-break: break-all" in h and "display: block" in h
+    assert "white-space: pre-wrap" in log and "overflow-wrap: anywhere" in log and "overflow: auto" in log
+    for body in (h, log):
+        assert float(re.search(r"font-size:\s*([\d.]+)rem", body).group(1)) >= 0.8125
+
+
+def test_every_pre_in_the_stylesheet_wraps_or_scrolls_inside_its_own_box():
+    for sel in (".build-log", ".browse-pre"):
+        assert "overflow" in rule(sel), sel
+
+
+def test_stage_log_summary_is_styled_and_touch_sized_with_focus_ring():
+    assert "min-height: 44px" in rule(".build-fold > summary") and "cursor: pointer" in rule(".build-fold > summary")
+    assert "outline" in rule(".build-fold > summary:focus-visible")
+    assert ".build-fold[open] > summary::after" in CSS
+
+
+def test_download_buttons_stack_full_width_on_narrow_screens():
+    m = re.search(r"@media \(max-width: 640px\) \{\s*\.build-actions \{[^}]*\}\s*\.build-actions \.btn \{([^}]*)\}", CSS)
+    assert m and "width: 100%" in m.group(1) and "min-height: 44px" in m.group(1)
+
+
+# ====================================================================================== markup via test client: hasil build
+def test_finished_build_marks_hashes_as_long_tokens_and_shows_verification_as_a_badge(client, seeded, env):
+    aid = new_analysis("lay-done")
+    bid, name, _p = mk_done(aid, script=b"#!/bin/sh\necho ok\n", kind="xapk")
+    html = page(client, aid, bid)
+    assert len(re.findall(r'<dd class="build-hash token-panjang">[0-9a-f]{64}</dd>', html)) == 3     # hash diff + artefak + sertifikat
+    assert f'<dd class="mono break token-panjang">{name}</dd>' in html
+    assert re.search(r'class="badge badge-done">.*?<span>Lulus</span>', html, re.S) and "satu penanda tangan" in html
+
+
+def test_download_actions_put_the_primary_first_and_label_the_script_briefly(client, seeded, env):
+    aid = new_analysis("lay-dl")
+    bid, _n, _p = mk_done(aid, script=b"#!/bin/sh\necho ok\n", kind="xapk")
+    html = page(client, aid, bid)
+    row = re.search(r'<div class="btn-row build-actions">(.*?)</div>', html, re.S).group(1)
+    assert row.index("btn-primary") < row.index("btn-ghost") and f"/build/{bid}/download" in row and f"/build/{bid}/script" in row
+    assert "<span>Unduh XAPK</span>" in row and "<span>Unduh skrip adb</span>" in row and "install-multiple" not in row
+    assert "adb install-multiple" in html           # penjelasan pindah ke keterangan di bawah tombol
+    single = page(client, aid := new_analysis("lay-dl2"), (b := mk_done(aid))[0])
+    assert f"/build/{b[0]}/script" not in single and "Skrip adb berisi" not in single
+
+
+def test_stage_log_is_a_styled_fold_with_a_line_count_and_escaped_content(client, seeded, env):
+    aid = new_analysis("lay-log")
+    bid, _n, _p = mk_done(aid)
+    with closing(context.db()) as conn:
+        conn.execute("UPDATE build SET stage_log = ? WHERE id = ?", ("build: 23.2 dtk\nbadging: paket=a versionCode=3\n<b>x</b>", bid))
+        conn.commit()
+    html = page(client, aid, bid)
+    assert '<details class="build-fold">' in html and '<summary id="bl-title">Catatan tahap build <span class="count-pill">3 baris</span></summary>' in html
+    assert '<pre class="build-log">' in html and "&lt;b&gt;x&lt;/b&gt;" in html and "<b>x</b>" not in html

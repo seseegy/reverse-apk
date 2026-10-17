@@ -25,7 +25,7 @@
       <div><dt>Dibuat</dt><dd>{{ time_el(b.created_at) }}</dd></div>
       {% if b.approved_at %}<div><dt>Disetujui</dt><dd>{{ time_el(b.approved_at) }}</dd></div>{% endif %}
       {% if b.finished_at %}<div><dt>Selesai</dt><dd>{{ time_el(b.finished_at) }}</dd></div>{% endif %}
-      <div><dt>Hash diff (SHA-256)</dt><dd class="build-hash">{{ b.diff_sha256 }}</dd></div>
+      <div><dt>Hash diff (SHA-256)</dt><dd class="build-hash token-panjang">{{ b.diff_sha256 }}</dd></div>
     </dl>
     {% if b.ai %}
     <div class="alert alert-warn" role="note">
@@ -89,19 +89,20 @@
   <section class="card" aria-labelledby="br-title">
     <h2 id="br-title">Hasil build</h2>
     <dl class="dl dl-wide">
-      <div><dt>Berkas</dt><dd class="mono break">{{ b.output_name }}</dd></div>
+      <div><dt>Berkas</dt><dd class="mono break token-panjang">{{ b.output_name }}</dd></div>
       <div><dt>Ukuran</dt><dd>{{ b.output_size|bytes }}</dd></div>
-      <div><dt>SHA-256</dt><dd class="build-hash">{{ b.output_sha256 }}</dd></div>
-      <div><dt>Sertifikat (SHA-256)</dt><dd class="build-hash">{{ b.cert_sha256 }}</dd></div>
-      <div><dt>Verifikasi tanda tangan</dt><dd>{{ 'lulus (v2 + v3, satu penanda tangan)' if b.verify_ok == 1 else 'tidak lulus' }}</dd></div>
+      <div><dt>SHA-256</dt><dd class="build-hash token-panjang">{{ b.output_sha256 }}</dd></div>
+      <div><dt>Sertifikat (SHA-256)</dt><dd class="build-hash token-panjang">{{ b.cert_sha256 }}</dd></div>
+      <div><dt>Verifikasi tanda tangan</dt><dd class="build-verify">{% if b.verify_ok == 1 %}<span class="badge badge-done">{{ icon('check-circle', 14) }}<span>Lulus</span></span> <span class="muted">v2 + v3, satu penanda tangan</span>{% else %}<span class="badge badge-failed">{{ icon('x-circle', 14) }}<span>Tidak lulus</span></span>{% endif %}</dd></div>
     </dl>
     {% if b.can_download %}
-    <div class="btn-row">
+    <div class="btn-row build-actions">
       <a class="btn btn-primary" href="/analyses/{{ an.id }}/build/{{ b.id }}/download" download>{{ icon('download', 16) }}<span>Unduh {{ b.output_format|upper }}</span></a>
-      {% if b.has_script %}<a class="btn btn-ghost" href="/analyses/{{ an.id }}/build/{{ b.id }}/script" download>{{ icon('file-code', 16) }}<span>Unduh skrip adb install-multiple</span></a>{% endif %}
+      {% if b.has_script %}<a class="btn btn-ghost" href="/analyses/{{ an.id }}/build/{{ b.id }}/script" download>{{ icon('file-code', 16) }}<span>Unduh skrip adb</span></a>{% endif %}
     </div>
     <p class="muted hint">Sebelum dikirim, server menyalin berkas ke tempat yang tidak bisa diubah runner, menghitung ulang SHA-256 dari salinan, dan membandingkannya dengan hash di atas.
       Bila tidak cocok, unduhan ditolak (tidak ada byte yang dikirim). Setiap unduhan dicatat di audit log.</p>
+    {% if b.has_script %}<p class="muted hint">Skrip adb berisi perintah <span class="mono">adb install-multiple</span> untuk memasang semua APK di paket; aplikasi ini tidak menjalankan adb.</p>{% endif %}
     {% endif %}
     {% if b.bundle %}<p class="muted hint">Paket {{ b.output_format|upper }}: semua APK di dalamnya ditandatangani ulang dengan kunci yang sama. Aplikasi asli harus dicopot dulu sebelum memasang hasil.</p>{% endif %}
   </section>
@@ -109,8 +110,8 @@
 
   {% if b.stage_log %}
   <section class="card" aria-labelledby="bl-title">
-    <details>
-      <summary id="bl-title">Catatan tahap build</summary>
+    <details class="build-fold">
+      <summary id="bl-title">Catatan tahap build <span class="count-pill">{{ b.stage_log.splitlines()|length }} baris</span></summary>
       <pre class="build-log">{{ b.stage_log }}</pre>
     </details>
   </section>
