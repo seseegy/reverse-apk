@@ -142,9 +142,12 @@ main:focus { outline: none; }
   border-radius: var(--radius);
   padding: var(--space-5);
   display: grid;
+  grid-template-columns: minmax(0, 1fr);   /* kolom `auto` melebar mengikuti isi (hash, galat, tabel) dan mendorong kartu keluar layar */
   gap: var(--space-4);
 }
-.card-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; }
+.card-head > * { min-width: 0; }
+.card-head h2 { overflow-wrap: anywhere; }
 .card-foot {
   display: flex; align-items: center; gap: var(--space-4); flex-wrap: wrap;
   margin: 0; padding-top: var(--space-4); border-top: 1px solid var(--color-border);
@@ -270,6 +273,8 @@ input:hover { border-color: var(--color-muted-foreground); }
 
 [hidden] { display: none !important; }
 .break { overflow-wrap: anywhere; }
+/* Token panjang tanpa spasi (hash, nama paket, galat): dibungkus di batas mana pun, tidak pernah melebarkan halaman */
+.token-panjang { overflow-wrap: anywhere; min-width: 0; }
 .mono { font-family: var(--font-mono); font-size: 0.875em; }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
 .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
@@ -409,7 +414,7 @@ progress::-moz-progress-bar { background: var(--color-accent); }
 .head-side { display: grid; gap: var(--space-3); justify-items: end; }
 .head-side .btn-row { justify-content: flex-end; }
 
-.tabs { display: flex; gap: var(--space-4); border-bottom: 1px solid var(--color-border); overflow-x: auto; scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
+.tabs { position: relative; display: flex; gap: var(--space-4); border-bottom: 1px solid var(--color-border); overflow-x: auto; scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
 .tabs a { white-space: nowrap; flex: none; }
 .tabs a {
   padding: var(--space-2) var(--space-1); color: var(--color-muted-foreground); text-decoration: none;

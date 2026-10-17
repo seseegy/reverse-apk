@@ -35,7 +35,7 @@
     </div>
     {% endif %}
     {% if b.status == 'rejected' %}
-    <p class="muted">Ditolak. Alasan: {{ b.rejected_reason or '–' }}</p>
+    <p class="muted break">Ditolak. Alasan: {{ b.rejected_reason or '–' }}</p>
     {% endif %}
     {% if b.status in ('approved', 'queued') %}
     <p class="muted hint">Disetujui dan menunggu giliran di antrean. Halaman ini memperbarui status otomatis. Bila macet (mis. antrean sempat mati), kirim ulang:</p>
@@ -58,8 +58,8 @@
   {% if b.status == 'failed' or b.status == 'cancelled' %}
   <section class="card" aria-labelledby="bf-title">
     <h2 id="bf-title">{{ 'Build dibatalkan' if b.status == 'cancelled' else 'Build gagal' }}</h2>
-    <p><span class="mono">{{ b.error_code or '–' }}</span>{% if b.error_text %} · {{ b.error_text }}{% endif %}</p>
-    {% if b.hint %}<p class="muted">{{ b.hint }}</p>{% endif %}
+    <p class="break"><span class="mono">{{ b.error_code or '–' }}</span>{% if b.error_text %} · {{ b.error_text }}{% endif %}</p>
+    {% if b.hint %}<p class="muted break">{{ b.hint }}</p>{% endif %}
   </section>
   {% endif %}
 
