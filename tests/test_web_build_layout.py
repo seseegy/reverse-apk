@@ -314,3 +314,8 @@ def test_table_headers_and_filter_button_use_consistent_indonesian_copy(client, 
 def test_status_poll_script_restores_scroll_after_reload_without_new_dependencies():
     js = (ROOT / "services/web/app/static/js/build.js").read_text(encoding="utf-8")
     assert "sessionStorage" in js and "scrollTo" in js and "eval(" not in js
+
+
+def test_build_list_badge_may_wrap_so_it_never_widens_the_card_at_320px():
+    body = rule(".build-list .badge")
+    assert "max-width: 100%" in body and "white-space: normal" in body

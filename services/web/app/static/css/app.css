@@ -1257,7 +1257,7 @@ select:hover { border-color: var(--color-muted-foreground); }
 /* ---------- Daftar build (build.html): baris tabel; di layar sempit tiap build jadi kartu bertumpuk tanpa gulir samping ---------- */
 .build-open { display: inline-flex; align-items: center; min-height: 44px; font-weight: 600; overflow-wrap: anywhere; }
 .build-list td, .build-list th { overflow-wrap: anywhere; }
-.build-list .badge { max-width: 100%; }
+.build-list .badge { max-width: 100%; white-space: normal; }
 @media (max-width: 640px) {
   .build-list-wrap { overflow: visible; border: 0; }
   .build-list, .build-list tbody, .build-list tr, .build-list th, .build-list td { display: block; width: 100%; }
