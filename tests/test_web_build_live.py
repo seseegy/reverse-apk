@@ -281,3 +281,15 @@ def test_live_endpoint_json_is_parseable_and_utf8(client, seeded):
     bid = mk_build(aid, status="building")
     r = live(client, aid, bid)
     assert json.loads(r.content.decode("utf-8"))["status"] == "building" and r.headers["content-type"].startswith("application/json")
+
+
+def test_initial_updated_text_same_width_as_clock_so_first_poll_does_not_shift_layout(client, seeded):
+    """Temuan verifikasi browser: teks awal yang lebih panjang dari 'Terakhir diperbarui HH:MM:SS' membuat meta membungkus 2 baris
+    lalu 1 baris saat poll pertama (elemen di bawahnya naik ±22 px). Teks awal kini selebar jam, angka lebar tetap."""
+    aid = new_analysis("lv-shift")
+    bid = mk_build(aid, status="queued")
+    html = page(client, aid, bid)
+    assert "<span data-live-updated>Terakhir diperbarui --:--:--</span>" in html and "baru saja dimuat" not in html
+    css = CSS.read_text(encoding="utf-8")
+    m = re.search(r"\.build-live-meta\s*\{([^}]*)\}", css)
+    assert m and "tabular-nums" in m.group(1)

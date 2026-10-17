@@ -1256,7 +1256,7 @@ select:hover { border-color: var(--color-muted-foreground); }
 }
 
 /* ---------- Polling parsial detail build: ruang indikator dicadangkan (visibility, bukan display) supaya "memperbarui…" tidak menggeser tata letak ---------- */
-.build-live-meta { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: var(--space-3); margin: var(--space-2) 0; min-height: 1.5em; }
+.build-live-meta { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: var(--space-3); margin: var(--space-2) 0; min-height: 1.5em; font-variant-numeric: tabular-nums; }
 .build-live-busy { visibility: hidden; display: inline-block; min-width: 7em; }
 .build-live-busy.is-busy { visibility: visible; }
 .build-live-note:empty { display: none; }
