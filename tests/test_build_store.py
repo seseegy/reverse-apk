@@ -974,3 +974,30 @@ def test_compose_gains_no_volume_or_secret_and_stays_clean_for_signing_guard():
     # Jaga test_signer_toolchain: web/worker tidak boleh menyebut keystore/signer (komentar sudah dibuang oleh _block).
     for service in ("web", "worker"):
         assert not re.search(r"keystore|signer|SIGNER_", _block(service), re.I), service
+
+
+# ================================================================ 14. count_builds + list_builds(offset) (UI-14)
+def _rejected(conn, aid, n):
+    ids = []
+    for i in range(n):
+        bid = store.create_build(conn, aid, requested_by="user", source_kind="apk", diff_sha256=f"{i:064x}", diff_summary={"files": 1})
+        store.reject_build(conn, bid, "uji")
+        ids.append(bid)
+    return ids
+
+
+def test_count_builds_is_per_analysis_and_zero_when_empty(conn):
+    a, b = make_done_analysis(conn), make_done_analysis(conn)
+    assert store.count_builds(conn, a) == 0 and store.list_builds(conn, a, 50, 0) == []
+    _rejected(conn, a, 5)
+    _rejected(conn, b, 2)
+    assert store.count_builds(conn, a) == 5 and store.count_builds(conn, b) == 2 and store.count_builds(conn, 999999) == 0
+
+
+def test_list_builds_offset_pages_newest_first_without_overlap_or_leak(conn):
+    a, b = make_done_analysis(conn), make_done_analysis(conn)
+    ids = _rejected(conn, a, 7)
+    other = _rejected(conn, b, 3)
+    got = [r["id"] for r in store.list_builds(conn, a, 3, 0)] + [r["id"] for r in store.list_builds(conn, a, 3, 3)] + [r["id"] for r in store.list_builds(conn, a, 3, 6)]
+    assert got == sorted(ids, reverse=True) and not set(got) & set(other)
+    assert store.list_builds(conn, a, 3, 7) == [] and [r["id"] for r in store.list_builds(conn, a)] == sorted(ids, reverse=True)

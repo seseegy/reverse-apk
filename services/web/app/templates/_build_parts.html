@@ -13,6 +13,25 @@
 </span>
 {%- endmacro %}
 
+{#- Teks tahap untuk build yang berubah sendiri. Dipakai halaman detail DAN fragmen /live (`_build_live.html`) sehingga render awal dan hasil poll identik.
+    `b` cukup memuat status, poll, cancel_requested. Tanpa log/galat/hash/path: fragmen ini tidak boleh membawa data sensitif. -#}
+{% macro build_live_text(b) -%}
+{% if b.status in ('approved', 'queued') %}Disetujui dan menunggu giliran di antrean.
+{%- elif b.status == 'building' %}Runner sedang membangun APK (apktool).
+{%- elif b.status == 'signing' %}APK sedang ditandatangani dan diverifikasi.{% endif %}
+{%- if b.poll %} Halaman ini memperbarui status otomatis.{% endif %}
+{%- if b.cancel_requested %} Pembatalan sudah diminta.{% endif %}
+{%- endmacro %}
+
+{#- Dua slot yang diganti JS di tempat (data-live-slot). Satu-satunya definisi markup slot: halaman detail memanggil per slot, fragmen /live memanggil keduanya. -#}
+{% macro build_live_badge_slot(b) -%}
+<div class="live-badge" data-live-slot="badge">{{ build_badge(b) }}</div>
+{%- endmacro %}
+
+{% macro build_live_text_slot(b) -%}
+<p class="muted hint" data-live-slot="text">{{ build_live_text(b) }}</p>
+{%- endmacro %}
+
 {#- "Hal yang tidak dijanjikan" (PRD 09) + batas jujur: tampil di daftar build dan di layar persetujuan. -#}
 {% macro not_promised(items, limit_notice) -%}
 <section class="card" aria-labelledby="np-title">
@@ -22,4 +41,19 @@
   </ul>
   <p class="muted hint">{{ limit_notice }}</p>
 </section>
+{%- endmacro %}
+
+{#- Navigasi halaman daftar build: tautan biasa (tanpa JS). Hanya tampil bila lebih dari satu halaman; hitungan = SELURUH build analisis ini.
+    `live=false` (pager atas) tanpa role=status supaya pembaca layar tidak mendengar info yang sama dua kali. -#}
+{% macro build_pager(s, live=true) -%}
+{% if s.pages > 1 %}
+<nav class="pager" aria-label="Halaman daftar build">
+  {% if s.prev %}<a class="btn btn-ghost btn-sm" href="{{ s.prev }}" rel="prev">{{ icon('arrow-left', 16) }}<span>Sebelumnya</span></a>
+  {% else %}<span class="btn btn-ghost btn-sm" aria-disabled="true">{{ icon('arrow-left', 16) }}<span>Sebelumnya</span></span>{% endif %}
+  <span class="pager-info muted hint"{% if live %} role="status" aria-atomic="true"{% endif %}>Menampilkan {{ s.first|num }}–{{ s.last|num }} dari {{ s.total|num }} build
+    <span class="pager-page">(halaman {{ s.page|num }} dari {{ s.pages|num }})</span></span>
+  {% if s.next %}<a class="btn btn-ghost btn-sm" href="{{ s.next }}" rel="next"><span>Berikutnya</span>{{ icon('arrow-right', 16) }}</a>
+  {% else %}<span class="btn btn-ghost btn-sm" aria-disabled="true"><span>Berikutnya</span>{{ icon('arrow-right', 16) }}</span>{% endif %}
+</nav>
+{% endif %}
 {%- endmacro %}

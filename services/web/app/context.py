@@ -106,6 +106,11 @@ def set_cookie(response: Response, name: str, value: str, max_age: int) -> None:
     )
 
 
+def render_template(name: str, context: dict) -> str:
+    """Render templat ke teks (autoescape aktif) untuk fragmen kecil di luar respons halaman."""
+    return templates.get_template(name).render(context)
+
+
 def render(request: Request, name: str, context: dict, status_code: int = 200) -> Response:
     return templates.TemplateResponse(request, name, context, status_code=status_code)
 

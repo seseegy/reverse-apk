@@ -1069,6 +1069,7 @@ select:hover { border-color: var(--color-muted-foreground); }
 .pager-info { text-align: center; }
 .pager-page { white-space: nowrap; }
 .pager [aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+.pager + .build-list-wrap { margin-top: var(--space-3); }   /* pager atas daftar build tidak menempel ke tabel */
 
 /* =====================================================================
    Penyimpanan (PRD 10) — bilah komposisi, legenda, tautan urut
@@ -1253,6 +1254,14 @@ select:hover { border-color: var(--color-muted-foreground); }
   .build-filters .field-btn { flex-wrap: wrap; }
   .build-filters .field-btn .btn { flex: 1 1 8rem; justify-content: center; }
 }
+
+/* ---------- Polling parsial detail build: ruang indikator dicadangkan (visibility, bukan display) supaya "memperbarui…" tidak menggeser tata letak ---------- */
+.build-live-meta { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: var(--space-3); margin: var(--space-2) 0; min-height: 1.5em; font-variant-numeric: tabular-nums; }
+.build-live-busy { visibility: hidden; display: inline-block; min-width: 7em; }
+.build-live-busy.is-busy { visibility: visible; }
+.build-live-note:empty { display: none; }
+.live-badge { display: inline-block; max-width: 100%; }
+@media (prefers-reduced-motion: no-preference) { .build-live-busy.is-busy { transition: opacity 0.15s; } }
 
 /* ---------- Daftar build (build.html): baris tabel; di layar sempit tiap build jadi kartu bertumpuk tanpa gulir samping ---------- */
 .build-open { display: inline-flex; align-items: center; min-height: 44px; font-weight: 600; overflow-wrap: anywhere; }

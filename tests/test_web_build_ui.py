@@ -119,7 +119,7 @@ def test_pages_without_a_session_redirect_to_login(anon, seeded, path):
 def test_status_and_downloads_without_a_session_are_401(anon):
     aid = new_analysis("ui-anon-api")
     bid, _name, _ = mk_done(aid)
-    for suffix in ("status", "download", "script"):
+    for suffix in ("status", "live", "download", "script"):
         assert anon.get(f"/analyses/{aid}/build/{bid}/{suffix}", headers=FETCH).status_code == 401, suffix
 
 
