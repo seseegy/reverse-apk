@@ -128,17 +128,20 @@
       <div><dt>Berkas dihapus</dt><dd class="build-minus">{{ diff.counts.removed|num }}</dd></div>
       <div><dt>Baris ditambah</dt><dd class="build-plus">+{{ diff.lines.plus|num }}</dd></div>
       <div><dt>Baris dihapus</dt><dd class="build-minus">−{{ diff.lines.minus|num }}</dd></div>
-      <div><dt>Ukuran baru / ubah / hapus</dt><dd>{{ diff.bytes.added|bytes }} / {{ diff.bytes.modified|bytes }} / {{ diff.bytes.removed|bytes }}</dd></div>
+      <div><dt>Ukuran baru</dt><dd class="build-plus">{{ diff.bytes.added|bytes }}</dd></div>
+      <div><dt>Ukuran diubah</dt><dd>{{ diff.bytes.modified|bytes }}</dd></div>
+      <div><dt>Ukuran dihapus</dt><dd class="build-minus">{{ diff.bytes.removed|bytes }}</dd></div>
     </dl>
-    <p class="muted hint">Per jenis:
-      {% for k in kind_order %}{% if diff.kinds[k] %}<a class="chip" href="?kind={{ k }}">{{ kind_label[k] }}: {{ diff.kinds[k]|num }}</a> {% endif %}{% endfor %}
-      {% if diff.lines.skipped_files %}· {{ diff.lines.skipped_files|num }} berkas tidak dihitung barisnya (biner atau terlalu besar){% endif %}
-    </p>
+    <div class="kind-chips" role="group" aria-label="Saring per jenis">
+      <span class="muted hint">Per jenis:</span>
+      {% for k in kind_order %}{% if diff.kinds[k] %}<a class="chip" href="?kind={{ k }}">{{ kind_label[k] }}: {{ diff.kinds[k]|num }}</a>{% endif %}{% endfor %}
+    </div>
+    {% if diff.lines.skipped_files %}<p class="muted hint">{{ diff.lines.skipped_files|num }} berkas tidak dihitung barisnya (biner atau terlalu besar).</p>{% endif %}
     {% for key, n in diff.skipped.items() %}{% if n %}
     <div class="alert alert-info" role="note">{{ icon('info') }}<span>{{ n|num }} entri “{{ key }}” dilewati saat membandingkan dan <strong>tidak ikut dibangun</strong>.</span></div>
     {% endif %}{% endfor %}
 
-    <form method="get" class="filters" role="search" aria-label="Saring daftar berkas">
+    <form method="get" class="filters build-filters" role="search" aria-label="Saring daftar berkas">
       <div class="field">
         <label for="f-kind">Jenis</label>
         <select id="f-kind" name="kind">
@@ -201,7 +204,7 @@
         <button type="submit" class="btn btn-primary">{{ icon('check-circle', 16) }}<span>Setujui dan bangun</span></button>
       </div>
     </form>
-    <form method="post" action="/analyses/{{ an.id }}/build/{{ b.id }}/reject" class="filters" data-confirm="Tolak build ini? Tidak ada yang dibangun." data-submit-lock>
+    <form method="post" action="/analyses/{{ an.id }}/build/{{ b.id }}/reject" class="filters build-filters" data-confirm="Tolak build ini? Tidak ada yang dibangun." data-submit-lock>
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <div class="field field-grow">
         <label for="rej">Alasan penolakan (opsional)</label>

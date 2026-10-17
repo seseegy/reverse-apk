@@ -295,7 +295,7 @@ input:hover { border-color: var(--color-muted-foreground); }
 .alert-info .icon { color: var(--text-info); }
 .alert-warn { background: rgba(245, 158, 11, 0.1); border-color: var(--text-warn); }
 .alert-warn .icon { color: var(--text-warn); }
-.alert > div, .alert > span { min-width: 0; }
+.alert > div, .alert > span { min-width: 0; overflow-wrap: anywhere; }
 .error-list { margin: var(--space-1) 0 0; padding-left: var(--space-5); }
 
 /* ---------- Tombol tambahan ---------- */
@@ -1190,9 +1190,9 @@ select:hover { border-color: var(--color-muted-foreground); }
 
 /* ---------- Tab Build (Tahap 5): layar persetujuan, daftar build, unduhan ---------- */
 .build-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: var(--space-3); margin: 0 0 var(--space-4); }
-.build-stats > div { border: 1px solid var(--color-border); border-radius: var(--radius); padding: var(--space-2) var(--space-3); }
+.build-stats > div { min-width: 0; border: 1px solid var(--color-border); border-radius: var(--radius); padding: var(--space-2) var(--space-3); }
 .build-stats dt { color: var(--color-muted-foreground); font-size: 0.8rem; }
-.build-stats dd { margin: 0; font-family: var(--font-mono); font-size: 1.1rem; font-weight: 600; }
+.build-stats dd { margin: 0; font-family: var(--font-mono); font-size: 1.1rem; font-weight: 600; white-space: nowrap; }
 .build-group { margin-top: var(--space-4); }
 .build-group h3 { display: flex; gap: var(--space-2); align-items: baseline; margin: 0 0 var(--space-2); font-size: 1rem; }
 .build-path { font-family: var(--font-mono); font-size: 0.85rem; overflow-wrap: anywhere; word-break: break-all; }
@@ -1222,4 +1222,19 @@ select:hover { border-color: var(--color-muted-foreground); }
   .build-actions { display: grid; grid-template-columns: minmax(0, 1fr); }
   .build-actions .btn { width: 100%; justify-content: center; min-height: 44px; }
 }
-.build-limits { margin: 0; padding-left: 1.2rem; }
+.build-limits { margin: 0; padding-left: 1.25rem; max-width: 70ch; line-height: 1.6; display: grid; gap: var(--space-2); }
+.build-limits + .hint { margin: 0; padding-top: var(--space-3); border-top: 1px solid var(--color-border); max-width: 70ch; }
+/* Ringkasan diff: dua kolom tetap di layar sempit (kotak yang bisa menyusut), tiap angka utuh dalam satu baris */
+.kind-chips { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.kind-chips .chip { margin-left: 0; min-height: 32px; display: inline-flex; align-items: center; padding-inline: var(--space-3); font-size: 0.8rem; text-decoration: none; }
+.build-filters .btn { min-height: 44px; }
+.build-filters select { max-width: 100%; }
+@media (max-width: 640px) {
+  .build-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kind-chips .chip { min-height: 44px; }
+  .build-filters { flex-direction: column; align-items: stretch; }
+  .build-filters .field, .build-filters .field-grow { min-width: 0; width: 100%; flex: none; }
+  .build-filters select { width: 100%; }
+  .build-filters .field-btn { flex-wrap: wrap; }
+  .build-filters .field-btn .btn { flex: 1 1 8rem; justify-content: center; }
+}

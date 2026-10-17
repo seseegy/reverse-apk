@@ -12,7 +12,7 @@ from contextlib import closing
 import pytest
 from conftest import BROWSER, ROOT
 from rvcore import shellspool, store
-from test_web_build_ui import mk_build, mk_done, new_analysis
+from test_web_build_ui import mk_build, mk_done, new_analysis, summary
 from web_rig import FakeBench, live_redis
 
 from app import builds, context, routes_build
@@ -152,3 +152,70 @@ def test_stage_log_is_a_styled_fold_with_a_line_count_and_escaped_content(client
     html = page(client, aid, bid)
     assert '<details class="build-fold">' in html and '<summary id="bl-title">Catatan tahap build <span class="count-pill">3 baris</span></summary>' in html
     assert '<pre class="build-log">' in html and "&lt;b&gt;x&lt;/b&gt;" in html and "<b>x</b>" not in html
+
+
+# ====================================================================================== invarian CSS: ringkasan diff, filter, daftar batas
+def test_stat_grid_has_two_shrinkable_columns_on_phones_and_numbers_never_break():
+    assert "white-space: nowrap" in rule(".build-stats dd") and "min-width: 0" in rule(".build-stats > div")
+    m = re.search(r"@media \(max-width: 640px\) \{\s*\.build-stats \{([^}]*)\}", CSS)
+    assert m and "repeat(2, minmax(0, 1fr))" in m.group(1)
+
+
+def test_filter_row_stacks_full_width_on_narrow_screens_and_buttons_are_44px():
+    assert "min-height: 44px" in rule(".build-filters .btn")
+    m = re.search(r"@media \(max-width: 640px\) \{[^@]*?\.build-filters \{([^}]*)\}\s*\.build-filters \.field, \.build-filters \.field-grow \{([^}]*)\}", CSS)
+    assert m and "flex-direction: column" in m.group(1) and "width: 100%" in m.group(2) and "min-width: 0" in m.group(2)
+
+
+def test_kind_chips_wrap_and_are_touch_sized_on_phones():
+    assert "flex-wrap: wrap" in rule(".kind-chips")
+    assert re.search(r"@media \(max-width: 640px\) \{[^@]*\.kind-chips \.chip \{ min-height: 44px", CSS)
+
+
+def test_not_promised_list_has_a_readable_measure_and_item_spacing():
+    body = rule(".build-limits")
+    assert "max-width: 70ch" in body and "gap: var(--space-2)" in body and "line-height: 1.6" in body
+    assert "border-top" in rule(".build-limits + .hint")
+
+
+# ====================================================================================== markup via test client: ringkasan diff
+def test_diff_summary_splits_sizes_into_separate_metrics_and_keeps_every_label(client, seeded, env):
+    aid = new_analysis("lay-stats")
+    bid = mk_build(aid)
+    html = page(client, aid, bid)
+    stats = re.search(r'<dl class="build-stats">(.*?)</dl>', html, re.S).group(1)
+    labels = re.findall(r"<dt>(.*?)</dt>", stats)
+    assert labels == ["Berkas baru", "Berkas diubah", "Berkas dihapus", "Baris ditambah", "Baris dihapus", "Ukuran baru", "Ukuran diubah", "Ukuran dihapus"]
+    assert "/ 0 B /" not in stats and "−2" in stats and "+5" in stats
+
+
+def test_kind_chips_and_filter_forms_use_the_responsive_classes_and_keep_their_fields(client, seeded, env):
+    aid = new_analysis("lay-filter")
+    bid = mk_build(aid, data=summary())
+    html = page(client, aid, bid)
+    chips = re.search(r'<div class="kind-chips" role="group" aria-label="Saring per jenis">(.*?)</div>', html, re.S).group(1)
+    assert 'href="?kind=smali">Smali (kode): 1</a>' in chips
+    assert html.count('class="filters build-filters"') == 2           # saringan diff + form tolak
+    f = re.search(r'<form method="get" class="filters build-filters".*?</form>', html, re.S).group(0)
+    assert 'name="kind"' in f and 'name="q"' in f and "Terapkan" in f
+    # form persetujuan tak berubah: CSRF, hash diff, versi pernyataan, kotak centang wajib
+    assert 'name="csrf"' in html and 'name="diff_sha256"' in html and 'name="statement_version"' in html
+    assert re.search(r'<input id="stmt" type="checkbox" name="statement" value="1" required>', html)
+
+
+def test_skipped_files_note_is_its_own_paragraph(client, seeded, env):
+    aid = new_analysis("lay-skip")
+    bid = mk_build(aid, data=summary(lines={"plus": 5, "minus": 2, "files": 3, "skipped_files": 4}))
+    assert '<p class="muted hint">4 berkas tidak dihitung barisnya (biner atau terlalu besar).</p>' in page(client, aid, bid)
+
+
+def test_not_promised_section_renders_items_in_a_list_followed_by_the_notice(client, seeded, env):
+    aid = new_analysis("lay-np")
+    bid = mk_build(aid)
+    html = page(client, aid, bid)
+    m = re.search(r'<ul class="build-limits">(.*?)</ul>\s*<p class="muted hint">(.*?)</p>', html, re.S)
+    assert m and m.group(1).count("<li>") >= 3 and builds.LIMIT_NOTICE in m.group(2)
+
+
+def test_alert_text_wraps_long_codes_such_as_warning_identifiers():
+    assert re.search(r"^\.alert > div, \.alert > span \{[^}]*overflow-wrap: anywhere", CSS, re.M)
