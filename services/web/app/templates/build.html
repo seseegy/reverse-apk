@@ -48,20 +48,22 @@
   <section class="card" aria-labelledby="blist-title">
     <div class="card-head"><h2 id="blist-title">Daftar build <span class="count-pill">{{ builds|length }}</span></h2></div>
     {% if builds %}
-    <div class="table-wrap" tabindex="0" role="region" aria-label="Daftar build (gulir horizontal bila perlu)">
-      <table class="table">
-        <thead><tr><th>Build</th><th>Status</th><th>Format</th><th>Diminta oleh</th><th>Dibuat</th><th>Hasil</th></tr></thead>
+    <div class="table-wrap build-list-wrap" tabindex="0" role="region" aria-label="Daftar build">
+      <table class="table build-list">
+        <caption class="sr-only">Daftar build analisis ini: nomor, status, format, peminta, waktu dibuat, dan hasil</caption>
+        <thead><tr><th scope="col">Build</th><th scope="col">Status</th><th scope="col">Format</th><th scope="col">Diminta oleh</th><th scope="col">Dibuat</th><th scope="col">Hasil</th></tr></thead>
         <tbody>
         {% for b in builds %}
           <tr>
-            <th scope="row"><a href="/analyses/{{ an.id }}/build/{{ b.id }}">#{{ b.id }}</a></th>
-            <td>{{ build_badge(b) }}</td>
-            <td class="mono">{{ b.source_kind }}</td>
-            <td>{% if b.ai %}<span class="chip">diminta oleh AI</span> {% endif %}{{ b.requested_label }}</td>
-            <td>{{ time_el(b.created_at) }}</td>
-            <td>
+            <th scope="row" class="build-id"><a class="build-open" href="/analyses/{{ an.id }}/build/{{ b.id }}">#{{ b.id }}</a></th>
+            <td data-label="Status">{{ build_badge(b) }}</td>
+            <td data-label="Format" class="mono">{{ b.source_kind }}</td>
+            <td data-label="Diminta oleh">{% if b.ai %}<span class="chip">diminta oleh AI</span> {% endif %}{{ b.requested_label }}</td>
+            <td data-label="Dibuat">{{ time_el(b.created_at) }}</td>
+            <td data-label="Hasil">
               {% if b.status == 'done' %}<span class="mono break">{{ b.output_name }}</span> · {{ b.output_size|bytes }}
               {% elif b.status == 'failed' or b.status == 'cancelled' %}<span class="mono">{{ b.error_code or '–' }}</span>
+              {% elif b.status == 'awaiting_approval' %}<a class="build-open" href="/analyses/{{ an.id }}/build/{{ b.id }}">Tinjau dan setujui</a>
               {% else %}–{% endif %}
             </td>
           </tr>
@@ -69,6 +71,7 @@
         </tbody>
       </table>
     </div>
+    {% if builds|length >= 50 %}<p class="muted hint">Menampilkan 50 build terbaru; build yang lebih lama tidak ditampilkan di sini.</p>{% endif %}
     {% else %}
     <div class="files-empty">
       <span class="empty-icon">{{ icon('archive', 28) }}</span>

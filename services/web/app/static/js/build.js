@@ -8,6 +8,16 @@
   var url = root.getAttribute("data-build-poll");
   var current = root.getAttribute("data-build-status");
   var failures = 0;
+  var KEY = "rv-build-scroll:" + window.location.pathname;
+  // Muat ulang penuh tidak boleh melempar pembaca ke atas halaman: simpan posisi gulir lalu pulihkan.
+  try {
+    var saved = window.sessionStorage.getItem(KEY);
+    if (saved !== null) { window.sessionStorage.removeItem(KEY); window.scrollTo(0, parseInt(saved, 10) || 0); }
+  } catch (e) { /* penyimpanan dinonaktifkan: abaikan */ }
+  function reload() {
+    try { window.sessionStorage.setItem(KEY, String(window.pageYOffset || 0)); } catch (e) { /* abaikan */ }
+    window.location.reload();
+  }
   var timer = null;
 
   function schedule(ms) {
@@ -26,7 +36,7 @@
       .then(function (d) {
         if (!d) return;
         failures = 0;
-        if (d.status !== current || d.final) { window.location.reload(); return; }
+        if (d.status !== current || d.final) { reload(); return; }
         schedule(3000);
       })
       .catch(function () {
