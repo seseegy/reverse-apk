@@ -994,10 +994,16 @@ def get_build(conn: sqlite3.Connection, build_id: int, *, analysis_id: int | Non
     return conn.execute("SELECT * FROM build WHERE id = ? AND analysis_id = ?", (build_id, analysis_id)).fetchone()
 
 
-def list_builds(conn: sqlite3.Connection, analysis_id: int, limit: int = 50) -> list[sqlite3.Row]:
+def list_builds(conn: sqlite3.Connection, analysis_id: int, limit: int = 50, offset: int = 0) -> list[sqlite3.Row]:
+    """Terbaru dulu. `id` (PK, unik) menjadi tie-break deterministik; indeks `build_analysis(analysis_id, id DESC)` menutup filter + urutan."""
     return conn.execute(
-        "SELECT * FROM build WHERE analysis_id = ? ORDER BY id DESC LIMIT ?", (analysis_id, limit)
+        "SELECT * FROM build WHERE analysis_id = ? ORDER BY id DESC LIMIT ? OFFSET ?", (analysis_id, limit, offset)
     ).fetchall()
+
+
+def count_builds(conn: sqlite3.Connection, analysis_id: int) -> int:
+    """Jumlah SELURUH build satu analisis (untuk paginasi); hanya baris analisis itu."""
+    return conn.execute("SELECT COUNT(*) FROM build WHERE analysis_id = ?", (analysis_id,)).fetchone()[0]
 
 
 def active_build(conn: sqlite3.Connection, analysis_id: int) -> sqlite3.Row | None:

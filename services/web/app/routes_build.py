@@ -229,23 +229,56 @@ def _lookup(analysis_id: int, build_id: int) -> Any:
 
 
 # ---------------------------------------------------------------------------------------------------- halaman
-def _list_data(analysis_id: int) -> dict[str, Any]:
+# Baris per halaman daftar build. Sama dengan batas lama dan PAGE_SIZE halaman Berkas; di ponsel tiap build menjadi kartu ±150-200 px,
+# jadi 50 kartu sudah gulir yang panjang, sementara HTML-nya tetap kecil. Retensi (BUILD_KEEP) tidak terkait dan tidak diubah.
+BUILD_PAGE_SIZE = 50
+_PAGE_MAX_DIGITS = 9            # lebih panjang dari ini pasti melampaui jumlah halaman -> dijepit ke halaman terakhir tanpa int() atas masukan raksasa
+
+
+def _parse_page(raw: str | None) -> int | None:
+    """None = parameter tidak ada atau sampah (-> halaman 1). Angka ASCII >= 1; terlalu panjang -> nilai sangat besar (dijepit pemanggil)."""
+    if raw is None:
+        return 1
+    if not (raw.isascii() and raw.isdigit()):
+        return None
+    if len(raw) > _PAGE_MAX_DIGITS:
+        return 10 ** _PAGE_MAX_DIGITS if set(raw) != {"0"} else None
+    value = int(raw)
+    return value if value >= 1 else None
+
+
+def _list_data(analysis_id: int, page: int = 1) -> dict[str, Any]:
     with closing(db()) as conn:
-        rows = [build_view(r) for r in store.list_builds(conn, analysis_id, 50)]
+        total = store.count_builds(conn, analysis_id)
+        pages = max(1, -(-total // BUILD_PAGE_SIZE))
+        if page > pages:
+            return {"redirect_page": pages}
+        rows = [build_view(r) for r in store.list_builds(conn, analysis_id, BUILD_PAGE_SIZE, (page - 1) * BUILD_PAGE_SIZE)]
         stages = {s["name"]: s["status"] for s in store.get_stages(conn, analysis_id)}
         an = store.get_analysis(conn, analysis_id)
-    active = next((r for r in rows if not r["final"]), None)
+        act = store.active_build(conn, analysis_id)              # bukan dari baris halaman: tetap benar di halaman > 1
+    active = build_view(act) if act is not None else None
     can_build = an is not None and an["status"] == store.DONE and stages.get("apktool") in (store.OK, store.WARN)
-    return {"builds": rows, "active": active, "can_build": can_build, "poll_url": f"/analyses/{analysis_id}/build/{active['id']}/status" if active and active["poll"] else "",
+    paging = {"total": total, "page": page, "pages": pages, "first": (page - 1) * BUILD_PAGE_SIZE + 1 if total else 0,
+              "last": min(page * BUILD_PAGE_SIZE, total), "prev": f"?halaman={page - 1}" if page > 1 else None,
+              "next": f"?halaman={page + 1}" if page < pages else None}
+    return {"builds": rows, "active": active, "can_build": can_build, "paging": paging,
+            "poll_url": f"/analyses/{analysis_id}/build/{active['id']}/status" if active and active["poll"] else "",
             "poll_status": active["status"] if active else ""}
 
 
 @router.get("/analyses/{analysis_id}/build", include_in_schema=False)
-async def build_list(request: Request, analysis_id: AnalysisId, notice: str | None = Query(None, max_length=40)) -> Response:
+async def build_list(request: Request, analysis_id: AnalysisId, notice: str | None = Query(None, max_length=40),
+                     halaman: str | None = Query(None)) -> Response:
     early, ctx = await _tab_context(request, analysis_id, "build")
     if early is not None:
         return early
-    data = await run_in_threadpool(_list_data, analysis_id)
+    page = _parse_page(halaman)
+    if page is None:                                                  # sampah / 0 -> halaman 1 (tanpa parameter)
+        return RedirectResponse(_list_url(analysis_id), status_code=303)
+    data = await run_in_threadpool(_list_data, analysis_id, page)
+    if "redirect_page" in data:                                       # melewati halaman terakhir -> halaman terakhir
+        return RedirectResponse(f"{_list_url(analysis_id)}?halaman={data['redirect_page']}" if data["redirect_page"] > 1 else _list_url(analysis_id), status_code=303)
     return render(request, "build.html", {**ctx, **data, "notice": _notice(notice), "limit_notice": builds.LIMIT_NOTICE, "limits_list": NOT_PROMISED})
 
 

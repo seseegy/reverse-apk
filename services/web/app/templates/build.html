@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
 {% from "_parts.html" import notice_box, time_el %}
-{% from "_build_parts.html" import build_badge, not_promised %}
+{% from "_build_parts.html" import build_badge, build_pager, not_promised %}
 {% set title = an.app_label or an.filename_display %}
 {% block title %}Build · {{ title }} · reverse-apk{% endblock %}
 
@@ -46,8 +46,9 @@
   </section>
 
   <section class="card" aria-labelledby="blist-title">
-    <div class="card-head"><h2 id="blist-title">Daftar build <span class="count-pill">{{ builds|length }}</span></h2></div>
+    <div class="card-head"><h2 id="blist-title">Daftar build <span class="count-pill">{{ paging.total|num }}</span></h2></div>
     {% if builds %}
+    {{ build_pager(paging, false) }}
     <div class="table-wrap build-list-wrap" tabindex="0" role="region" aria-label="Daftar build">
       <table class="table build-list">
         <caption class="sr-only">Daftar build analisis ini: nomor, status, format, peminta, waktu dibuat, dan hasil</caption>
@@ -71,7 +72,7 @@
         </tbody>
       </table>
     </div>
-    {% if builds|length >= 50 %}<p class="muted hint">Menampilkan 50 build terbaru; build yang lebih lama tidak ditampilkan di sini.</p>{% endif %}
+    {{ build_pager(paging) }}
     {% else %}
     <div class="files-empty">
       <span class="empty-icon">{{ icon('archive', 28) }}</span>

@@ -23,3 +23,18 @@
   <p class="muted hint">{{ limit_notice }}</p>
 </section>
 {%- endmacro %}
+
+{#- Navigasi halaman daftar build: tautan biasa (tanpa JS). Hanya tampil bila lebih dari satu halaman; hitungan = SELURUH build analisis ini.
+    `live=false` (pager atas) tanpa role=status supaya pembaca layar tidak mendengar info yang sama dua kali. -#}
+{% macro build_pager(s, live=true) -%}
+{% if s.pages > 1 %}
+<nav class="pager" aria-label="Halaman daftar build">
+  {% if s.prev %}<a class="btn btn-ghost btn-sm" href="{{ s.prev }}" rel="prev">{{ icon('arrow-left', 16) }}<span>Sebelumnya</span></a>
+  {% else %}<span class="btn btn-ghost btn-sm" aria-disabled="true">{{ icon('arrow-left', 16) }}<span>Sebelumnya</span></span>{% endif %}
+  <span class="pager-info muted hint"{% if live %} role="status" aria-atomic="true"{% endif %}>Menampilkan {{ s.first|num }}–{{ s.last|num }} dari {{ s.total|num }} build
+    <span class="pager-page">(halaman {{ s.page|num }} dari {{ s.pages|num }})</span></span>
+  {% if s.next %}<a class="btn btn-ghost btn-sm" href="{{ s.next }}" rel="next"><span>Berikutnya</span>{{ icon('arrow-right', 16) }}</a>
+  {% else %}<span class="btn btn-ghost btn-sm" aria-disabled="true"><span>Berikutnya</span>{{ icon('arrow-right', 16) }}</span>{% endif %}
+</nav>
+{% endif %}
+{%- endmacro %}
