@@ -206,7 +206,7 @@ def test_the_web_route_set_is_unchanged_by_feat_e_except_for_the_stage5_build_ro
     assert hashlib.sha256("\n".join(f"{m} {p}" for m, p in pairs).encode()).hexdigest() == "4808f03a2a5bd393bd24a60477c3a75fe3b7c835e1fa090c82774c4f8de70aa8"
     assert not [p for _m, p in pairs if any(w in p for w in ("build", "approve", "sign", "bench"))]       # (`download` sudah ada untuk berkas pengguna/AI di Tahap 1)
     b = "/analyses/{analysis_id}/build"
-    assert mine == {("GET", b), ("GET", b + "/{build_id}"), ("GET", b + "/{build_id}/status"), ("GET", b + "/{build_id}/download"), ("GET", b + "/{build_id}/script"),
+    assert mine == {("GET", b), ("GET", b + "/{build_id}"), ("GET", b + "/{build_id}/status"), ("GET", b + "/{build_id}/live"), ("GET", b + "/{build_id}/download"), ("GET", b + "/{build_id}/script"),
                     ("POST", b + "/init"), ("POST", b + "/request"), ("POST", b + "/{build_id}/approve"), ("POST", b + "/{build_id}/requeue"),
                     ("POST", b + "/{build_id}/reject"), ("POST", b + "/{build_id}/cancel")}
 

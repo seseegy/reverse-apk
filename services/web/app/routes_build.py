@@ -25,7 +25,7 @@ from starlette.background import BackgroundTask
 from rvcore import buildproto, shellspool, store
 
 from . import builds
-from .context import audit_event, client_ip, current_session, db, layout, log, redis_conn, render
+from .context import audit_event, client_ip, current_session, db, layout, log, redis_conn, render, render_template
 from .routes_apk import AnalysisId, _tab_context
 from .security import tokens_equal
 
@@ -320,6 +320,39 @@ async def build_status(request: Request, analysis_id: AnalysisId, build_id: Buil
         return JSONResponse({"error": "Tidak ditemukan."}, status_code=404, headers={"Cache-Control": "no-store"})
     return JSONResponse({"status": row["status"], "label": store.BUILD_STATUS_LABEL.get(row["status"], row["status"]), "final": row["status"] in store.BUILD_FINAL,
                          "cancel_requested": bool(row["cancel_requested"])}, headers={"Cache-Control": "no-store"})
+
+
+NO_STORE = {"Cache-Control": "no-store"}
+
+
+def _strict_id(raw: str) -> int | None:
+    """Id dari path sebagai teks: hanya digit ASCII 1..2^31-1 (tanpa int() atas masukan panjang/aneh); selain itu None -> 404."""
+    if not (raw.isascii() and raw.isdigit() and len(raw) <= 10):
+        return None
+    value = int(raw)
+    return value if 1 <= value <= 2**31 - 1 else None
+
+
+def _live_fragment(row: dict[str, Any]) -> str:
+    """Fragmen HTML kecil (autoescape Jinja) dari status saja: badge + kalimat tahap. Bagian dari render halaman detail, jadi identik dengan render awal."""
+    status = row["status"]
+    view = {"status": status, "label": store.BUILD_STATUS_LABEL.get(status, status), "poll": status in ACTIVE_POLL, "cancel_requested": bool(row["cancel_requested"])}
+    return render_template("_build_live.html", {"b": view}).strip()
+
+
+@router.get("/analyses/{analysis_id}/build/{build_id}/live", include_in_schema=False)
+async def build_live(request: Request, analysis_id: str, build_id: str) -> Response:
+    """Polling parsial halaman detail: JSON kecil {status,label,final,cancel_requested,fragment}. GET read-only dari basis data; wajib sesi (401 JSON),
+    hanya build milik analisis di path (404). Id divalidasi ketat sebagai teks (non-angka/0/negatif/raksasa -> 404). Tanpa rahasia, path, hash, log, atau tautan unduh."""
+    if not current_session(request):
+        return JSONResponse({"error": "Sesi berakhir."}, status_code=401, headers=NO_STORE)
+    aid, bid = _strict_id(analysis_id), _strict_id(build_id)
+    row = await run_in_threadpool(_lookup, aid, bid) if aid is not None and bid is not None else None
+    if row is None:
+        return JSONResponse({"error": "Tidak ditemukan."}, status_code=404, headers=NO_STORE)
+    status = row["status"]
+    return JSONResponse({"status": status, "label": store.BUILD_STATUS_LABEL.get(status, status), "final": status in store.BUILD_FINAL,
+                         "cancel_requested": bool(row["cancel_requested"]), "fragment": _live_fragment(row)}, headers=NO_STORE)
 
 
 # ---------------------------------------------------------------------------------------------------- aksi (POST)

@@ -1,0 +1,4 @@
+{#- Fragmen polling /analyses/{id}/build/{build_id}/live. Dirender server dengan autoescape; HANYA status/label/pembatalan (kamus tetap), tanpa form,
+    CSRF, tautan, hash, path, log, atau galat. Batas ukuran dites (< 2 KiB). -#}
+{% from "_build_parts.html" import build_live_badge_slot, build_live_text_slot %}
+{{ build_live_badge_slot(b) }}{{ build_live_text_slot(b) }}

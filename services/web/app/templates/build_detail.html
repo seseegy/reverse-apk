@@ -1,15 +1,17 @@
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
 {% from "_parts.html" import notice_box, time_el %}
-{% from "_build_parts.html" import build_badge, not_promised %}
+{% from "_build_parts.html" import build_badge, build_live_badge_slot, build_live_text_slot, not_promised %}
 {% set title = an.app_label or an.filename_display %}
 {% block title %}Build #{{ b.id }} · {{ title }} · reverse-apk{% endblock %}
+
+{% block head_extra %}{% if poll_url %}<noscript><meta http-equiv="refresh" content="20"></noscript>{% endif %}{% endblock %}
 
 {% block header %}{% include "_header.html" %}{% endblock %}
 
 {#- Layar persetujuan (FR-9.18/9.40). Path berkas, galat, dan log berasal dari APK/AI: tak tepercaya, selalu di-escape (tanpa filter safe). -#}
 {% block content %}
-<div class="container page container-wide"{% if poll_url %} data-build-poll="{{ poll_url }}" data-build-status="{{ b.status }}"{% endif %}>
+<div class="container page container-wide"{% if poll_url %} data-build-poll="{{ poll_url }}" data-build-status="{{ b.status }}" data-build-live="/analyses/{{ an.id }}/build/{{ b.id }}/live"{% endif %}>
   <a class="back-link" href="/analyses/{{ an.id }}/build">{{ icon('arrow-left', 16) }}<span>Semua build</span></a>
   {% include "_analysis_head.html" %}
   {{ notice_box(notice) }}
@@ -17,7 +19,7 @@
   <section class="card" aria-labelledby="bd-title">
     <div class="card-head">
       <h2 id="bd-title">Build #{{ b.id }}</h2>
-      <div role="status" aria-atomic="true">{{ build_badge(b) }}</div>
+      {% if poll_url %}{{ build_live_badge_slot(b) }}{% else %}<div role="status" aria-atomic="true">{{ build_badge(b) }}</div>{% endif %}
     </div>
     <dl class="dl dl-wide">
       <div><dt>Format</dt><dd class="mono">{{ b.source_kind }}</dd></div>
@@ -37,20 +39,27 @@
     {% if b.status == 'rejected' %}
     <p class="muted break">Ditolak. Alasan: {{ b.rejected_reason or '–' }}</p>
     {% endif %}
-    {% if b.status in ('approved', 'queued') %}
-    <p class="muted hint">Disetujui dan menunggu giliran di antrean. Halaman ini memperbarui status otomatis. Bila macet (mis. antrean sempat mati), kirim ulang:</p>
-    <form method="post" action="/analyses/{{ an.id }}/build/{{ b.id }}/requeue" class="btn-row" data-submit-lock>
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <button type="submit" class="btn btn-ghost btn-sm">{{ icon('refresh', 16) }}<span>Kirim ulang ke antrean</span></button>
-    </form>
-    {% elif b.status in ('building', 'signing') %}
-    <p class="muted hint" role="status">{% if b.status == 'building' %}Runner sedang membangun APK (apktool).{% else %}APK sedang ditandatangani dan diverifikasi.{% endif %}
-      Halaman ini memperbarui status otomatis.{% if b.cancel_requested %} Pembatalan sudah diminta.{% endif %}</p>
+    {% if b.poll %}
+    {{ build_live_text_slot(b) }}
+    <div data-live-show="approved queued"{% if b.status not in ('approved', 'queued') %} hidden{% endif %}>
+      <p class="muted hint">Bila macet (mis. antrean sempat mati), kirim ulang:</p>
+      <form method="post" action="/analyses/{{ an.id }}/build/{{ b.id }}/requeue" class="btn-row" data-submit-lock>
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="btn btn-ghost btn-sm">{{ icon('refresh', 16) }}<span>Kirim ulang ke antrean</span></button>
+      </form>
+    </div>
+    <p class="build-live-meta muted hint" data-live-meta>
+      <span class="build-live-busy" data-live-busy aria-hidden="true">memperbarui…</span>
+      <span data-live-updated>Terakhir diperbarui: baru saja dimuat</span>
+      <span class="build-live-note" data-live-note></span>
+      <span class="sr-only" role="status" aria-live="polite" aria-atomic="true" data-live-announce></span>
+    </p>
+    <noscript><p class="muted hint">JavaScript nonaktif: status tidak diperbarui otomatis di tab ini. Halaman dimuat ulang tiap 20 detik, atau <a href="/analyses/{{ an.id }}/build/{{ b.id }}">Muat ulang status</a> sekarang.</p></noscript>
     {% endif %}
     {% if b.status in ('awaiting_approval', 'approved', 'queued', 'building', 'signing') %}
     <form method="post" action="/analyses/{{ an.id }}/build/{{ b.id }}/cancel" class="btn-row" data-confirm="Batalkan build ini?" data-submit-lock>
       <input type="hidden" name="csrf" value="{{ csrf }}">
-      <button type="submit" class="btn btn-danger btn-sm"{% if b.cancel_requested %} disabled{% endif %}>{{ icon('x', 16) }}<span>Batalkan build</span></button>
+      <button type="submit" class="btn btn-danger btn-sm" data-live-cancel{% if b.cancel_requested %} disabled{% endif %}>{{ icon('x', 16) }}<span>Batalkan build</span></button>
     </form>
     {% endif %}
   </section>

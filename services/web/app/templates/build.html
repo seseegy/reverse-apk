@@ -5,6 +5,8 @@
 {% set title = an.app_label or an.filename_display %}
 {% block title %}Build · {{ title }} · reverse-apk{% endblock %}
 
+{% block head_extra %}{% if poll_url %}<noscript><meta http-equiv="refresh" content="20"></noscript>{% endif %}{% endblock %}
+
 {% block header %}{% include "_header.html" %}{% endblock %}
 
 {% block content %}
@@ -43,6 +45,7 @@
       <span>Ada build aktif: <a href="/analyses/{{ an.id }}/build/{{ active.id }}">build #{{ active.id }} ({{ active.label }})</a>. Hanya satu build aktif per analisis.</span>
     </div>
     {% endif %}
+    {% if poll_url %}<noscript><p class="muted hint">JavaScript nonaktif: status tidak diperbarui otomatis di tab ini. Halaman dimuat ulang tiap 20 detik, atau <a href="/analyses/{{ an.id }}/build">Muat ulang status</a> sekarang.</p></noscript>{% endif %}
   </section>
 
   <section class="card" aria-labelledby="blist-title">
