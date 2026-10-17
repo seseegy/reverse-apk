@@ -154,7 +154,7 @@
         <input id="f-q" name="q" type="search" value="{{ f_q }}" maxlength="80" autocomplete="off" spellcheck="false">
       </div>
       <div class="field field-btn">
-        <button type="submit" class="btn btn-ghost">{{ icon('search', 16) }}<span>Terapkan</span></button>
+        <button type="submit" class="btn btn-ghost">{{ icon('search', 16) }}<span>Saring</span></button>
         {% if diff.filtered %}<a class="link-quiet" href="/analyses/{{ an.id }}/build/{{ b.id }}">Reset</a>{% endif %}
       </div>
     </form>
@@ -169,8 +169,8 @@
       <p class="muted hint scroll-hint">Gulir tabel ke samping untuk melihat semua kolom.</p>
       <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="Berkas {{ g.label }} (gulir horizontal bila perlu)">
         <table class="table table-compact build-table">
-          <caption class="sr-only">Berkas {{ g.label }} yang berubah: {{ g.files|length }} berkas, jenis perubahan, path, ukuran, baris ditambah dan baris dihapus</caption>
-          <thead><tr><th scope="col" class="col-op">Jenis perubahan</th><th scope="col">Path</th><th scope="col" class="num">Ukuran</th><th scope="col" class="num">+ baris</th><th scope="col" class="num">− baris</th></tr></thead>
+          <caption class="sr-only">Berkas {{ g.label }} yang berubah: {{ g.files|length }} berkas, aksi, path, ukuran, baris ditambah dan baris dihapus</caption>
+          <thead><tr><th scope="col" class="col-op">Aksi</th><th scope="col">Path</th><th scope="col" class="num">Ukuran</th><th scope="col" class="num">+ Baris</th><th scope="col" class="num">− Baris</th></tr></thead>
           <tbody>
           {% for i in g.files %}
             <tr>

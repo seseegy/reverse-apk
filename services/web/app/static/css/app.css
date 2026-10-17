@@ -1253,3 +1253,19 @@ select:hover { border-color: var(--color-muted-foreground); }
   .build-filters .field-btn { flex-wrap: wrap; }
   .build-filters .field-btn .btn { flex: 1 1 8rem; justify-content: center; }
 }
+
+/* ---------- Daftar build (build.html): baris tabel; di layar sempit tiap build jadi kartu bertumpuk tanpa gulir samping ---------- */
+.build-open { display: inline-flex; align-items: center; min-height: 44px; font-weight: 600; overflow-wrap: anywhere; }
+.build-list td, .build-list th { overflow-wrap: anywhere; }
+.build-list .badge { max-width: 100%; }
+@media (max-width: 640px) {
+  .build-list-wrap { overflow: visible; border: 0; }
+  .build-list, .build-list tbody, .build-list tr, .build-list th, .build-list td { display: block; width: 100%; }
+  .build-list thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .build-list tbody tr { border: 1px solid var(--color-border); border-radius: var(--radius); padding: var(--space-2) var(--space-3); margin-bottom: var(--space-3); }
+  .build-list tbody tr + tr > * { border-top: 0; }
+  .build-list tbody tr:hover { background: transparent; }
+  .build-list th, .build-list td { padding: var(--space-1) 0; }
+  .build-list td[data-label] { display: grid; grid-template-columns: 7rem minmax(0, 1fr); gap: var(--space-2); align-items: start; }
+  .build-list td[data-label]::before { content: attr(data-label); color: var(--color-muted-foreground); font-size: 0.8rem; }
+}

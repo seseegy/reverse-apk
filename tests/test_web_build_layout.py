@@ -197,7 +197,7 @@ def test_kind_chips_and_filter_forms_use_the_responsive_classes_and_keep_their_f
     assert 'href="?kind=smali">Smali (kode): 1</a>' in chips
     assert html.count('class="filters build-filters"') == 2           # saringan diff + form tolak
     f = re.search(r'<form method="get" class="filters build-filters".*?</form>', html, re.S).group(0)
-    assert 'name="kind"' in f and 'name="q"' in f and "Terapkan" in f
+    assert 'name="kind"' in f and 'name="q"' in f and "Saring</span>" in f
     # form persetujuan tak berubah: CSRF, hash diff, versi pernyataan, kotak centang wajib
     assert 'name="csrf"' in html and 'name="diff_sha256"' in html and 'name="statement_version"' in html
     assert re.search(r'<input id="stmt" type="checkbox" name="statement" value="1" required>', html)
@@ -254,3 +254,63 @@ def test_empty_diff_renders_no_table_but_the_empty_state(client, seeded, env):
     html = page(client, aid, bid)
     assert "Tidak ada berkas yang cocok dengan saringan." in html
     assert "build-table" not in html
+
+
+# ====================================================================================== area C: daftar build, state, copy
+def list_page(client, aid: int) -> str:
+    r = client.get(f"/analyses/{aid}/build", headers=BROWSER)
+    assert r.status_code == 200
+    return r.text
+
+
+def test_build_list_stacks_into_cards_on_phones_with_touch_sized_links():
+    css = CSS[CSS.index("Daftar build (build.html)"):]
+    assert "@media (max-width: 640px)" in css and "attr(data-label)" in css and "display: block" in css
+    assert "min-height: 44px" in rule(".build-open")
+    assert "overflow-wrap: anywhere" in css
+
+
+def test_global_focus_ring_and_build_summary_focus_exist():
+    assert re.search(r"^:focus-visible\s*\{[^}]*outline: 2px solid var\(--color-ring\)", CSS, re.M)
+    assert ".build-fold > summary:focus-visible" in CSS
+
+
+def test_build_list_renders_a_row_per_state_with_labels_and_long_outputs_wrapped(client, seeded, env):
+    aid = new_analysis("lay-list")
+    done, _, _ = mk_done(aid)
+    done2, _, _ = mk_done(aid, kind="xapk")
+    ids = {"awaiting_approval": mk_build(aid)}          # satu build aktif per analisis; yang lain sudah selesai
+    html = list_page(client, aid)
+    for bid in [*ids.values(), done, done2]:
+        assert f'href="/analyses/{aid}/build/{bid}"' in html
+    assert html.count('data-label="Status"') == 3 and html.count('data-label="Hasil"') == 3
+    assert '<caption class="sr-only">' in html and html.count('scope="col"') == 6
+    assert f'class="build-open" href="/analyses/{aid}/build/{ids["awaiting_approval"]}">Tinjau dan setujui' in html
+    assert 'style="' not in html
+    assert "Menampilkan 50 build terbaru" not in html
+
+
+def test_build_list_empty_state_has_icon_and_guidance(client, seeded, env):
+    aid = new_analysis("lay-list-empty")
+    html = list_page(client, aid)
+    assert "Belum ada build." in html and "files-empty" in html and "build-list" not in html
+
+
+def test_approval_form_keeps_csrf_statement_and_diff_binding(client, seeded, env):
+    aid = new_analysis("lay-approve")
+    bid = mk_build(aid)
+    html = page(client, aid, bid)
+    form = html[html.index('class="approve-box"'):]
+    for needle in ('name="csrf"', 'name="diff_sha256"', 'name="statement_version"', 'name="statement" value="1" required'):
+        assert needle in form
+
+
+def test_table_headers_and_filter_button_use_consistent_indonesian_copy(client, seeded, env):
+    aid = new_analysis("lay-copy")
+    html = page(client, aid, mk_build(aid))
+    assert ">Aksi<" in html and ">+ Baris<" in html and ">− Baris<" in html and "Terapkan" not in html
+
+
+def test_status_poll_script_restores_scroll_after_reload_without_new_dependencies():
+    js = (ROOT / "services/web/app/static/js/build.js").read_text(encoding="utf-8")
+    assert "sessionStorage" in js and "scrollTo" in js and "eval(" not in js
