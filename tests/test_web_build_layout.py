@@ -219,3 +219,38 @@ def test_not_promised_section_renders_items_in_a_list_followed_by_the_notice(cli
 
 def test_alert_text_wraps_long_codes_such_as_warning_identifiers():
     assert re.search(r"^\.alert > div, \.alert > span \{[^}]*overflow-wrap: anywhere", CSS, re.M)
+
+
+# ---------- Area B: tabel diff responsif ----------
+def test_diff_table_scrolls_in_its_wrapper_keeps_a_min_width_and_hints_the_scroll():
+    assert "overflow-x: auto" in rule(".table-wrap")
+    assert re.search(r"min-width:\s*\d+rem", rule(".build-table"))
+    assert "background" in rule(".table-scroll") and "local" in rule(".table-scroll")
+    assert "display: block" in re.search(r"@media \(max-width: 640px\) \{ \.scroll-hint \{([^}]*)\}", CSS).group(1)
+
+
+def test_diff_path_wraps_at_slashes_not_at_every_character_and_numbers_are_compact_and_right_aligned():
+    p = rule(".build-path")
+    assert "overflow-wrap: anywhere" in p and "break-all" not in p
+    assert "nowrap" in rule(".build-table th, .build-table td.num, .build-table td.col-op")
+    assert "tabular-nums" in rule(".build-table td.num") and "text-align: right" in rule(".num")
+
+
+def test_diff_table_renders_caption_scoped_headers_and_wbr_paths_escaped(client, seeded, env):
+    aid = new_analysis("lay-table")
+    top = [{"op": "M", "kind": "f", "path": f"smali_classes{n % 4 + 2}/ai/<b>c{n}</b>.smali", "size": 2000 + n, "plus": n, "minus": 1} for n in range(40)]
+    bid = mk_build(aid, data=summary(top=top, kinds={"smali": 40, "res": 0, "manifest": 0, "aset": 0, "lib": 0, "lain": 0}))
+    html = page(client, aid, bid)
+    assert '<caption class="sr-only">Berkas Smali (kode)' in html
+    assert html.count('scope="col"') >= 5
+    assert "smali_classes2/<wbr>ai/<wbr>&lt;b&gt;c" in html and "<b>c" not in html
+    assert 'class="table-wrap table-scroll" tabindex="0" role="region"' in html
+    assert 'style="' not in html
+
+
+def test_empty_diff_renders_no_table_but_the_empty_state(client, seeded, env):
+    aid = new_analysis("lay-empty")
+    bid = mk_build(aid, data=summary(top=[]))
+    html = page(client, aid, bid)
+    assert "Tidak ada berkas yang cocok dengan saringan." in html
+    assert "build-table" not in html

@@ -1195,7 +1195,22 @@ select:hover { border-color: var(--color-muted-foreground); }
 .build-stats dd { margin: 0; font-family: var(--font-mono); font-size: 1.1rem; font-weight: 600; white-space: nowrap; }
 .build-group { margin-top: var(--space-4); }
 .build-group h3 { display: flex; gap: var(--space-2); align-items: baseline; margin: 0 0 var(--space-2); font-size: 1rem; }
-.build-path { font-family: var(--font-mono); font-size: 0.85rem; overflow-wrap: anywhere; word-break: break-all; }
+.build-path { font-family: var(--font-mono); font-size: 0.85rem; overflow-wrap: anywhere; min-width: 14rem; }   /* patah di "/" (<wbr>) lebih dulu, baru di mana saja bila satu segmen terlalu panjang */
+/* Tabel diff: kolom kanan tidak diperas; di layar sempit tabel digulir di .table-wrap, dengan bayangan tepi sebagai petunjuk */
+.build-table { min-width: 36rem; }
+.build-table th, .build-table td.num, .build-table td.col-op { white-space: nowrap; }
+.build-table td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 0.85rem; }
+.build-table .col-op { width: 1%; }
+.table-scroll {
+  background:
+    linear-gradient(to right, var(--color-card) 30%, transparent) left center / 2rem 100% no-repeat local,
+    linear-gradient(to left, var(--color-card) 30%, transparent) right center / 2rem 100% no-repeat local,
+    linear-gradient(to right, rgba(0, 0, 0, 0.45), transparent) left center / 0.75rem 100% no-repeat scroll,
+    linear-gradient(to left, rgba(0, 0, 0, 0.45), transparent) right center / 0.75rem 100% no-repeat scroll;
+  overscroll-behavior-x: contain;
+}
+.scroll-hint { display: none; margin: 0 0 var(--space-1); }
+@media (max-width: 640px) { .scroll-hint { display: block; } }
 .build-plus { color: var(--text-ok); }
 .build-minus { color: var(--text-danger); }
 .approve-box { border: 2px solid var(--text-warn); border-radius: var(--radius); padding: var(--space-4); margin-top: var(--space-4); }

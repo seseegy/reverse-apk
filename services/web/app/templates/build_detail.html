@@ -166,14 +166,16 @@
     {% for g in diff.groups %}
     <div class="build-group">
       <h3>{{ g.label }} <span class="count-pill">{{ g.files|length }}</span></h3>
-      <div class="table-wrap" tabindex="0" role="region" aria-label="Berkas {{ g.label }} (gulir horizontal bila perlu)">
-        <table class="table table-compact">
-          <thead><tr><th>Jenis perubahan</th><th>Path</th><th class="num">Ukuran</th><th class="num">+ baris</th><th class="num">− baris</th></tr></thead>
+      <p class="muted hint scroll-hint">Gulir tabel ke samping untuk melihat semua kolom.</p>
+      <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="Berkas {{ g.label }} (gulir horizontal bila perlu)">
+        <table class="table table-compact build-table">
+          <caption class="sr-only">Berkas {{ g.label }} yang berubah: {{ g.files|length }} berkas, jenis perubahan, path, ukuran, baris ditambah dan baris dihapus</caption>
+          <thead><tr><th scope="col" class="col-op">Jenis perubahan</th><th scope="col">Path</th><th scope="col" class="num">Ukuran</th><th scope="col" class="num">+ baris</th><th scope="col" class="num">− baris</th></tr></thead>
           <tbody>
           {% for i in g.files %}
             <tr>
-              <td>{{ i.op_label }}{% if i.dir %} (folder){% endif %}</td>
-              <td class="build-path">{{ i.path }}</td>
+              <td class="col-op">{{ i.op_label }}{% if i.dir %} (folder){% endif %}</td>
+              <td class="build-path">{% for seg in i.path.split('/') %}{{ seg }}{% if not loop.last %}/<wbr>{% endif %}{% endfor %}</td>
               <td class="num">{{ i.size|bytes }}</td>
               <td class="num build-plus">{{ ('+' ~ i.plus) if i.plus is not none else '–' }}</td>
               <td class="num build-minus">{{ ('−' ~ i.minus) if i.minus is not none else '–' }}</td>

@@ -395,7 +395,7 @@ def test_untrusted_text_from_the_diff_and_errors_is_escaped_never_raw(client, en
     aid = new_analysis("ui-xss")
     top = [{"op": "M", "kind": "f", "path": f"smali/{EVIL}/\"><img src=x onerror=alert(2)>.smali", "size": 1, "plus": 1, "minus": 1}]
     bid = mk_build(aid, data=summary(top=top))
-    html = client.get(f"/analyses/{aid}/build/{bid}", headers=BROWSER).text
+    html = client.get(f"/analyses/{aid}/build/{bid}", headers=BROWSER).text.replace("<wbr>", "")   # path diberi <wbr> setelah "/"
     assert EVIL not in html and "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert '"><img src=x' not in html and "&lt;img src=x onerror=alert(2)&gt;" in html
     # nilai query yang dipantulkan ke atribut input
