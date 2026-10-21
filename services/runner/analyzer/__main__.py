@@ -16,7 +16,7 @@ from pathlib import Path
 
 from rvcore.fsutil import atomic_write_json
 
-from . import VERSION, callgraph, jadxlog
+from . import VERSION, callgraph, ghidra, jadxlog
 from .common import Findings
 from .index import IndexWriter
 from .scan import Scanner
@@ -117,6 +117,18 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001
         failures.append("signals")
         log(f"E: analisis sinyal gagal: {type(exc).__name__}: {exc}")
+
+    # --- 3b. analisis native mendalam (Ghidra headless). Tidak fatal: kegagalannya hanya menandai
+    # tahap ini; temuan & artefaknya tambahan di atas analisis yang sudah ada.
+    try:
+        log("I: Analisis native mendalam (Ghidra)…")
+        summary["native_deep"] = ghidra.analyze_ghidra(apk, work, out, findings, log)
+        if summary["native_deep"].get("failed"):
+            failures.append("ghidra")
+    except Exception as exc:  # noqa: BLE001
+        failures.append("ghidra")
+        log(f"E: analisis Ghidra gagal: {type(exc).__name__}: {exc}")
+        summary["native_deep"] = {"available": True, "error": True}
 
     # --- 4. ringkasan & penutupan
     if stats is not None:
