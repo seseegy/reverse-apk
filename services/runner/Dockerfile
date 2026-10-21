@@ -10,6 +10,10 @@ ARG APKTOOL_SHA256=dbf930b076c6b9be08d57c449cacefc3bdd6b71ebd59b3066fc0e1f5b14f9
 # aapt2 = berkas `prebuilt/linux/aapt2` di dalam apktool_${APKTOOL_VERSION}.jar (ELF x86-64 statis, 6449680 byte). Dipin terpisah supaya
 # mengganti versi apktool otomatis memaksa meninjau ulang hash ini. Harus dihitung ulang dari jar baru saat APKTOOL_VERSION dinaikkan.
 ARG AAPT2_SHA256=df312db814c018019b2b79a993b041b738d7b76f4a8f28da25bc874a026368cc
+ARG GHIDRA_VERSION=11.4
+ARG GHIDRA_SHA256=8b2902bb3166901bc6297a06892eee077c08605be65abfe73ce7aaaafb651632
+# Nama berkas rilis Ghidra memuat tanggal build di namanya; tinjau bersama GHIDRA_VERSION + hash di atas.
+ARG GHIDRA_ZIP=ghidra_11.4_PUBLIC_20250620.zip
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -19,7 +23,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     AAPT2_SHA256=${AAPT2_SHA256} \
     AAPT2_PATH=/opt/apktool/aapt2 \
     AAPT2_EXEC_DIR=/opt/aapt-exec \
-    ANALYZER_VERSION=4 \
+    GHIDRA_VERSION=${GHIDRA_VERSION} \
+    ANALYZER_VERSION=5 \
     JADX_OPTS="-Xmx2g"
 
 # aapt2 dipasang di rootfs (/opt/apktool/aapt2: read-only, milik root, 0755, hash dipin) sebagai SUMBER tepercaya dan TIDAK diekstrak apktool ke /tmp:
@@ -28,13 +33,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # pada rootfs read-only milik root (uid 10001 bukan pemilik) -> "Could not set aapt binary as executable". Karena itu wrapper `apktool` (runner/apktool-wrapper)
 # menyalin aapt2 ke tmpfs khusus /opt/aapt-exec (titik mount dibuat di bawah; tmpfs kecil yang boleh exec, dipasang oleh docker-compose.yml), memverifikasi hash
 # SALINAN terhadap pin (/opt/apktool/aapt2.sha256, ditulis dari ARG di bawah), lalu menyisipkan `--aapt` untuk b/build. Jangan "memperbaikinya" dengan `exec` pada /tmp.
+# Ghidra (analisis native mendalam, tahap analyzer 3b): rilis resmi NSA dipin hash seperti jadx/apktool.
+# Ghidra 11.x WAJIB JDK 21 (bukan JRE) — karena itu paket di bawah openjdk-21-jdk-headless; jadx/apktool
+# tetap berjalan di atas JDK. Heap analyzeHeadless dipatok MAXMEM=1200M lewat sed pada skrip launcher-nya
+# (bawaannya 2G; runner hanya 3 GB dan tahap analyze berbagi memori dengan analyzer Python; tidak ada
+# knob env/argumen untuk ini — `-vmargs` ditolak analyzeHeadless).
 RUN set -eux; \
     if [ "$(uname -m)" != "x86_64" ]; then \
       echo "GALAT: aapt2 bawaan apktool ${APKTOOL_VERSION} hanya untuk x86-64 (arsitektur ini: $(uname -m)); bangun image untuk linux/amd64." >&2; \
       exit 1; \
     fi; \
     apt-get update; \
-    apt-get install -y --no-install-recommends openjdk-21-jre-headless ca-certificates curl unzip; \
+    apt-get install -y --no-install-recommends openjdk-21-jdk-headless ca-certificates curl unzip; \
     curl -fsSL -o /tmp/jadx.zip "https://github.com/skylot/jadx/releases/download/v${JADX_VERSION}/jadx-${JADX_VERSION}.zip"; \
     echo "${JADX_SHA256}  /tmp/jadx.zip" | sha256sum -c -; \
     mkdir -p /opt/jadx; unzip -q /tmp/jadx.zip -d /opt/jadx; \
@@ -50,6 +60,14 @@ RUN set -eux; \
     /opt/apktool/aapt2 version; \
     printf '%s\n' "${AAPT2_SHA256}" > /opt/apktool/aapt2.sha256; \
     chmod 0644 /opt/apktool/aapt2.sha256; \
+    curl -fsSL -o /tmp/ghidra.zip "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/${GHIDRA_ZIP}"; \
+    echo "${GHIDRA_SHA256}  /tmp/ghidra.zip" | sha256sum -c -; \
+    unzip -q /tmp/ghidra.zip -d /opt; \
+    mv "/opt/ghidra_${GHIDRA_VERSION}_PUBLIC" /opt/ghidra; \
+    rm /tmp/ghidra.zip; \
+    sed -i 's/^MAXMEM=2G$/MAXMEM=1200M/' /opt/ghidra/support/analyzeHeadless; \
+    grep -q '^MAXMEM=1200M$' /opt/ghidra/support/analyzeHeadless; \
+    ln -s /opt/ghidra/support/analyzeHeadless /usr/local/bin/analyzeHeadless; \
     mkdir -p /opt/aapt-exec; \
     chmod 0755 /opt/aapt-exec; \
     apt-get purge -y --auto-remove curl unzip; \
