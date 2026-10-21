@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import re
 import shutil
 import signal
@@ -206,6 +207,14 @@ def analyze_ghidra(apk: Path, work: Path, out: Path, findings: Findings, log,
                     "budget_s": budget_s, "total_functions": 0}
     if not chosen:
         return result
+
+    # JVM mengambil user.home dari /etc/passwd (BUKAN $HOME) dan LaunchSupport Ghidra
+    # menolak berjalan bila direktori itu belum ada: ia menyimpan java_home.save di
+    # <user.home>/.config/ghidra/. Pastikan ada sebelum headless dipanggil.
+    try:
+        Path(pwd.getpwuid(os.getuid()).pw_dir).mkdir(parents=True, exist_ok=True)
+    except (OSError, KeyError):
+        pass
 
     scratch = work / ".ghidra-deep"
     proj_dir = scratch / "proj"
