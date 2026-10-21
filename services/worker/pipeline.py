@@ -69,7 +69,7 @@ class Config:
             timeouts={
                 "apktool": _env_int("TIMEOUT_APKTOOL", 600),
                 "jadx": _env_int("TIMEOUT_JADX", 2400),
-                "analyze": _env_int("TIMEOUT_ANALYZE", 600),
+                "analyze": _env_int("TIMEOUT_ANALYZE", 2400),   # memuat Ghidra: 8 library x 240 dtk + sub-tahap analyzer lain
             },
             pickup_timeout=_env_int("RUNNER_PICKUP_TIMEOUT", 120),
             min_free_bytes=_env_int("JOB_MIN_FREE_GB", 5) * 1024**3,
