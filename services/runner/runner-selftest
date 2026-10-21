@@ -62,6 +62,31 @@ for label, cmd in (
     except Exception as exc:  # noqa: BLE001
         report(False, label, f"{type(exc).__name__}: {exc}")
 
+# 1b. Ghidra untuk analisis native mendalam (tahap analyzer 3b): analyzeHeadless terpasang dan bisa
+# diluncurkan (tanpa argumen ia mencetak petunjuk lalu keluar != 0 — itu bukti JVM/JDK-nya hidup),
+# modul bahasa AARCH64 ada, heap terpancang MAXMEM=1200M (bawaan 2G terlalu besar untuk runner 3 GB),
+# dan skrip ekspor analyzer terpasang di /app.
+try:
+    headless = shutil.which("analyzeHeadless") or "/usr/local/bin/analyzeHeadless"
+    out = subprocess.run([headless], capture_output=True, text=True, timeout=180)
+    usage = (out.stdout or "") + (out.stderr or "")
+    ok_usage = "analyzeHeadless" in usage
+    report(ok_usage, "ghidra analyzeHeadless dapat diluncurkan",
+           "petunjuk pemakaian tercetak" if ok_usage else (usage.strip().splitlines() or ["(tanpa keluaran)"])[0][:120])
+except Exception as exc:  # noqa: BLE001
+    report(False, "ghidra analyzeHeadless dapat diluncurkan", f"{type(exc).__name__}: {exc}")
+try:
+    with open("/opt/ghidra/support/analyzeHeadless") as fh:
+        launcher = fh.read()
+    report("\nMAXMEM=1200M\n" in "\n" + launcher, "ghidra MAXMEM terpancang 1200M",
+           "sesuai pin Dockerfile" if "\nMAXMEM=1200M\n" in "\n" + launcher else "MAXMEM bukan 1200M")
+except OSError as exc:
+    report(False, "ghidra MAXMEM terpancang 1200M", str(exc))
+report(os.path.isfile("/opt/ghidra/Ghidra/Processors/AARCH64/data/languages/AARCH64.ldefs"),
+       "ghidra modul bahasa AARCH64 terpasang", "/opt/ghidra/Ghidra/Processors/AARCH64")
+report(os.path.isfile("/app/analyzer/GhidraExport.java"), "skrip ekspor GhidraExport.java terpasang",
+       "/app/analyzer/GhidraExport.java")
+
 # 2. Bukan root
 report(os.geteuid() != 0, "bukan root", f"uid={os.geteuid()}")
 
