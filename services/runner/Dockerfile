@@ -75,8 +75,12 @@ RUN set -eux; \
 
 # uid 10001 sama dengan web/worker: berkas hasil dekompilasi harus bisa dihapus oleh web (hapus analisis)
 # dan dibaca worker. /data/bench (dipasang READ-ONLY: sumber snapshot build) dan /data/builds (tujuan build) dibuat di sini supaya volume baru mewarisi izin 10001. Pemisahan hak dilakukan lewat container & volume (uploads read-only, tanpa db), bukan uid.
+# Home passwd diarahkan ke /tmp/home (== $HOME, tmpfs yang dapat ditulis): JVM mengambil user.home dari
+# /etc/passwd, BUKAN dari $HOME. Ghidra LaunchSupport menulis <user.home>/.config/ghidra/*/java_home.save
+# saat peluncuran pertama dan GAGAL TOTAL ("Failed to find a supported JDK") bila direktori itu tidak bisa
+# dibuat — home bawaan /home/runner tidak ada dan rootfs read-only (terbukti di runner-selftest PR #56).
 RUN groupadd --system --gid 10001 runner \
- && useradd --uid 10001 --gid runner --no-create-home --shell /usr/sbin/nologin runner \
+ && useradd --uid 10001 --gid runner --no-create-home --home-dir /tmp/home --shell /usr/sbin/nologin runner \
  && mkdir -p /data/uploads /data/work /data/spool /data/bench /data/builds \
  && chown -R 10001:10001 /data
 
