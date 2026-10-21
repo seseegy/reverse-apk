@@ -75,7 +75,7 @@ def requeue_orphans(conn: redis.Redis) -> list[int]:
     """Analisis berstatus 'queued' di DB tetapi tidak punya job di antrean (mis. Redis dikosongkan) dikirim ulang.
     Aman terhadap duplikat: worker mengklaim analisis lewat compare-and-set."""
     layout = Layout(os.environ.get("DATA_DIR", "/data"))
-    timeout = int(os.environ.get("JOB_TIMEOUT", "4500") or 4500)
+    timeout = int(os.environ.get("JOB_TIMEOUT", "6300") or 6300)
     queue = Queue(QUEUE_NAME, connection=conn)
     waiting = set(queue.job_ids)
     db = connect(layout.db_path)
