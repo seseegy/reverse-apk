@@ -201,6 +201,18 @@ def test_budget_habis_library_sisa_ditunda(tmp_path, stub_home, monkeypatch):
     assert result["truncated"] is True
 
 
+def test_home_passwd_dibuat_sebelum_headless(tmp_path, stub_home, monkeypatch):
+    # JVM memakai user.home dari /etc/passwd; LaunchSupport Ghidra menolak jalan bila
+    # direktori itu belum ada. Tahap harus membuatnya lebih dulu.
+    from types import SimpleNamespace
+    home_baru = tmp_path / "home-passwd"
+    monkeypatch.setattr(ghidra.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(home_baru)))
+    apk = make_apk(tmp_path, [("lib/arm64-v8a/libtest.so", 64)])
+    result, _findings, _out, _work = run_stage(apk, tmp_path)
+    assert result["libs"][0]["status"] == "ok"
+    assert home_baru.is_dir()
+
+
 def test_bahasa_menyimpang_tercatat(tmp_path, stub_home, monkeypatch):
     data = dict(STUB_JSON, language="x86:LE:64:default")
     monkeypatch.setenv("STUB_GHIDRA_JSON", json.dumps(data))
@@ -220,5 +232,8 @@ def test_dockerfile_pin_ghidra_dan_versi():
     assert "ANALYZER_VERSION=5" in dockerfile
     assert "openjdk-21-jdk-headless" in dockerfile       # Ghidra 11.x wajib JDK, bukan JRE
     assert "MAXMEM=1200M" in dockerfile                  # heap terpancang untuk runner 3 GB
+    # JVM mengambil user.home dari /etc/passwd (bukan $HOME); LaunchSupport Ghidra menulis
+    # java_home.save ke sana dan gagal total bila tidak bisa ditulis (rootfs read-only).
+    assert "--home-dir /tmp/home" in dockerfile
     selftest = (ROOT / "services" / "runner" / "runner-selftest").read_text(encoding="utf-8")
     assert "analyzeHeadless" in selftest
