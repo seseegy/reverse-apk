@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import shlex
 import threading
 import time
 from contextlib import closing
@@ -961,6 +962,117 @@ def _clip_tail(text: str, limit: int) -> str:
     return text[:head] + f"\n…[{len(text) - head - tail} karakter dihilangkan]…\n" + text[-tail:]
 
 
+# ---------------------------------------------------------------- Ghidra on-demand (tool analyze_native_library)
+# Ghidra yang DIPANGGIL AI untuk library PILIHANNYA — beda dengan tahap statis runner yang memilih library
+# sendiri (pagat urutan zip terbukti melewatkan library yang dicari). Berjalan di bench (kontainer yang sama
+# dengan shell_run) lewat entrypoint TETAP /usr/local/bin/bench-ghidra: AI hanya memberi nama/path library di
+# $WS, perintah disusun di sini, dan request ditandai kind="ghidra" agar bench memberi pagat timeout kelasnya
+# sendiri (AI_GHIDRA_TIMEOUT / BENCH_GHIDRA_MAX_TIMEOUT) serta memverifikasi entrypoint-nya. .so TIDAK PERNAH
+# dieksekusi: Ghidra menganalisisnya statis di dalam kurungan Landlock bench.
+GHIDRA_ENTRY = "/usr/local/bin/bench-ghidra"
+_LIB_ARG_RE = re.compile(r"^[A-Za-z0-9._\-/]+$")
+
+
+def _ghidra_audit(ctx: ToolContext, detail: dict[str, Any]) -> None:
+    """Catat TANPA isi hasil analisis (nama library + angka saja): audit tidak boleh menjadi kebocoran baru."""
+    try:
+        with closing(ctx.db()) as conn:
+            store.audit(conn, "ai_native_ghidra", {"analysis_id": ctx.analysis_id, **detail})
+    except Exception as exc:  # noqa: BLE001 - kegagalan audit tidak boleh menutupi hasil, tetapi harus terlihat di log
+        log.error("audit ai_native_ghidra gagal: analysis=%s: %s", ctx.analysis_id, type(exc).__name__)
+
+
+def _parse_ghidra_stdout(stdout: str) -> dict | None:
+    """JSON kontrak bench-ghidra = baris JSON terakhir yang memuat kunci 'ok'. None bila tidak ada."""
+    for line in reversed(stdout.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            data = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(data, dict) and "ok" in data:
+            return data
+    return None
+
+
+def analyze_native_library(ctx: ToolContext, args: dict) -> dict:
+    cfg = ctx.cfg
+    if not cfg.shell_enabled:                                  # lapis kedua: schemas() juga menyembunyikan tool ini
+        raise ToolError("analyze_native_library tidak diaktifkan di server ini (membutuhkan shell AI / bench)")
+    name = _str(args, "library").replace("\\", "/")
+    if (not _LIB_ARG_RE.match(name) or not name.endswith(".so") or name.startswith("/")
+            or any(p in ("", ".", "..") for p in name.split("/"))):
+        raise ToolError("argumen 'library' harus path relatif berakhiran .so di ruang kerja Anda ($WS), mis. 'lib/libloader.so' "
+                        "atau 'libloader.so' (tanpa '..', tanpa awalan '/'). Bila belum ada di $WS, ekstrak dulu dari APK dengan "
+                        "shell_run: unzip -p $APK lib/arm64-v8a/<nama>.so > $WS/lib/<nama>.so")
+    if cfg.shell_max_calls_per_turn and ctx.shell_calls >= cfg.shell_max_calls_per_turn:
+        ctx.limit_hit = "shell_budget"
+        raise ToolError(f"batas {cfg.shell_max_calls_per_turn} operasi ruang kerja per giliran tercapai; rangkum yang sudah Anda ketahui "
+                        "dan tanyakan kepada pengguna bila perlu lanjut")
+    timeout = _shell_turn_guard(ctx, cfg.ghidra_timeout_s)     # pagat waktu giliran yang sama dengan shell (FR-9.36)
+    ctx.shell_calls += 1
+    command = f"{GHIDRA_ENTRY} {shlex.quote(name)}"            # argv tetap; satu-satunya variabel nama library yang sudah divalidasi ketat
+    spool = shellspool.make_spool(cfg.shell_spool_dir)
+    started = time.monotonic()
+    try:
+        res = shellspool.run_command(spool, ctx.analysis_id, command, timeout=timeout, sha256=ctx.bench_sha256,
+                                     cancel=ctx.cancel, kind="ghidra")
+    except shellspool.BenchUnavailable as exc:
+        _ghidra_audit(ctx, {"status": "unavailable", "library": name})
+        raise ToolError(exc.message) from None
+    finally:
+        ctx.shell_seconds += time.monotonic() - started        # waktu dinding bench dihitung ke anggaran giliran, sama seperti shell_run
+    ms = int((time.monotonic() - started) * 1000)
+    status = res["status"]
+    red = ctx.redactor.text
+    ctx.ui_detail = {"command": f"analyze_native_library {name}", "stdout": _clip_tail(red(res["stdout"]), 6000),
+                     "stderr": _clip_tail(red(res["stderr"]), 3000), "exit_code": res["exit_code"], "status": status}
+    if status != "ok":
+        _ghidra_audit(ctx, {"status": status, "library": name, "ms": res["duration_ms"] or ms})
+        out: dict[str, Any] = {"library": name, "berhasil": False, "status": status}
+        if res["message"]:
+            out["catatan"] = red(res["message"])
+        return out
+    summary = _parse_ghidra_stdout(res["stdout"])
+    if summary is None:
+        _ghidra_audit(ctx, {"status": "hasil_rusak", "library": name, "ms": res["duration_ms"] or ms})
+        raise ToolError("hasil bench-ghidra tidak terbaca (keluaran bukan JSON kontrak); coba lagi atau periksa library-nya dengan shell_run")
+    if not summary.get("ok"):
+        _ghidra_audit(ctx, {"status": "gagal", "library": name, "ms": res["duration_ms"] or ms})
+        out = {"library": name, "berhasil": False, "alasan": red(str(summary.get("error") or "Ghidra gagal"))}
+        if summary.get("tail"):
+            out["ekor_log"] = _clip_tail(red(str(summary["tail"])), 400)
+        return out
+    art = summary.get("artifacts") or {}
+    out = {
+        "library": summary.get("library") or name,
+        "berhasil": True,
+        "bahasa_prosesor": summary.get("language"),
+        "image_base": summary.get("image_base"),
+        "jumlah_fungsi": summary.get("functions_total"),
+        "daftar_fungsi_terpotong": bool(summary.get("functions_truncated")),
+        "fungsi_jni": [red(str(x)) for x in (summary.get("jni_functions") or [])],
+        "fungsi_vektor_fp": [red(str(x)) for x in (summary.get("vector_fp_functions") or [])],
+        "impor_total": summary.get("imports_total"),
+        "impor_penting": [str(x) for x in (summary.get("imports_flagged") or [])],
+        "string_total": summary.get("strings_total"),
+        "url": [red(str(u)) for u in (summary.get("urls") or [])],
+        "konstanta_kripto": [str(c) for c in (summary.get("crypto_constants") or [])],
+        "fungsi_didekompilasi": summary.get("decompiled"),
+        "durasi_detik": summary.get("duration_s"),
+        "artefak": {"json": f"$WS/{art.get('json')}", "c": f"$WS/{art.get('c')}"},
+        "catatan": ("Dekompilasi C lengkap ada di artefak .c dan rincian fungsi/string/xref di artefak .json (keduanya di $WS): "
+                    "baca BERKEPING lewat shell_run (grep nama fungsi, lalu sed -n pada rentang barisnya), jangan dibaca sekaligus. "
+                    "Hasil ini dari library yang Anda pilih; analisis ulang library yang sama menimpa artefaknya."),
+    }
+    ctx.shell_out_chars += len(json.dumps(out, ensure_ascii=False))
+    _ghidra_audit(ctx, {"status": "ok", "library": name, "ms": res["duration_ms"] or ms,
+                        "functions": summary.get("functions_total") or 0})
+    return out
+
+
 # ---------------------------------------------------------------- build oleh AI (Tahap 4): bench_diff, request_build, get_build_status
 # Hanya MEMBUAT permintaan `awaiting_approval` dan MEMBACA status. Tidak ada tool/jalur untuk menyetujui, membatalkan, menandatangani, mengunduh, atau membaca artefak
 # (dijaga tests/test_ai_no_approve_invariant.py). Logika ada di app/aibuild.py; di sini hanya pembungkus: gerbang, penghitung anggaran, audit, pemetaan galat.
@@ -1112,6 +1224,17 @@ TOOLS: dict[str, tuple[Callable[[ToolContext, dict], dict], dict]] = {
                                                            "format dan jumlah split XAPK/APKS. Tanpa build_id = build aktif/terbaru; build_id harus milik analisis ini. Tidak pernah memuat path, "
                                                            "keystore, atau tautan unduh. Jangan menyatakan selesai sebelum status = selesai; maks 3 kali per giliran.",
                                             "properties": {"build_id": {"type": "integer", "minimum": 1, "description": "opsional: id build milik analisis ini"}}}),
+    "analyze_native_library": (analyze_native_library, {"description": "Bedah SATU library native (.so) dengan Ghidra headless SAAT INI JUGA di bench, "
+                                                                      "untuk library yang ANDA pilih — beda dengan analisis statis yang memilih library-nya sendiri. "
+                                                                      "Argumen: path relatif .so di ruang kerja Anda ($WS), mis. 'lib/libloader.so'. Bila .so belum ada "
+                                                                      "di $WS, ekstrak dulu dari APK dengan shell_run (unzip -p $APK lib/arm64-v8a/<nama>.so > "
+                                                                      "$WS/lib/<nama>.so). Kembali hanya RINGKASAN: jumlah fungsi, fungsi JNI, fungsi FP vektor, impor "
+                                                                      "penting (ptrace/dlopen/system/mprotect), URL, konstanta kripto, dan path artefak "
+                                                                      "hasil_ai/ghidra/<nama>.json (fungsi + string + xref) dan .c (dekompilasi C) di $WS — baca artefak "
+                                                                      "BERKEPING lewat shell_run. Satu panggilan = satu library dan bisa memakan beberapa menit. "
+                                                                      ".so hanya dianalisis statis, tidak pernah dieksekusi.",
+                                                        "properties": {"library": {"type": "string", "description": "path relatif .so di $WS, mis. lib/libloader.so"}},
+                                                        "required": ["library"]}),
     "get_manifest": (get_manifest, {"description": "Manifest ter-parse: izin, flag, komponen dan status exported.", "properties": {}}),
     "list_packages": (list_packages, {"description": "Daftar package beserta jumlah class (kode aplikasi).",
                                       "properties": {"prefix": {"type": "string", "description": "awalan package, mis. com.example"},
@@ -1206,6 +1329,9 @@ SHELL_ONLY = frozenset({"shell_run"})       # hanya ditawarkan bila AI_SHELL_ENA
 BUILD_ONLY = frozenset({"bench_diff", "request_build", "get_build_status"})      # gerbang SAMA dengan shell (tanpa shell AI tidak bisa mengubah project/); tiap tool juga menolak sendiri
 
 
+GHIDRA_ONLY = frozenset({"analyze_native_library"})   # gerbang SAMA dengan shell (dispatch-nya lewat bench); tool juga menolak sendiri
+
+
 # Deskripsi shell_run yang dilihat model: bila jaringan aktif, klaim "TANPA jaringan" DIHAPUS (tanpa menambah teks; pernyataan yang bertentangan membuat model ragu
 # atau menolak memakai jaringan). Teks dasar yang berubah = galat keras, bukan penggantian diam-diam yang meleset.
 _SHELL_NET_DESC_REWRITES = (
@@ -1229,7 +1355,7 @@ def schemas(vision: bool = True, shell: bool = False, net: bool = False) -> list
         "name": name, "description": _describe(name, spec, net and shell),
         "parameters": {"type": "object", "properties": spec["properties"], "required": spec.get("required", []),
                        "additionalProperties": False}}} for name, (_fn, spec) in TOOLS.items()
-            if (vision or name not in VISION_ONLY) and (shell or name not in SHELL_ONLY | BUILD_ONLY)]
+            if (vision or name not in VISION_ONLY) and (shell or name not in SHELL_ONLY | BUILD_ONLY | GHIDRA_ONLY)]
 
 
 def run_tool(ctx: ToolContext, name: str, raw_args: str) -> tuple[str, bool]:
