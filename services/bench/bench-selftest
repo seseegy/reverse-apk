@@ -115,6 +115,22 @@ must_work("membaca kode jadx analisis sendiri", "cat $WORK/jadx/A.java", "class 
 must_work("membuka APK sendiri", "unzip -l $APK", "AndroidManifest.xml")
 must_work("menulis dan membaca di ruang kerja", "echo halo > $WS/a.txt && cat $WS/a.txt", "halo")
 must_work("python3 tersedia", "python3 -c 'print(6*7)'", "42")
+# --- 3a-ghidra. Tool analyze_native_library: entrypoint tetap bench-ghidra + Ghidra di dalam kurungan.
+report(Path("/usr/local/bin/bench-ghidra").is_file() and os.access("/usr/local/bin/bench-ghidra", os.X_OK), "bench-ghidra terpasang dan bisa dieksekusi")
+report(Path("/usr/local/lib/bench-ghidra/GhidraExport.java").is_file(), "GhidraExport.java untuk bench-ghidra terpasang")
+_hl = Path("/opt/ghidra/support/analyzeHeadless")
+report(_hl.is_file() and "MAXMEM=512M" in _hl.read_text(encoding="utf-8", errors="replace"), "analyzeHeadless terpasang, MAXMEM dipin 512M (batas bench 1 GB)")
+report(Path("/opt/ghidra/Ghidra/Processors/AARCH64/data/languages/AARCH64.ldefs").is_file(), "modul bahasa AARCH64:LE:64:v8A ada")
+(data / "bench/1/lib").mkdir(parents=True, exist_ok=True)
+(data / "bench/1/lib/libbukanelf.so").write_bytes(b"teks biasa, bukan ELF")
+_r = run("bench-ghidra lib/libbukanelf.so")
+report('"ok": false' in _r["stdout"] and "ELF" in _r["stdout"], "bench-ghidra menolak berkas bukan ELF di dalam kurungan", _r["stdout"].strip()[:120])
+# Header ELF aarch64 yang sah (isi sebatas header): Ghidra harus BENAR-BENAR terpicu — gagalnya di impor, BUKAN di pencarian JDK.
+# Ini bukti jebakan user.home (LaunchSupport menulis java_home.save dari /etc/passwd) sudah ditangani bench-ghidra di dalam kurungan.
+(data / "bench/1/lib/libheader.so").write_bytes(b"\x7fELF\x02\x01\x01" + b"\x00" * 9 + b"\x02\x00\xb7\x00" + b"\x00" * 64)
+_r = run("bench-ghidra lib/libheader.so", timeout=20)
+report("Failed to find a supported JDK" not in (_r["stdout"] + _r["stderr"]) and '"ok": false' in _r["stdout"],
+       "Ghidra terpicu di dalam kurungan (JDK ketemu; gagal di impor ELF umpan itu wajar)", _r["stdout"].strip()[:120])
 must_block("index/ analisis sendiri (rahasia mentah): baca", "cat $WORK/index/findings.jsonl")
 must_block("index/ analisis sendiri: daftar", "ls $WORK/index")
 must_block("analisis lain: baca", f"cat {D}/work/2/apktool/x.txt")
