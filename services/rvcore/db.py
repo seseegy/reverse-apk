@@ -240,6 +240,15 @@ _MIGRATIONS: list[str] = [
     CREATE UNIQUE INDEX build_one_open_per_analysis ON build(analysis_id)
         WHERE status IN ('awaiting_approval', 'approved', 'queued', 'building', 'signing')
     """,
+    # Pengaturan koneksi AI dari UI (halaman Pengaturan AI): base_url/api_key/model tidak lagi dari .env.
+    # Kunci API tersimpan di sini (database server, volume data) dan TIDAK pernah dikirim ke browser.
+    """
+    CREATE TABLE ai_setting (
+        key        TEXT PRIMARY KEY,
+        value      TEXT NOT NULL,
+        updated_at REAL NOT NULL
+    );
+    """,
 ]
 
 SCHEMA_VERSION = len(_MIGRATIONS)
