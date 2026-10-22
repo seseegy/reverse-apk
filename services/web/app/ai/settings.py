@@ -24,7 +24,8 @@ from rvcore import store
 
 from .config import AIConfig, ConfigError, load_ai_config, validate_base_url
 
-KEYS = store.AI_SETTING_KEYS
+KEYS = ("base_url", "api_key", "model", "model_pro", "fallback_model")   # bidang koneksi dari formulir
+CACHE_KEY = "models_cache"   # katalog model terakhir dari router (JSON): sumber metadata vision dsb.
 LABELS = {"base_url": "Base URL", "api_key": "Kunci API", "model": "Model utama",
           "model_pro": "Model kuat", "fallback_model": "Model cadangan"}
 MAX_MODELS = 500          # pagat daftar model dari router (portal bisa memuat ratusan slug)
@@ -101,12 +102,45 @@ def missing_labels(cfg: AIConfig) -> list[str]:
     return out
 
 
+_VISION_WORDS = {"vision", "image", "image_input", "multimodal"}
+
+
+def _vision_of(item: dict) -> bool | None:
+    """Dukungan vision menurut metadata router; None bila router tidak menyatakan apa pun.
+
+    Router menyatakan kemampuan dalam beberapa bentuk: daftar `capabilities` (mis. GripHub:
+    ["chat", "vision", ...]), dict `capabilities`, bendera langsung (`vision`/`supports_vision`),
+    atau `architecture.input_modalities`/`modality` (gaya OpenRouter). Daftar/dict yang ADA tapi
+    tanpa kata vision adalah pernyataan "tidak" yang sah; ketiadaan semuanya = tidak tahu.
+    """
+    caps = item.get("capabilities")
+    if isinstance(caps, (list, tuple)):
+        low = {str(c).strip().lower() for c in caps}
+        return bool(low & _VISION_WORDS)
+    if isinstance(caps, dict):
+        for k in _VISION_WORDS:
+            if k in caps:
+                return bool(caps[k])
+    for k in ("vision", "supports_vision", "image_input"):
+        if isinstance(item.get(k), bool):
+            return item[k]
+    arch = item.get("architecture")
+    if isinstance(arch, dict):
+        mods = arch.get("input_modalities")
+        if isinstance(mods, list):
+            return "image" in {str(m).strip().lower() for m in mods}
+        modality = arch.get("modality")
+        if isinstance(modality, str):
+            return "image" in modality.lower()
+    return None
+
+
 def fetch_models(base_url: str, api_key: str, *, connect_timeout: float = 10.0,
                  read_timeout: float = 30.0) -> list[dict]:
     """Tarik daftar model dari router: GET {base_url}/models (kompatibel OpenAI), kunci sebagai Bearer.
 
-    Mengembalikan [{id, context_window?, max_output_tokens?}] — metadata disertakan hanya bila
-    router memberikannya (mis. GripHub). Galat -> SettingsError berpesan aman (tanpa kunci).
+    Mengembalikan [{id, context_window?, max_output_tokens?, vision?}] — metadata disertakan
+    hanya bila router memberikannya (mis. GripHub). Galat -> SettingsError berpesan aman (tanpa kunci).
     """
     base = validate_base_url(base_url)                    # ConfigError (ValueError) -> ditangkap pemanggil
     if not base:
@@ -161,9 +195,43 @@ def fetch_models(base_url: str, api_key: str, *, connect_timeout: float = 10.0,
             v = item.get(src)
             if isinstance(v, int) and v > 0 and dst not in row:
                 row[dst] = v
+        vis = _vision_of(item)
+        if vis is not None:
+            row["vision"] = vis
         out.append(row)
         if len(out) >= MAX_MODELS:
             break
     if not out:
         raise SettingsError("Router tidak mengembalikan model apa pun.")
     return out
+
+
+# ------------------------------------------------------------------ cache katalog model dari router
+
+def save_models_cache(conn: sqlite3.Connection, models: list[dict]) -> None:
+    """Simpan katalog terakhir dari router. Dipakai sebagai sumber metadata (vision) yang lebih
+    tahu daripada tebakan ai_models.json. Kegagalan di sini tidak boleh menggagalkan penarikan."""
+    payload = json.dumps(models, ensure_ascii=False, separators=(",", ":"))
+    if len(payload) > 512_000:                       # katalog raksasa: potong daripada gagal
+        payload = json.dumps(models[:100], ensure_ascii=False, separators=(",", ":"))
+    with rvdb.tx(conn):
+        store.save_ai_settings(conn, {CACHE_KEY: payload})
+
+
+def read_models_cache(conn: sqlite3.Connection) -> list[dict]:
+    raw = store.get_ai_settings(conn).get(CACHE_KEY) or ""
+    try:
+        data = json.loads(raw) if raw else []
+    except ValueError:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [m for m in data if isinstance(m, dict) and isinstance(m.get("id"), str)]
+
+
+def vision_overrides(conn: sqlite3.Connection) -> dict[str, bool]:
+    """Peta slug -> vision HANYA untuk model yang routernya menyatakan eksplisit (True/False).
+
+    Model yang tidak dinyatakan router tidak ada di peta ini: keputusannya jatuh ke ai_models.json.
+    """
+    return {m["id"]: m["vision"] for m in read_models_cache(conn) if isinstance(m.get("vision"), bool)}
