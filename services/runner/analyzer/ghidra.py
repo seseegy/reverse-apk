@@ -14,8 +14,11 @@ di failures[] (rincian per library tetap tersimpan). Bila Ghidra tidak terpasang
 tahap dilewati diam-diam (available=False) — image runner memasangnya dan
 runner-selftest yang menjaga keberadaannya.
 
-Pagar sumber daya (runner: 3 GB RAM / 2 CPU, tahap analyze dijatah worker 600 dtk):
-  - total budget BUDGET_S detik untuk seluruh tahap, timeout per library dari sisa;
+Pagar sumber daya (runner: 3 GB RAM / 2 CPU):
+  - timeout TETAP PER_LIB_S (240 dtk) per library; budget total tahap = PER_LIB_S x
+    jumlah library terpilih (maks 8 -> 1920 dtk). Rantai di atasnya sudah diselaraskan:
+    TIMEOUT_ANALYZE worker 2400 dtk (1920 Ghidra + sisa untuk sub-tahap analyzer lain)
+    dan JOB_TIMEOUT 6300 dtk (600 apktool + 2400 jadx + 2400 analyze + sisa);
   - heap JVM dipatok lewat MAXMEM di skrip analyzeHeadless image (lihat Dockerfile);
   - jumlah & ukuran library dibatasi; prioritas ABI arm64-v8a lebih dulu.
 Isi .so berasal dari APK yang TIDAK TEPERCAYA: .so tidak pernah dieksekusi — Ghidra
@@ -37,7 +40,7 @@ from pathlib import Path
 
 from .common import Findings
 
-BUDGET_S = 420            # total tahap; jatah tahap analyze dari worker 600 dtk
+PER_LIB_S = 240           # timeout tetap per library (4 menit); total tahap = ini x jumlah library
 MAX_LIBS = 8
 MAX_LIB_BYTES = 64 * 1024 * 1024
 MAX_DECOMPILE = 200       # fungsi didekompilasi per library (prioritas di skrip ekspor)
@@ -195,16 +198,22 @@ def _emit_findings(lib: str, data: dict, findings: Findings, art_rel: str) -> di
 
 
 def analyze_ghidra(apk: Path, work: Path, out: Path, findings: Findings, log,
-                   budget_s: int = BUDGET_S) -> dict:
-    """Tahap 3b. Mengembalikan dict untuk summary["native_deep"]."""
+                   budget_s: int | None = None) -> dict:
+    """Tahap 3b. Mengembalikan dict untuk summary["native_deep"].
+
+    budget_s None = bawaan produksi: PER_LIB_S per library terpilih. Nilai eksplisit
+    (tes) menjadi pagat total tahap.
+    """
     headless = _ghidra_home() / "support" / "analyzeHeadless"
     if not headless.is_file():
         log("I: Ghidra tidak terpasang; analisis native mendalam dilewati")
         return {"available": False, "reason": "analyzeHeadless tidak ditemukan"}
 
     chosen, skipped = _select_libs(apk)
+    if budget_s is None:
+        budget_s = PER_LIB_S * len(chosen)
     result: dict = {"available": True, "libs": [], "libs_skipped": skipped,
-                    "budget_s": budget_s, "total_functions": 0}
+                    "budget_s": budget_s, "per_lib_s": PER_LIB_S, "total_functions": 0}
     if not chosen:
         return result
 
@@ -236,8 +245,8 @@ def analyze_ghidra(apk: Path, work: Path, out: Path, findings: Findings, log,
             if not _extract(apk, entry["entry"], lib_path):
                 continue
             attempted += 1
-            # Timeout per library: sisa budget dibagi library yang belum dicoba.
-            per_lib = max(MIN_PER_LIB_S, remaining // max(1, len(chosen) - idx))
+            # Timeout per library: tetap PER_LIB_S, dipotong sisa budget total tahap.
+            per_lib = max(MIN_PER_LIB_S, min(PER_LIB_S, remaining))
             json_tmp = scratch / f"{stem}.json"
             c_tmp = scratch / f"{stem}.c"
             t0 = time.monotonic()
