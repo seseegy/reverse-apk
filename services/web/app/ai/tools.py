@@ -997,16 +997,34 @@ def _parse_ghidra_stdout(stdout: str) -> dict | None:
     return None
 
 
-def analyze_native_library(ctx: ToolContext, args: dict) -> dict:
-    cfg = ctx.cfg
-    if not cfg.shell_enabled:                                  # lapis kedua: schemas() juga menyembunyikan tool ini
-        raise ToolError("analyze_native_library tidak diaktifkan di server ini (membutuhkan shell AI / bench)")
+def _lib_arg(args: dict) -> str:
+    """Argumen 'library' yang sah untuk tool Ghidra (dipakai analyze_native_library & read_native_function)."""
     name = _str(args, "library").replace("\\", "/")
     if (not _LIB_ARG_RE.match(name) or not name.endswith(".so") or name.startswith("/")
             or any(p in ("", ".", "..") for p in name.split("/"))):
         raise ToolError("argumen 'library' harus path relatif berakhiran .so di ruang kerja Anda ($WS), mis. 'lib/libloader.so' "
                         "atau 'libloader.so' (tanpa '..', tanpa awalan '/'). Bila belum ada di $WS, ekstrak dulu dari APK dengan "
                         "shell_run: unzip -p $APK lib/arm64-v8a/<nama>.so > $WS/lib/<nama>.so")
+    return name
+
+
+def _run_bench_ghidra(ctx: ToolContext, command: str, timeout: int):
+    """Kirim perintah bench-ghidra lewat spool (kind='ghidra') dan kembalikan (res, ms). BenchUnavailable diteruskan."""
+    spool = shellspool.make_spool(ctx.cfg.shell_spool_dir)
+    started = time.monotonic()
+    try:
+        res = shellspool.run_command(spool, ctx.analysis_id, command, timeout=timeout, sha256=ctx.bench_sha256,
+                                     cancel=ctx.cancel, kind="ghidra")
+    finally:
+        ctx.shell_seconds += time.monotonic() - started        # waktu dinding bench dihitung ke anggaran giliran (FR-9.36)
+    return res, int((time.monotonic() - started) * 1000)
+
+
+def analyze_native_library(ctx: ToolContext, args: dict) -> dict:
+    cfg = ctx.cfg
+    if not cfg.shell_enabled:                                  # lapis kedua: schemas() juga menyembunyikan tool ini
+        raise ToolError("analyze_native_library tidak diaktifkan di server ini (membutuhkan shell AI / bench)")
+    name = _lib_arg(args)
     if cfg.shell_max_calls_per_turn and ctx.shell_calls >= cfg.shell_max_calls_per_turn:
         ctx.limit_hit = "shell_budget"
         raise ToolError(f"batas {cfg.shell_max_calls_per_turn} operasi ruang kerja per giliran tercapai; rangkum yang sudah Anda ketahui "
@@ -1063,13 +1081,75 @@ def analyze_native_library(ctx: ToolContext, args: dict) -> dict:
         "fungsi_didekompilasi": summary.get("decompiled"),
         "durasi_detik": summary.get("duration_s"),
         "artefak": {"json": f"$WS/{art.get('json')}", "c": f"$WS/{art.get('c')}"},
-        "catatan": ("Dekompilasi C lengkap ada di artefak .c dan rincian fungsi/string/xref di artefak .json (keduanya di $WS): "
-                    "baca BERKEPING lewat shell_run (grep nama fungsi, lalu sed -n pada rentang barisnya), jangan dibaca sekaligus. "
-                    "Hasil ini dari library yang Anda pilih; analisis ulang library yang sama menimpa artefaknya."),
+        "catatan": ("Dekompilasi C lengkap ada di artefak .c dan rincian fungsi/string/xref di artefak .json (keduanya di $WS). "
+                    "Untuk fungsi yang akan Anda simpulkan, panggil read_native_function agar Anda melihat kodenya APA ADANYA — "
+                    "jangan menyimpulkan dari ringkasan ini saja. Berkas besar juga bisa dibaca berkeping lewat shell_run "
+                    "(grep nama fungsi, lalu sed -n pada rentang barisnya). Analisis ulang library yang sama menimpa artefaknya."),
     }
     ctx.shell_out_chars += len(json.dumps(out, ensure_ascii=False))
     _ghidra_audit(ctx, {"status": "ok", "library": name, "ms": res["duration_ms"] or ms,
                         "functions": summary.get("functions_total") or 0})
+    return out
+
+
+def read_native_function(ctx: ToolContext, args: dict) -> dict:
+    """Dekompilasi C SATU fungsi APA ADANYA dari artefak bench-ghidra (mode fungsi; tanpa menjalankan Ghidra).
+
+    Inilah jangkar fakta untuk kesimpulan AI tentang kode native: ringkasan analyze_native_library
+    hanya untuk MEMILIH fungsi; isi fungsi dibaca di sini kata per kata dari hasil dekompilasi.
+    """
+    cfg = ctx.cfg
+    if not cfg.shell_enabled:                                  # lapis kedua: schemas() juga menyembunyikan tool ini
+        raise ToolError("read_native_function tidak diaktifkan di server ini (membutuhkan shell AI / bench)")
+    name = _lib_arg(args)
+    func = _str(args, "function").strip()
+    if not func or len(func) > 200 or any(ord(c) < 32 for c in func):
+        raise ToolError("argumen 'function' harus nama fungsi persis dari hasil analyze_native_library "
+                        "(mis. 'JNI_OnLoad' atau nama fungsi FP-vektornya)")
+    if cfg.shell_max_calls_per_turn and ctx.shell_calls >= cfg.shell_max_calls_per_turn:
+        ctx.limit_hit = "shell_budget"
+        raise ToolError(f"batas {cfg.shell_max_calls_per_turn} operasi ruang kerja per giliran tercapai; rangkum yang sudah Anda ketahui "
+                        "dan tanyakan kepada pengguna bila perlu lanjut")
+    timeout = _shell_turn_guard(ctx, 60)                       # pemotongan berkas lokal di bench: cepat, bukan analisis Ghidra
+    ctx.shell_calls += 1
+    command = f"{GHIDRA_ENTRY} fungsi {shlex.quote(name)} {shlex.quote(func)}"
+    try:
+        res, ms = _run_bench_ghidra(ctx, command, timeout)
+    except shellspool.BenchUnavailable as exc:
+        _ghidra_audit(ctx, {"status": "unavailable", "library": name, "mode": "fungsi", "function": func})
+        raise ToolError(exc.message) from None
+    status = res["status"]
+    red = ctx.redactor.text
+    ctx.ui_detail = {"command": f"read_native_function {name} :: {func}", "stdout": _clip_tail(red(res["stdout"]), 6000),
+                     "stderr": _clip_tail(red(res["stderr"]), 3000), "exit_code": res["exit_code"], "status": status}
+    if status != "ok":
+        _ghidra_audit(ctx, {"status": status, "library": name, "mode": "fungsi", "function": func, "ms": res["duration_ms"] or ms})
+        out: dict[str, Any] = {"library": name, "fungsi": func, "berhasil": False, "status": status}
+        if res["message"]:
+            out["catatan"] = red(res["message"])
+        return out
+    summary = _parse_ghidra_stdout(res["stdout"])
+    if summary is None:
+        _ghidra_audit(ctx, {"status": "hasil_rusak", "library": name, "mode": "fungsi", "function": func, "ms": res["duration_ms"] or ms})
+        raise ToolError("hasil bench-ghidra tidak terbaca (keluaran bukan JSON kontrak); coba lagi atau periksa artefaknya dengan shell_run")
+    if not summary.get("ok"):
+        _ghidra_audit(ctx, {"status": "gagal", "library": name, "mode": "fungsi", "function": func, "ms": res["duration_ms"] or ms})
+        return {"library": name, "fungsi": func, "berhasil": False, "alasan": red(str(summary.get("error") or "fungsi tidak terbaca"))}
+    out = {
+        "library": summary.get("library") or name,
+        "fungsi": summary.get("function") or func,
+        "alamat": summary.get("address"),
+        "berhasil": True,
+        "kode_c": summary.get("code") or "",
+        "terpotong": bool(summary.get("truncated")),
+        "rentang_baris_di_artefak": [summary.get("line_start"), summary.get("line_end")],
+        "total_baris_fungsi": summary.get("total_lines"),
+        "artefak": f"$WS/{summary.get('artifact')}",
+        "catatan": ("Ini kode dekompilasi ASLI dari Ghidra — dasarkan kesimpulanmu pada kode ini, bukan pada ringkasan "
+                    "atau tebakan. Bila terpotong, lanjutkan membaca rentang baris berikutnya pada artefak lewat shell_run."),
+    }
+    ctx.shell_out_chars += len(json.dumps(out, ensure_ascii=False))
+    _ghidra_audit(ctx, {"status": "ok", "library": name, "mode": "fungsi", "function": func, "ms": res["duration_ms"] or ms})
     return out
 
 
@@ -1235,6 +1315,16 @@ TOOLS: dict[str, tuple[Callable[[ToolContext, dict], dict], dict]] = {
                                                                       ".so hanya dianalisis statis, tidak pernah dieksekusi.",
                                                         "properties": {"library": {"type": "string", "description": "path relatif .so di $WS, mis. lib/libloader.so"}},
                                                         "required": ["library"]}),
+    "read_native_function": (read_native_function, {"description": "Baca dekompilasi C SATU fungsi native APA ADANYA dari hasil "
+                                                                      "analyze_native_library (tanpa menjalankan Ghidra lagi). Argumen: 'library' "
+                                                                      "(path .so yang sama) dan 'function' (nama fungsi persis dari ringkasan, mis. "
+                                                                      "fungsi JNI atau FP-vektornya). WAJIB dipakai sebelum menyimpulkan isi/rumus "
+                                                                      "sebuah fungsi — ringkasan analyze_native_library saja TIDAK cukup untuk "
+                                                                      "menyimpulkan perilaku kode. Kembali: kode C fungsi itu (terpotong bila sangat "
+                                                                      "panjang, dengan rentang baris artefak untuk dilanjutkan lewat shell_run).",
+                                                    "properties": {"library": {"type": "string", "description": "path relatif .so di $WS, mis. lib/libloader.so"},
+                                                                   "function": {"type": "string", "description": "nama fungsi dari ringkasan analyze_native_library"}},
+                                                    "required": ["library", "function"]}),
     "get_manifest": (get_manifest, {"description": "Manifest ter-parse: izin, flag, komponen dan status exported.", "properties": {}}),
     "list_packages": (list_packages, {"description": "Daftar package beserta jumlah class (kode aplikasi).",
                                       "properties": {"prefix": {"type": "string", "description": "awalan package, mis. com.example"},
@@ -1329,7 +1419,7 @@ SHELL_ONLY = frozenset({"shell_run"})       # hanya ditawarkan bila AI_SHELL_ENA
 BUILD_ONLY = frozenset({"bench_diff", "request_build", "get_build_status"})      # gerbang SAMA dengan shell (tanpa shell AI tidak bisa mengubah project/); tiap tool juga menolak sendiri
 
 
-GHIDRA_ONLY = frozenset({"analyze_native_library"})   # gerbang SAMA dengan shell (dispatch-nya lewat bench); tool juga menolak sendiri
+GHIDRA_ONLY = frozenset({"analyze_native_library", "read_native_function"})   # gerbang SAMA dengan shell (dispatch-nya lewat bench); tool juga menolak sendiri
 
 
 # Deskripsi shell_run yang dilihat model: bila jaringan aktif, klaim "TANPA jaringan" DIHAPUS (tanpa menambah teks; pernyataan yang bertentangan membuat model ragu
