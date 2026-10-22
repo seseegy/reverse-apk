@@ -4,6 +4,11 @@
 Dipanggil web lewat spool bench sebagai perintah dengan argv tetap (bukan string shell bebas dari AI):
 
     /usr/local/bin/bench-ghidra <path-relatif-.so-di-$WS>
+    /usr/local/bin/bench-ghidra fungsi <path-relatif-.so-di-$WS> <nama-fungsi>
+
+Mode `fungsi` (tool AI `read_native_function`) TIDAK menjalankan Ghidra: ia memotong
+dekompilasi SATU fungsi dari artefak .c yang sudah dihasilkan mode analisis, agar AI
+melihat kode ASLI fungsi yang ia simpulkan — bukan hanya ringkasan.
 
 Satu-satunya bagian variabel adalah path library, yang divalidasi web DAN divalidasi ulang di sini:
 harus relatif terhadap $WS, tetap di dalam $WS setelah resolusi symlink, berkas biasa, dan ELF
@@ -135,6 +140,70 @@ def _emit(obj: dict) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- mode fungsi (baca dekompilasi per fungsi)
+_HEADER_RE = re.compile(r"^/\* ==== (\S+) (.+?) ==== \*/$", re.M)
+MAX_CODE_CHARS = 11000        # kode satu fungsi yang dikembalikan utuh (pagat hasil tool web 14.000 char)
+
+
+def _split_functions(text: str) -> list[tuple[str, str, int, str]]:
+    """[(nama, alamat, baris_penanda_1based, badan)] dari artefak .c GhidraExport (penanda /* ==== */)."""
+    marks = list(_HEADER_RE.finditer(text))
+    out = []
+    for i, m in enumerate(marks):
+        name = m.group(2)
+        for flag in (" [jni]", " [vektor-fp]"):
+            if name.endswith(flag):
+                name = name[: -len(flag)]
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
+        first_line = text.count("\n", 0, m.start()) + 1
+        out.append((name.strip(), m.group(1), first_line, text[m.end():end].strip("\n")))
+    return out
+
+
+def read_function(arg: str, func_name: str) -> int:
+    """Keluarkan dekompilasi fungsi `func_name` dari artefak .c milik library `arg` sebagai JSON kontrak."""
+    ws = Path(os.environ.get("WS") or os.getcwd())
+    try:
+        target = resolve_library(arg, ws)
+    except ValueError as exc:
+        return _emit({"ok": False, "error": str(exc)})
+    if not func_name or len(func_name) > 200 or any(ord(c) < 32 for c in func_name):
+        return _emit({"ok": False, "error": "nama fungsi tidak sah"})
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", target.name[:-3])     # buang ".so" (sama dengan mode analisis)
+    c_path = ws / OUT_SUBDIR / f"{stem}.c"
+    if not c_path.is_file():
+        return _emit({"ok": False, "error": f"artefak dekompilasi {stem}.c belum ada; jalankan analyze_native_library pada {target.name} dulu"})
+    try:
+        text = c_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return _emit({"ok": False, "error": "artefak dekompilasi tidak bisa dibaca"})
+    blocks = _split_functions(text)
+    chosen = next((b for b in blocks if b[0] == func_name), None)
+    if chosen is None:
+        subs = [b for b in blocks if func_name in b[0]]
+        if len(subs) == 1:
+            chosen = subs[0]
+        elif len(subs) > 1:
+            return _emit({"ok": False, "error": f"nama fungsi ambigu ({len(subs)} kandidat): "
+                                                 + ", ".join(b[0] for b in subs[:10])})
+    if chosen is None:
+        return _emit({"ok": False, "error": f"fungsi '{func_name}' tidak ada di dekompilasi (atau tidak termasuk "
+                                             f"{MAX_DECOMPILE} fungsi yang didekompilasi). Contoh yang ada: "
+                                             + ", ".join(b[0] for b in blocks[:10])})
+    name, addr, first_line, body = chosen
+    total_lines = body.count("\n") + 1
+    truncated = len(body) > MAX_CODE_CHARS
+    shown, shown_lines = body, total_lines
+    if truncated:
+        cut = body.rfind("\n", 0, MAX_CODE_CHARS)
+        shown = body[: cut if cut > 0 else MAX_CODE_CHARS]
+        shown_lines = shown.count("\n") + 1
+    return _emit({"ok": True, "library": target.name, "function": name, "address": addr,
+                  "code": shown, "truncated": truncated,
+                  "line_start": first_line + 1, "line_end": first_line + shown_lines,
+                  "total_lines": total_lines, "artifact": f"{OUT_SUBDIR.as_posix()}/{stem}.c"})
+
+
 def run(arg: str) -> int:
     ws = Path(os.environ.get("WS") or os.getcwd())
     try:
@@ -198,6 +267,13 @@ def run(arg: str) -> int:
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) >= 2 and argv[1] == "fungsi":
+        if len(argv) != 4:
+            return _emit({"ok": False, "error": "pemakaian: bench-ghidra fungsi <path-relatif-.so> <nama-fungsi>"})
+        try:
+            return read_function(argv[2], argv[3])
+        except Exception as exc:  # noqa: BLE001 - kontrak JSON tidak boleh rusak oleh galat tak terduga
+            return _emit({"ok": False, "error": f"galat internal bench-ghidra ({type(exc).__name__})"})
     if len(argv) != 2:
         return _emit({"ok": False, "error": "pemakaian: bench-ghidra <path-relatif-.so>"})
     try:
