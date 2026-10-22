@@ -193,7 +193,7 @@ LIMITS = {
     "worker": {"mem_limit": "512m", "pids_limit": 256},
     "redis": {"mem_limit": "320m"},
     "runner": {"mem_limit": "3g", "cpus": 2, "pids_limit": 512},
-    "bench": {"mem_limit": "1g", "cpus": 1, "pids_limit": 512},
+    "bench": {"mem_limit": "1536m", "cpus": 2, "pids_limit": 512},   # dinaikkan 22 Okt (perintah pemilik) agar Ghidra sanggup library 200 MB; total semua layanan tetap dijaga tes tahap 6 <= 7 GB di VPS 8 GB
     "egress": {"mem_limit": "256m", "cpus": 0.5, "pids_limit": 128},
     "signer": {"mem_limit": "512m", "cpus": 1, "pids_limit": 128},
 }

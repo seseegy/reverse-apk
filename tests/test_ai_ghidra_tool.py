@@ -249,6 +249,14 @@ def test_build_summary_shape_and_caps():
     assert s["crypto_constants"] == ["aes_sbox"] and s["artifacts"]["c"] == "hasil_ai/ghidra/libx.c"
 
 
+def test_bench_ghidra_pagar_ukuran_dan_jumlah_fungsi():
+    # Nilai yang diminta pemilik 22 Okt 2026: library s.d. 200 MB, dekompilasi s.d. 1000 fungsi.
+    # Paritas dengan analyzer runner dijaga tes di test_analyzer_ghidra.py (nilai yang sama di sana).
+    g = _load_bench_ghidra()
+    assert g.MAX_LIB_BYTES == 200 * 1024 * 1024
+    assert g.MAX_DECOMPILE == 1000
+
+
 def test_bench_ghidra_env_mengamankan_home_dan_tmpdir(tmp_path, monkeypatch):
     # Umpan balik produksi: java.io.tmpdir bawaan (/tmp) tertutup Landlock — env Ghidra
     # WAJIB mengarahkan user.home + tmpdir ke $HOME terkurung (scratch), dan JAVA_HOME

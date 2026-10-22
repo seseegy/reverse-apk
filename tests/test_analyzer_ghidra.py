@@ -102,6 +102,13 @@ def run_stage(apk: Path, tmp_path: Path, budget_s: int = 300):
 
 # ---------------------------------------------------------------- pemilihan library
 
+def test_pagar_ukuran_dan_jumlah_fungsi():
+    # Nilai yang diminta pemilik 22 Okt 2026: library s.d. 200 MB, dekompilasi s.d. 1000 fungsi.
+    # Paritas dengan bench-ghidra dijaga tes di test_ai_ghidra_tool.py (nilai yang sama di sana).
+    assert ghidra.MAX_LIB_BYTES == 200 * 1024 * 1024
+    assert ghidra.MAX_DECOMPILE == 1000
+
+
 def test_select_prioritas_arm64_dan_batas(tmp_path):
     libs = [(f"lib/x86/lib{i}.so", 100) for i in range(5)]
     libs += [(f"lib/arm64-v8a/lib{i}.so", 100) for i in range(3)]

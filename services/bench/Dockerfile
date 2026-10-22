@@ -21,7 +21,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Alat untuk menganalisis dan mengubah SALINAN hasil dekompilasi. `curl` + `ca-certificates` untuk menguji API lewat proxy egress (tanpa jaringan keduanya tak berguna,
 # jadi tidak menambah kemampuan saat jaringan mati). Sengaja TIDAK ada: wget/git/ssh/nc, compiler, dan apksigner/keystore (apktool/jadx tetap berjalan di runner).
 # Java (JDK 21, syarat Ghidra 11.x) HANYA untuk Ghidra headless lewat bench-ghidra; tidak ada jalur lain memakainya.
-# Heap analyzeHeadless dipatok MAXMEM=512M: batas kontainer bench 1 GB / 1 CPU (docker-compose.yml), jauh di bawah runner (1200M / 3 GB).
+# Heap analyzeHeadless dipatok MAXMEM=1G: batas kontainer bench 1,5 GB / 2 CPU (docker-compose.yml) — dinaikkan bersama pagar library 200 MB (22 Okt, dari 512M/1 GB); jumlah mem_limit semua kontainer dijaga tes tahap 6 <= 7 GB di VPS 8 GB, jadi 1,5 GB adalah plafon bench di amplop itu.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends unzip zip file xxd diffutils patch findutils grep sed gawk coreutils bash less binutils curl ca-certificates openjdk-21-jdk-headless; \
@@ -30,8 +30,8 @@ RUN set -eux; \
     unzip -q /tmp/ghidra.zip -d /opt; \
     mv "/opt/ghidra_${GHIDRA_VERSION}_PUBLIC" /opt/ghidra; \
     rm /tmp/ghidra.zip; \
-    sed -i 's/^MAXMEM=2G$/MAXMEM=512M/' /opt/ghidra/support/analyzeHeadless; \
-    grep -q '^MAXMEM=512M$' /opt/ghidra/support/analyzeHeadless; \
+    sed -i 's/^MAXMEM=.*$/MAXMEM=1G/' /opt/ghidra/support/analyzeHeadless; \
+    grep -q '^MAXMEM=1G$' /opt/ghidra/support/analyzeHeadless; \
     ln -s /opt/ghidra/support/analyzeHeadless /usr/local/bin/analyzeHeadless; \
     rm -rf /var/lib/apt/lists/* /tmp/*
 
