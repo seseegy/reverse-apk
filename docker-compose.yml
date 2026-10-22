@@ -304,8 +304,8 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
-    mem_limit: 1g
-    cpus: 1
+    mem_limit: 1536m
+    cpus: 2
     pids_limit: 512
 
   # Proxy keluar untuk shell AI (jaringan untuk menguji API). Satu-satunya kontainer yang bisa dijangkau `bench` dan satu-satunya yang punya jalan ke internet. Hanya
