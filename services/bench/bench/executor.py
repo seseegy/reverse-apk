@@ -192,10 +192,13 @@ def tree_bytes(root: Path, stop_over: int | None = None) -> int:
 
 def run_confined(dirs: policy.Dirs, limits: Limits, *, analysis_id: int, command: str, timeout: int, sha256: str | None, job_id: str,
                  cancel: Callable[[], bool] = lambda: False, heartbeat: Callable[[], None] = lambda: None,
-                 python: str = sys.executable, net: NetConfig | None = None) -> dict:
-    """Jalankan perintah. TIDAK PERNAH melempar untuk kegagalan perintah; hasilnya dict siap ditulis ke spool."""
+                 python: str = sys.executable, net: NetConfig | None = None, max_timeout: int | None = None) -> dict:
+    """Jalankan perintah. TIDAK PERNAH melempar untuk kegagalan perintah; hasilnya dict siap ditulis ke spool.
+
+    `max_timeout`: pagat timeout kelas perintah khusus (dipakai daemon HANYA untuk kind="ghidra" yang sudah
+    diverifikasi entrypoint-nya); None = pagat umum `limits.max_timeout`."""
     started = time.monotonic()
-    timeout = max(1, min(int(timeout), limits.max_timeout))
+    timeout = max(1, min(int(timeout), limits.max_timeout if max_timeout is None else max_timeout))
     ws = policy.workspace(dirs, analysis_id)
     try:
         ws.mkdir(parents=True, mode=0o700, exist_ok=True)
