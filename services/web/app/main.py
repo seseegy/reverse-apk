@@ -29,6 +29,7 @@ from .context import (
     set_cookie,
     settings,
 )
+from .routes_ai import router as ai_router
 from .routes_apk import router as apk_router
 from .routes_build import router as build_router
 from .routes_files import router as files_router
@@ -54,6 +55,7 @@ app.include_router(apk_router)
 app.include_router(files_router)
 app.include_router(build_router)
 app.include_router(storage_router)
+app.include_router(ai_router)
 
 if settings.load_password_hash() is None:
     log.warning(
