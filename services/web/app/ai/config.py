@@ -80,6 +80,7 @@ class AIConfig:
     shell_enabled: bool = False
     shell_timeout_s: int = 60                 # batas waktu bawaan satu perintah (AI boleh meminta lebih kecil; bench membatasi dari atas)
     shell_max_timeout_s: int = 120            # batas atas yang boleh diminta AI
+    ghidra_timeout_s: int = 300               # batas waktu SATU panggilan analyze_native_library (Ghidra di bench; bench membatasi dari atas lewat BENCH_GHIDRA_MAX_TIMEOUT)
     shell_max_calls_per_turn: int = 200       # jumlah perintah per giliran (0 = tanpa batas)
     shell_max_output_chars: int = 12000       # keluaran per perintah yang dikirim kembali ke model (setelah redaksi)
     # Batas per GILIRAN untuk alur bengkel (FR-9.36), selain jumlah perintah di atas. Semuanya 0 = tanpa batas. Melewati batas = hasil tool galat yang jelas bagi model
@@ -176,6 +177,7 @@ def load_ai_config() -> AIConfig:
         shell_enabled=os.environ.get("AI_SHELL_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"},     # beda dengan redaksi: SALAH-nya = mati
         shell_timeout_s=_int("AI_SHELL_TIMEOUT", 60, 1, 3600),
         shell_max_timeout_s=_int("AI_SHELL_MAX_TIMEOUT", 120, 1, 3600),
+        ghidra_timeout_s=_int("AI_GHIDRA_TIMEOUT", 300, 1, 3600),
         shell_max_calls_per_turn=_int("AI_SHELL_MAX_CALLS_PER_TURN", 200, 0, 100_000),
         shell_max_output_chars=_int("AI_SHELL_MAX_OUTPUT_CHARS", 12000, 500, 1_000_000),
         shell_max_seconds_per_turn=_int("AI_SHELL_MAX_SECONDS_PER_TURN", DEFAULT_SHELL_SECONDS_PER_TURN, 0, 86_400),

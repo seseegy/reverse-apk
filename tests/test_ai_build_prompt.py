@@ -85,7 +85,7 @@ def test_the_block_sits_after_the_shell_block_and_before_the_budget_section():
 
 def test_total_prompt_growth_is_bounded():
     grown = len(agent.system_prompt(True)) - len(agent.SYSTEM_PROMPT)
-    assert grown < 2200 + len(agent.SHELL_PROMPT_BLOCK) + len(agent.SHELL_RULE_D)
+    assert grown < 2200 + len(agent.SHELL_PROMPT_BLOCK) + len(agent.GHIDRA_PROMPT_BLOCK) + len(agent.SHELL_RULE_D)
 
 
 def test_the_old_contradictions_are_gone_when_build_tools_are_offered():

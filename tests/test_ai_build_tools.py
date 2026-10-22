@@ -25,6 +25,7 @@ from app.ai.redact import Redactor
 ROOT = Path(__file__).resolve().parent.parent
 SID = 7
 NEW = ["bench_diff", "request_build", "get_build_status"]
+GHIDRA = ["analyze_native_library"]        # tool Ghidra on-demand: gerbang skema yang sama (shell), diuji penuh di test_ai_ghidra_tool.py
 OLD = ["class_info", "edit_file", "find_callees", "find_paths", "find_xrefs", "get_class", "get_findings", "get_manifest", "get_method", "get_overview", "list_classes",
        "list_dir", "list_files", "list_packages", "list_strings", "read_file", "search_code", "shell_run", "view_image", "write_file"]
 
@@ -68,9 +69,9 @@ def audits(rig):
 # ================================================================================ skema & gerbang
 def test_schema_names_are_exactly_the_old_tools_plus_the_three_new_ones():
     on = [t["function"]["name"] for t in T.schemas(vision=True, shell=True)]
-    assert sorted(on) == sorted(OLD + NEW)
+    assert sorted(on) == sorted(OLD + NEW + GHIDRA)
     off = {t["function"]["name"] for t in T.schemas(vision=True, shell=False)}
-    assert not off & set(NEW) and off == set(OLD) - {"shell_run"}
+    assert not off & set(NEW) and not off & set(GHIDRA) and off == set(OLD) - {"shell_run"}
 
 
 def test_no_tool_name_hints_at_approving_signing_downloading_or_artifacts():

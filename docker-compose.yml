@@ -85,6 +85,7 @@ services:
       AI_MAX_TOOL_CHARS: ${AI_MAX_TOOL_CHARS:-14000}
       AI_MAX_TURN_TOOL_CHARS: ${AI_MAX_TURN_TOOL_CHARS:-0}
       AI_TOOL_TIMEOUT: ${AI_TOOL_TIMEOUT:-60}
+      AI_GHIDRA_TIMEOUT: ${AI_GHIDRA_TIMEOUT:-300}
       AI_MAX_IMAGE_MB: ${AI_MAX_IMAGE_MB:-10}
       AI_INLINE_ATTACH_CHARS: ${AI_INLINE_ATTACH_CHARS:-16000}
       AI_REDACT_SECRETS: ${AI_REDACT_SECRETS:-1}
@@ -282,6 +283,8 @@ services:
       # SATU sakelar: `:+` mengisi egress:3128 HANYA bila AI_SHELL_NET_ALLOW terisi (kosong = bench tanpa jaringan, egress menolak semua), jadi dua sisi selalu sejalan.
       BENCH_NET_PROXY: ${AI_SHELL_NET_ALLOW:+egress:3128}
       BENCH_CMD_MAX_TIMEOUT: ${AI_SHELL_MAX_TIMEOUT:-120}
+      # Pagat kelas perintah ghidra (tool analyze_native_library): SATU knob yang sama dengan web, pola BENCH_CMD_MAX_TIMEOUT di atas.
+      BENCH_GHIDRA_MAX_TIMEOUT: ${AI_GHIDRA_TIMEOUT:-300}
       BENCH_CMD_MAX_OUTPUT_KB: ${BENCH_CMD_MAX_OUTPUT_KB:-64}
       BENCH_WORKSPACE_MAX_MB: ${BENCH_WORKSPACE_MAX_MB:-4096}
       BENCH_FILE_MAX_MB: ${BENCH_FILE_MAX_MB:-1024}

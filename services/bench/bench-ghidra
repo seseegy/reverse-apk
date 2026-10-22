@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""Entrypoint TETAP tool AI `analyze_native_library`: bedah SATU library .so dengan Ghidra headless, di dalam kurungan bench.
+
+Dipanggil web lewat spool bench sebagai perintah dengan argv tetap (bukan string shell bebas dari AI):
+
+    /usr/local/bin/bench-ghidra <path-relatif-.so-di-$WS>
+
+Satu-satunya bagian variabel adalah path library, yang divalidasi web DAN divalidasi ulang di sini:
+harus relatif terhadap $WS, tetap di dalam $WS setelah resolusi symlink, berkas biasa, dan ELF
+little-endian (aarch64/arm/x86). .so TIDAK PERNAH dieksekusi: Ghidra hanya menganalisisnya statis.
+
+Keluaran: SATU baris JSON ringkas di stdout (kontrak untuk web): {"ok": true, ...ringkasan...} atau
+{"ok": false, "error": "..."}. Artefak penuh ditulis ke $WS/hasil_ai/ghidra/<stem>.json dan
+<stem>.c agar bisa dibaca AI berkeping-keping lewat shell_run. Kode keluar selalu 0 bila kontrak
+JSON tercetak; kegagalan analisis adalah DATA di JSON, bukan kode keluar.
+
+Jebakan JDK (pelajaran runner PR #57): JVM mengambil user.home dari /etc/passwd, BUKAN $HOME, dan
+LaunchSupport Ghidra menolak jalan bila direktori itu tidak bisa ditulis (ia menyimpan
+java_home.save di <user.home>/.config/ghidra/). Di dalam kurungan Landlock, home passwd
+(/tmp/home) tidak terjangkau; yang bisa ditulis hanya $WS dan scratch per-job (= $HOME terkurung).
+Karena itu skrip ini menyetel -Duser.home=$HOME lewat JAVA_TOOL_OPTIONS untuk JVM Ghidra:
+properti sistem itu menimpa nilai bawaan dari passwd.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import pwd
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+GHIDRA_HOME = Path(os.environ.get("GHIDRA_HOME", "/opt/ghidra"))
+SCRIPT_DIR = Path("/usr/local/lib/bench-ghidra")
+OUT_SUBDIR = Path("hasil_ai") / "ghidra"
+MAX_LIB_BYTES = 64 * 1024 * 1024          # sama dengan pagar analyzer runner
+MAX_DECOMPILE = 200                       # fungsi didekompilasi per library (prioritas di GhidraExport.java)
+ANALYSIS_TIMEOUT_PER_FILE = 240           # detik; pagat luar ditegakkan bench (BENCH_GHIDRA_MAX_TIMEOUT)
+NAME_RE = re.compile(r"^[A-Za-z0-9._\-/]+$")
+_URL_RE = re.compile(r"https?://[^\s\"'<>]{4,200}")
+_FLAGGED_IMPORTS = ("ptrace", "dlopen", "system", "popen", "mprotect")
+# e_machine ELF -> (nama arsitektur, bahasa prosesor Ghidra). Hanya little-endian (semua .so Android LE).
+ELF_MACHINES = {183: ("aarch64", "AARCH64:LE:64:v8A"), 40: ("arm", "ARM:LE:32:v7"),
+                62: ("x86-64", "x86:LE:64:default"), 3: ("x86", "x86:LE:32:default")}
+
+
+def detect_language(header: bytes) -> tuple[str, str]:
+    """(arsitektur, bahasa Ghidra) dari 20 byte pertama berkas. ValueError bila bukan ELF LE yang dikenal."""
+    if len(header) < 20 or header[:4] != b"\x7fELF":
+        raise ValueError("bukan berkas ELF")
+    if header[5] != 1:
+        raise ValueError("ELF big-endian tidak didukung (library Android selalu little-endian)")
+    machine = int.from_bytes(header[18:20], "little")
+    if machine not in ELF_MACHINES:
+        raise ValueError(f"arsitektur ELF tidak dikenal (e_machine={machine})")
+    return ELF_MACHINES[machine]
+
+
+def resolve_library(arg: str, ws: Path) -> Path:
+    """Path library yang sah di dalam `ws`. ValueError dengan pesan aman untuk model."""
+    if not NAME_RE.match(arg) or not arg.endswith(".so") or arg.startswith("/"):
+        raise ValueError("nama library harus path relatif berakhiran .so (huruf/angka/._-/)")
+    parts = arg.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        raise ValueError("path library tidak boleh memuat segmen kosong, '.', atau '..'")
+    base = ws.resolve()
+    target = (base / arg).resolve()                      # symlink ditempuh SEKALI di sini, lalu dinilai
+    if target != base and base not in target.parents:
+        raise ValueError("path library keluar dari ruang kerja")
+    if not target.is_file():
+        raise ValueError(f"library tidak ditemukan di ruang kerja: {arg}")
+    if target.stat().st_size > MAX_LIB_BYTES:
+        raise ValueError(f"library terlalu besar (> {MAX_LIB_BYTES // (1024 * 1024)} MB)")
+    return target
+
+
+def build_summary(data: dict, lib_name: str, stem: str, decompiled: int, duration_s: float) -> dict:
+    """Ringkasan ringkas dari JSON ekspor Ghidra (bentuk analyzer/GhidraExport.java)."""
+    funcs = data.get("functions") or []
+    imports = data.get("imports") or []
+    strings = data.get("strings") or []
+    urls = sorted({u.rstrip(").,;") for s in strings for u in _URL_RE.findall(s.get("value", ""))})
+    return {
+        "ok": True,
+        "library": lib_name,
+        "language": data.get("language"),
+        "image_base": data.get("image_base"),
+        "functions_total": len(funcs),
+        "functions_truncated": bool(data.get("functions_truncated")),
+        "jni_functions": [f.get("name") for f in funcs if f.get("jni")][:40],
+        "vector_fp_functions": [f.get("name") for f in funcs if f.get("vector_fp")][:40],
+        "imports_total": len(imports),
+        "imports_flagged": [n for n in _FLAGGED_IMPORTS if n in imports],
+        "strings_total": len(strings),
+        "urls": urls[:5],
+        "crypto_constants": [str(c).split("@")[0] for c in (data.get("crypto_constants") or [])],
+        "decompiled": decompiled,
+        "artifacts": {"json": f"{OUT_SUBDIR.as_posix()}/{stem}.json", "c": f"{OUT_SUBDIR.as_posix()}/{stem}.c"},
+        "duration_s": round(duration_s, 1),
+    }
+
+
+def _emit(obj: dict) -> int:
+    print(json.dumps(obj, ensure_ascii=False), flush=True)
+    return 0
+
+
+def run(arg: str) -> int:
+    ws = Path(os.environ.get("WS") or os.getcwd())
+    try:
+        target = resolve_library(arg, ws)
+        with open(target, "rb") as fh:
+            _arch, language = detect_language(fh.read(20))
+    except (ValueError, OSError) as exc:
+        return _emit({"ok": False, "error": str(exc) if isinstance(exc, ValueError) else "library tidak bisa dibaca"})
+
+    headless = GHIDRA_HOME / "support" / "analyzeHeadless"
+    if not headless.is_file():
+        return _emit({"ok": False, "error": "Ghidra tidak terpasang di bench"})
+
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", target.name[:-3])     # buang ".so"
+    out_dir = ws / OUT_SUBDIR
+    proj_dir = out_dir / f".proj-{stem}"
+    json_out, c_out = out_dir / f"{stem}.json", out_dir / f"{stem}.c"
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        proj_dir.mkdir(parents=True, exist_ok=True)              # analyzeHeadless menuntut dir proyek SUDAH ada
+    except OSError:
+        return _emit({"ok": False, "error": "folder hasil tidak bisa dibuat di ruang kerja"})
+
+    # Atasi jebakan user.home (lihat docstring): arahkan ke $HOME terkurung (scratch per-job, bisa ditulis).
+    env = dict(os.environ)
+    home = env.get("HOME") or str(proj_dir)
+    env["JAVA_TOOL_OPTIONS"] = (env.get("JAVA_TOOL_OPTIONS", "") + f" -Duser.home={home}").strip()
+    try:                                                          # paritas pelajaran runner: buat home passwd bila bisa
+        Path(pwd.getpwuid(os.getuid()).pw_dir).mkdir(parents=True, exist_ok=True)
+    except (OSError, KeyError):
+        pass
+
+    cmd = [str(headless), str(proj_dir), "AiNative", "-import", str(target),
+           "-processor", language, "-scriptPath", str(SCRIPT_DIR),
+           "-postScript", "GhidraExport.java", str(json_out), str(c_out), str(MAX_DECOMPILE),
+           "-deleteProject", "-analysisTimeoutPerFile", str(ANALYSIS_TIMEOUT_PER_FILE)]
+    t0 = time.monotonic()
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+        output = proc.stdout or ""
+    except OSError as exc:
+        return _emit({"ok": False, "error": f"analyzeHeadless tidak bisa dimulai ({type(exc).__name__})"})
+    finally:
+        shutil.rmtree(proj_dir, ignore_errors=True)
+    duration = time.monotonic() - t0
+
+    data = None
+    if json_out.is_file():
+        try:
+            data = json.loads(json_out.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None
+    if data is None:
+        tail = " | ".join(ln.strip() for ln in output.splitlines() if ln.strip())[-300:]
+        return _emit({"ok": False, "error": "Ghidra gagal menganalisis library ini", "tail": tail})
+    decompiled = 0
+    if c_out.is_file():
+        try:
+            decompiled = c_out.read_text(encoding="utf-8", errors="replace").count("\n/* ==== ")
+        except OSError:
+            decompiled = 0
+    return _emit(build_summary(data, target.name, stem, decompiled, duration))
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 2:
+        return _emit({"ok": False, "error": "pemakaian: bench-ghidra <path-relatif-.so>"})
+    try:
+        return run(argv[1])
+    except Exception as exc:  # noqa: BLE001 - kontrak JSON tidak boleh rusak oleh galat tak terduga
+        return _emit({"ok": False, "error": f"galat internal bench-ghidra ({type(exc).__name__})"})
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

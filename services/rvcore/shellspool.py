@@ -68,13 +68,21 @@ def make_spool(root: str | os.PathLike[str]) -> Spool:
     return Spool(root, id_re=JOB_ID_RE, max_request=MAX_REQUEST_BYTES)
 
 
-def build_run_request(analysis_id: int, command: str, timeout: int, sha256: str | None) -> dict[str, Any]:
+RUN_KINDS = (None, "ghidra")            # kelas perintah khusus yang dikenal bench; None = perintah shell biasa
+
+
+def build_run_request(analysis_id: int, command: str, timeout: int, sha256: str | None, kind: str | None = None) -> dict[str, Any]:
     if not isinstance(command, str) or not command.strip() or "\x00" in command or len(command) > MAX_COMMAND_CHARS:
         raise ValueError("perintah tidak valid")
     if sha256 is not None and not SHA256_RE.match(sha256):
         raise ValueError("sha256 tidak valid")
-    return {"job_id": new_job_id(analysis_id), "op": OP_RUN, "analysis_id": int(analysis_id), "command": command, "timeout": int(timeout),
-            "sha256": sha256, "created": time.time()}
+    if kind not in RUN_KINDS:
+        raise ValueError("kind tidak dikenal")
+    job = {"job_id": new_job_id(analysis_id), "op": OP_RUN, "analysis_id": int(analysis_id), "command": command, "timeout": int(timeout),
+           "sha256": sha256, "created": time.time()}
+    if kind is not None:
+        job["kind"] = kind               # hanya ditambahkan bila diminta: request lama tetap persis sama
+    return job
 
 
 def _op_timeout(timeout: int) -> int:
@@ -250,14 +258,17 @@ def _fail_fast_if_dead(spool: Spool) -> None:
 
 
 def run_command(spool: Spool, analysis_id: int, command: str, *, timeout: int, sha256: str | None = None, cancel: threading.Event | None = None,
-                pickup_timeout: float = 30.0, grace: float = 15.0, poll: float = 0.1) -> dict[str, Any]:
+                pickup_timeout: float = 30.0, grace: float = 15.0, poll: float = 0.1, kind: str | None = None) -> dict[str, Any]:
     """Kirim satu perintah ke bench dan tunggu hasilnya. Memblokir. Melempar BenchUnavailable bila bench mati/sibuk/rusak.
+
+    `kind`: kelas perintah khusus (saat ini hanya "ghidra", untuk entrypoint tetap bench-ghidra dengan pagat timeout
+    sendiri di bench). Hanya kode web tepercaya yang menyetelnya; bench memverifikasi entrypoint-nya dan gagal tertutup.
 
     Ketahanan: bench mati -> gagal CEPAT (sebelum mengirim); tidak diambil dalam `pickup_timeout` -> ditarik; melewati batas waktu + `grace` -> minta
     batal lalu menyerah; `cancel` (pengguna menekan Batal) -> minta batal dan kembali segera. Berkas job selalu dibersihkan."""
     _fail_fast_if_dead(spool)
     try:
-        job = build_run_request(analysis_id, command, timeout, sha256)
+        job = build_run_request(analysis_id, command, timeout, sha256, kind=kind)
     except ValueError as exc:
         raise BenchUnavailable(f"Permintaan tidak valid: {exc}.") from exc
     return _submit_and_wait(spool, job, parse_result, timeout=timeout, cancel=cancel, pickup_timeout=pickup_timeout, grace=grace, poll=poll)
