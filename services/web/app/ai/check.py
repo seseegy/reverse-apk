@@ -68,6 +68,10 @@ def main() -> int:
     line(OK, f"konfigurasi: {cfg.base_url} | model {cfg.model} | kunci {'*' * 6}{cfg.api_key[-4:] if len(cfg.api_key) > 8 else ''}")
 
     prices = PriceTable.load(cfg.models_file)
+    with closing(rvdb.connect(layout.db_path)) as conn:
+        _overrides = ai_settings.vision_overrides(conn)     # metadata router menimpa tebakan berkas
+    if _overrides:
+        prices = prices.with_vision(_overrides)
     rate = prices.rate(cfg.model)
     if rate.known:
         line(OK, f"harga {cfg.model}: {rate.in_per_m:g} kredit/1 juta token masuk, {rate.out_per_m:g} keluar "
@@ -175,8 +179,8 @@ def main() -> int:
             if not slug:
                 continue
             if not prices.supports_vision(slug):
-                line(INFO, f"gambar: {slug} tidak bertanda \"vision\" di {cfg.models_file}, jadi lampiran gambar ditolak di chat untuk model ini. "
-                           "Bila sebenarnya mendukung gambar, tambahkan \"vision\": true lalu jalankan uji ini lagi.")
+                line(INFO, f"gambar: {slug} tidak dinyatakan mendukung vision — bukan oleh metadata router (muat daftar model di Pengaturan AI) "
+                           f"maupun penanda \"vision\" di {cfg.models_file} — jadi lampiran gambar ditolak di chat untuk model ini.")
                 continue
             out = call(f"gambar ({slug})", model=slug, max_tokens=24, temperature=0, messages=[{"role": "user", "content": [
                 {"type": "text", "text": "Gambar ini satu warna polos. Sebutkan warnanya dalam satu kata bahasa Inggris (red/green/blue/black/white)."},
