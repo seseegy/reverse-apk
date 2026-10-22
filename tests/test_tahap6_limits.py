@@ -583,10 +583,10 @@ def test_size_defaults_in_code_compose_and_env_example_agree():
     assert '"BENCH_WORKSPACE_MAX_MB", 4096,' in src["services/bench/bench-daemon"] and compose_default("bench", "BENCH_WORKSPACE_MAX_MB") == "4096"
     assert '"BENCH_FILE_MAX_MB", 1024,' in src["services/bench/bench-daemon"] and compose_default("bench", "BENCH_FILE_MAX_MB") == "1024"
     assert '_int_env("SIGN_MAX_MB", 1280,' in src["services/signer/signer-daemon"] and compose_default("signer", "SIGN_MAX_MB") == "1280"
-    for var, code in (("TIMEOUT_APKTOOL", "600"), ("TIMEOUT_JADX", "2400"), ("TIMEOUT_ANALYZE", "600")):
+    for var, code in (("TIMEOUT_APKTOOL", "600"), ("TIMEOUT_JADX", "2400"), ("TIMEOUT_ANALYZE", "2400")):
         assert f'_env_int("{var}", {code})' in src["services/worker/pipeline.py"] and compose_default("worker", var) == code and f"#{var}={code}" in ENV_EXAMPLE
-    assert '"JOB_TIMEOUT", "4500") or 4500' in src["services/worker/worker.py"]
-    assert load_settings().job_timeout == 4500 and compose_default("web", "JOB_TIMEOUT") == compose_default("worker", "JOB_TIMEOUT") == "4500" and "#JOB_TIMEOUT=4500" in ENV_EXAMPLE
+    assert '"JOB_TIMEOUT", "6300") or 6300' in src["services/worker/worker.py"]
+    assert load_settings().job_timeout == 6300 and compose_default("web", "JOB_TIMEOUT") == compose_default("worker", "JOB_TIMEOUT") == "6300" and "#JOB_TIMEOUT=6300" in ENV_EXAMPLE
     for var, code in (("MAX_OUTPUT_MB", "6144"), ("BENCH_WORKSPACE_MAX_MB", "4096"), ("BENCH_FILE_MAX_MB", "1024"), ("SIGN_MAX_MB", "1280")):
         assert f"#{var}={code}" in ENV_EXAMPLE, var
     sys.path.insert(0, str(ROOT / "services/bench"))
