@@ -44,8 +44,8 @@ from pathlib import Path
 GHIDRA_HOME = Path(os.environ.get("GHIDRA_HOME", "/opt/ghidra"))
 SCRIPT_DIR = Path("/usr/local/lib/bench-ghidra")
 OUT_SUBDIR = Path("hasil_ai") / "ghidra"
-MAX_LIB_BYTES = 64 * 1024 * 1024          # sama dengan pagar analyzer runner
-MAX_DECOMPILE = 200                       # fungsi didekompilasi per library (prioritas di GhidraExport.java)
+MAX_LIB_BYTES = 200 * 1024 * 1024         # sama dengan pagar analyzer runner (dinaikkan 22 Okt atas permintaan pemilik: 64 MB -> 200 MB)
+MAX_DECOMPILE = 1000                      # fungsi didekompilasi per library (prioritas di GhidraExport.java; dulu 200)
 ANALYSIS_TIMEOUT_PER_FILE = 240           # detik; pagat luar ditegakkan bench (BENCH_GHIDRA_MAX_TIMEOUT)
 NAME_RE = re.compile(r"^[A-Za-z0-9._\-/]+$")
 _URL_RE = re.compile(r"https?://[^\s\"'<>]{4,200}")
