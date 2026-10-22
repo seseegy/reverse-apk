@@ -29,7 +29,8 @@ from . import status as system_status
 from .ai import budget as ai_budget
 from .ai import agent as ai_agent
 from .ai import chat as ai_chat
-from .ai.config import ConfigError, load_ai_config
+from .ai import settings as ai_settings
+from .ai.config import ConfigError
 from .ai.pricing import PriceTable
 from .apkcheck import ApkRejected, Limits, validate_apk
 from .context import (
@@ -525,9 +526,11 @@ async def analysis_static(request: Request, analysis_id: AnalysisId,
 
 
 def _ai():
-    """(cfg, prices, error). Konfigurasi dibaca ulang tiap permintaan agar perubahan .env + restart langsung berlaku."""
+    """(cfg, prices, error). Koneksi AI dibaca dari Pengaturan AI (DB) dan dibaca ulang tiap
+    permintaan, jadi perubahan di halaman itu langsung berlaku tanpa restart."""
     try:
-        cfg = load_ai_config()
+        with closing(db()) as conn:
+            cfg = ai_settings.effective_config(conn)
     except ConfigError as exc:
         return None, None, str(exc)
     return cfg, PriceTable.load(cfg.models_file), None
@@ -621,7 +624,7 @@ async def chat_send(request: Request, analysis_id: AnalysisId) -> Response:
         return _json(403, error="Token keamanan tidak valid. Muat ulang halaman.")
     cfg, prices, cfg_error = _ai()
     if cfg is None or not cfg.enabled:
-        return _json(409, error=cfg_error or "AI belum dikonfigurasi (AI_BASE_URL, AI_API_KEY, AI_MODEL di .env).")
+        return _json(409, error=cfg_error or "AI belum dikonfigurasi. Atur base URL, kunci API, dan model di halaman Pengaturan AI.")
     raw = await request.body()
     if len(raw) > MAX_CHAT_BODY:
         return _json(413, error="Pesan terlalu besar.")

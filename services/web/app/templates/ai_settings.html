@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_parts.html" import notice_box %}
+{% block title %}Pengaturan AI · reverse-apk{% endblock %}
+
+{% block header %}{% include "_header.html" %}{% endblock %}
+
+{% block content %}
+<div class="container page">
+  <div class="page-head">
+    <h1>Pengaturan AI</h1>
+  </div>
+
+  {{ notice_box(notice) }}
+
+  {% if enabled %}
+  <div class="alert alert-ok" role="status">
+    {{ icon('check-circle') }}
+    <span>AI aktif. Model utama <strong class="mono">{{ values.model }}</strong> di <span class="mono break">{{ values.base_url }}</span>. Chat memakai pengaturan ini dan perubahan langsung berlaku tanpa restart.</span>
+  </div>
+  {% else %}
+  <div class="alert alert-warn" role="status">
+    {{ icon('alert-triangle') }}
+    <span>AI belum bisa dipakai: {% if missing %}yang masih kosong: <strong>{{ missing|join(', ') }}</strong>. {% endif %}Isi formulir di bawah ini — pengaturan tersimpan di server, bukan di .env lagi.</span>
+  </div>
+  {% endif %}
+
+  <section class="card" aria-labelledby="ai-form-title">
+    <div class="card-head">
+      <h2 id="ai-form-title">Koneksi router AI</h2>
+      {{ icon('sliders', 20) }}
+    </div>
+
+    {% if error %}
+    <div class="alert alert-error" role="alert">
+      {{ icon('alert-triangle') }}
+      <span>{{ error }}</span>
+    </div>
+    {% endif %}
+
+    <form method="post" action="/pengaturan/ai" id="ai-settings-form" data-submit-lock>
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+
+      <div class="field">
+        <label for="f-base-url">Base URL router</label>
+        <input type="text" id="f-base-url" name="base_url" value="{{ values.base_url }}" class="mono"
+               placeholder="https://griphubrouter.web.id/v1" inputmode="url" autocomplete="off" spellcheck="false">
+        <p class="hint muted">Alamat API kompatibel OpenAI milik router Anda, biasanya berakhiran <span class="mono">/v1</span>. Contoh: GripHub <span class="mono">https://griphubrouter.web.id/v1</span>, DeepSeek <span class="mono">https://api.deepseek.com</span>.</p>
+      </div>
+
+      <div class="field">
+        <label for="f-api-key">Kunci API</label>
+        <div class="input-group">
+          <input type="password" id="f-api-key" name="api_key" value="" class="mono"
+                 placeholder="{{ ('Tersimpan: ' + key_masked + ' — kosongkan untuk mempertahankan') if key_set else 'Tempel kunci API router Anda' }}"
+                 autocomplete="off" spellcheck="false">
+          <button type="button" class="btn btn-ghost" id="key-toggle" aria-pressed="false" aria-controls="f-api-key">
+            {{ icon('eye', 16) }}<span>Tampilkan</span>
+          </button>
+        </div>
+        <p class="hint muted">Kunci hanya tersimpan di server dan tidak pernah ditampilkan utuh. Kosongkan bidang ini untuk mempertahankan kunci yang tersimpan.</p>
+        {% if key_set %}
+        <label class="ai-check">
+          <input type="checkbox" name="clear_key" value="1">
+          <span>Hapus kunci tersimpan (AI nonaktif sampai kunci baru diisi)</span>
+        </label>
+        {% endif %}
+      </div>
+
+      <div class="field">
+        <label for="f-model">Model utama</label>
+        <div class="input-group">
+          <input type="text" id="f-model" name="model" value="{{ values.model }}" class="mono" list="ai-model-list"
+                 placeholder="mis. claude-sonnet-4-5" autocomplete="off" spellcheck="false">
+          <button type="button" class="btn btn-ghost" id="models-btn">
+            {{ icon('refresh', 16) }}<span>Muat daftar model</span>
+          </button>
+        </div>
+        <p class="hint muted" id="models-status" aria-live="polite">Klik <em>Muat daftar model</em> untuk menarik daftar model yang benar-benar tersedia di router Anda, lalu pilih dari daftar di bidang ini — atau ketik slug persisnya.</p>
+        <datalist id="ai-model-list"></datalist>
+      </div>
+
+      <details class="ai-more"{% if values.model_pro or values.fallback_model %} open{% endif %}>
+        <summary>Model lanjutan (opsional)</summary>
+        <div class="field">
+          <label for="f-model-pro">Model kuat (bisa dipilih per pesan di chat)</label>
+          <input type="text" id="f-model-pro" name="model_pro" value="{{ values.model_pro }}" class="mono" list="ai-model-list"
+                 placeholder="Kosongkan bila tidak dipakai" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="f-fallback-model">Model cadangan (dipakai bila model utama tidak tersedia)</label>
+          <input type="text" id="f-fallback-model" name="fallback_model" value="{{ values.fallback_model }}" class="mono" list="ai-model-list"
+                 placeholder="Kosongkan bila tidak dipakai" autocomplete="off" spellcheck="false">
+        </div>
+      </details>
+
+      <div class="card-foot">
+        <button type="submit" class="btn btn-primary">{{ icon('check', 16) }}<span>Simpan pengaturan</span></button>
+        <span class="hint muted">Harga per model untuk hitungan anggaran ada di <span class="mono">config/ai_models.json</span>; model yang belum terdaftar di sana dihitung dengan tarif bawaan (ditandai perkiraan).</span>
+      </div>
+    </form>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/ai_settings.js" defer></script>
+{% endblock %}

@@ -33,7 +33,7 @@ def pages(aid: int) -> dict[str, str]:
 
 def test_main_menu_labels(client):
     nav = re.search(r'<nav aria-label="Navigasi utama">(.*?)</nav>', client.get("/", headers=BROWSER).text, re.S).group(1)
-    assert [re.sub(r"<[^>]+>|\s+", " ", t).strip() for t in re.findall(r"<a[^>]*>(.*?)</a>", nav, re.S)] == ["Beranda", "Unggah", "Penyimpanan"]
+    assert [re.sub(r"<[^>]+>|\s+", " ", t).strip() for t in re.findall(r"<a[^>]*>(.*?)</a>", nav, re.S)] == ["Beranda", "Unggah", "Penyimpanan", "Pengaturan AI"]
 
 
 def test_analysis_tab_labels(client, seeded):

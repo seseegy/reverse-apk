@@ -142,17 +142,26 @@ def _net_ports(raw: str) -> tuple[int, ...]:
     return tuple(ports) or (443,)
 
 
-def load_ai_config() -> AIConfig:
-    base = os.environ.get("AI_BASE_URL", "").strip().rstrip("/")
+def validate_base_url(raw: str) -> str:
+    """Normalisasi + validasi base URL provider; mengembalikan URL bersih ('' bila kosong) atau ConfigError.
+
+    Dipakai load_ai_config (env lama/seed) DAN halaman Pengaturan AI — satu aturan untuk semua jalur.
+    """
+    base = (raw or "").strip().rstrip("/")
     if base:
         parts = urlsplit(base)
         if parts.scheme not in ("https", "http") or not parts.hostname:
-            raise ConfigError("AI_BASE_URL harus berupa URL lengkap, mis. https://host/v1")
+            raise ConfigError("Base URL harus berupa URL lengkap, mis. https://host/v1")
         if parts.scheme == "http" and parts.hostname not in LOOPBACK:
             # Kunci API dan potongan kode APK tidak boleh melintas tanpa enkripsi.
-            raise ConfigError("AI_BASE_URL memakai http:// ke host publik; gunakan https://")
+            raise ConfigError("Base URL memakai http:// ke host publik; gunakan https://")
         if parts.username or parts.password or parts.query or parts.fragment:
-            raise ConfigError("AI_BASE_URL tidak boleh memuat kredensial, query, atau fragment")
+            raise ConfigError("Base URL tidak boleh memuat kredensial, query, atau fragment")
+    return base
+
+
+def load_ai_config() -> AIConfig:
+    base = validate_base_url(os.environ.get("AI_BASE_URL", ""))
     return AIConfig(
         base_url=base,
         api_key=os.environ.get("AI_API_KEY", "").strip(),

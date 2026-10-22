@@ -71,12 +71,8 @@ services:
       TIMEOUT_SIGN: ${TIMEOUT_SIGN:-900}
       MIN_FREE_GB: ${MIN_FREE_GB:-15}
       JOB_TIMEOUT: ${JOB_TIMEOUT:-6300}
-      # --- AI (M4). Kunci hanya masuk ke service web; tidak pernah ke browser, worker, atau runner.
-      AI_BASE_URL: ${AI_BASE_URL:-}
-      AI_API_KEY: ${AI_API_KEY:-}
-      AI_MODEL: ${AI_MODEL:-}
-      AI_MODEL_PRO: ${AI_MODEL_PRO:-}
-      AI_FALLBACK_MODEL: ${AI_FALLBACK_MODEL:-}
+      # --- AI (M4). Base URL, kunci API, dan model TIDAK lagi dari .env: diatur di UI web
+      # (menu Pengaturan AI, tersimpan di database service web) dan tidak pernah ke browser/worker/runner.
       AI_CREDIT_IDR: ${AI_CREDIT_IDR:-300}
       AI_DAILY_BUDGET_CREDITS: ${AI_DAILY_BUDGET_CREDITS:-5}
       AI_SESSION_BUDGET_CREDITS: ${AI_SESSION_BUDGET_CREDITS:-1}

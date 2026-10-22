@@ -23,7 +23,8 @@ from rvcore import db as rvdb
 from rvcore.paths import Layout
 
 from . import budget
-from .config import ConfigError, load_ai_config
+from . import settings as ai_settings
+from .config import ConfigError
 from .pricing import PriceTable
 from .provider import AIError, Client
 
@@ -52,13 +53,17 @@ def main() -> int:
         failed = failed or tag == BAD
         print(f"{tag} {text}", flush=True)
 
+    layout = Layout(os.environ.get("DATA_DIR", "/data"))
+    rvdb.migrate(layout.db_path)
     try:
-        cfg = load_ai_config()
+        with closing(rvdb.connect(layout.db_path)) as conn:
+            cfg = ai_settings.effective_config(conn)     # koneksi AI dari Pengaturan AI (DB), bukan .env
     except ConfigError as exc:
         line(BAD, f"konfigurasi: {exc}")
         return 1
     if not cfg.enabled:
-        line(BAD, "konfigurasi belum lengkap, isi di .env: " + ", ".join(cfg.missing()))
+        line(BAD, "konfigurasi belum lengkap — atur di halaman Pengaturan AI: "
+                  + ", ".join(ai_settings.missing_labels(cfg)))
         return 1
     line(OK, f"konfigurasi: {cfg.base_url} | model {cfg.model} | kunci {'*' * 6}{cfg.api_key[-4:] if len(cfg.api_key) > 8 else ''}")
 
@@ -70,12 +75,10 @@ def main() -> int:
     else:
         line(BAD, f"model '{cfg.model}' tidak ada di {cfg.models_file}; biaya dihitung dengan tarif default "
                   f"{rate.in_per_m:g} (mahal). Periksa slug (salin dari portal) atau tambahkan harganya.")
-    for name, slug in (("AI_MODEL_PRO", cfg.model_pro), ("AI_FALLBACK_MODEL", cfg.fallback_model)):
+    for name, slug in (("model kuat", cfg.model_pro), ("model cadangan", cfg.fallback_model)):
         if slug and not prices.rate(slug).known:
             line(BAD, f"{name}='{slug}' tidak ada di tabel harga")
 
-    layout = Layout(os.environ.get("DATA_DIR", "/data"))
-    rvdb.migrate(layout.db_path)
     conn = rvdb.connect(layout.db_path)
     with closing(conn):
         try:
@@ -168,7 +171,7 @@ def main() -> int:
 
         # 5. gambar: hanya untuk model yang boleh dipilih di chat DAN ditandai vision (satu permintaan kecil per model)
         data_url = "data:image/png;base64," + base64.b64encode(_red_png()).decode("ascii")
-        for name, slug in (("AI_MODEL", cfg.model), ("AI_MODEL_PRO", cfg.model_pro)):
+        for name, slug in (("model utama", cfg.model), ("model kuat", cfg.model_pro)):
             if not slug:
                 continue
             if not prices.supports_vision(slug):

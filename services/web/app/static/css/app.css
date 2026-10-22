@@ -1278,3 +1278,13 @@ select:hover { border-color: var(--color-muted-foreground); }
   .build-list td[data-label] { display: grid; grid-template-columns: 7rem minmax(0, 1fr); gap: var(--space-2); align-items: start; }
   .build-list td[data-label]::before { content: attr(data-label); color: var(--color-muted-foreground); font-size: 0.8rem; }
 }
+
+/* ---------- Pengaturan AI ---------- */
+#models-status { min-height: 1.4em; }
+#models-status.is-error { color: var(--text-danger); }
+.ai-check { display: flex; align-items: center; gap: var(--space-2); font-weight: 400; cursor: pointer; min-height: 32px; }
+.ai-check input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--color-accent); }
+.ai-more { display: grid; gap: var(--space-4); }
+.ai-more > summary { cursor: pointer; font-weight: 500; font-size: 0.9rem; min-height: 32px; align-content: center; }
+.ai-more[open] > summary { margin-bottom: var(--space-2); }
+.ai-more .field + .field { margin-top: var(--space-4); }

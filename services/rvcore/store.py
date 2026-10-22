@@ -1221,3 +1221,23 @@ def delete_build(conn: sqlite3.Connection, build_id: int) -> bool:
     with tx(conn):
         cur = conn.execute(f"DELETE FROM build WHERE id = ? AND status IN ({marks})", (build_id, *BUILD_FINAL))
         return cur.rowcount == 1
+
+
+# ---------------------------------------------------------------- pengaturan AI (halaman Pengaturan AI)
+
+AI_SETTING_KEYS = ("base_url", "api_key", "model", "model_pro", "fallback_model")
+
+
+def get_ai_settings(conn: sqlite3.Connection) -> dict[str, str]:
+    """Semua baris ai_setting sebagai dict (kunci tak dikenal ikut dikembalikan; pemanggil menyaring)."""
+    return {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM ai_setting")}
+
+
+def save_ai_settings(conn: sqlite3.Connection, values: dict[str, str]) -> None:
+    """Upsert nilai pengaturan AI (hanya kunci yang dikenal). Transaksi mengikuti pemanggil."""
+    ts = now()
+    conn.executemany(
+        "INSERT INTO ai_setting(key, value, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        [(k, values[k], ts) for k in AI_SETTING_KEYS if k in values],
+    )
