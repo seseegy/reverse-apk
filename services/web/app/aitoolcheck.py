@@ -32,8 +32,9 @@ from rvcore import db as rvdb
 from rvcore import store
 from rvcore.paths import MAX_PROTO_ID, Layout
 
+from .ai import settings as ai_settings
 from .ai import tools
-from .ai.config import AIConfig, ConfigError, load_ai_config
+from .ai.config import AIConfig, ConfigError
 from .ai.redact import Redactor
 from .config import load_settings
 
@@ -147,7 +148,10 @@ def _parser() -> argparse.ArgumentParser:
 def _default_deps() -> Deps:
     # Tanpa `app.context` (yang menarik redis/FastAPI): hanya data dir + SQLite, sama dengan context.db().
     layout = Layout(load_settings().data_dir)
-    return Deps(cfg=load_ai_config(), db=lambda: rvdb.connect(layout.db_path), work=layout.work_dir)
+    rvdb.migrate(layout.db_path)
+    with closing(rvdb.connect(layout.db_path)) as conn:
+        cfg = ai_settings.effective_config(conn)     # koneksi AI dari Pengaturan AI (DB), sama seperti web
+    return Deps(cfg=cfg, db=lambda: rvdb.connect(layout.db_path), work=layout.work_dir)
 
 
 def _schema(deps: Deps, args: argparse.Namespace) -> int:
