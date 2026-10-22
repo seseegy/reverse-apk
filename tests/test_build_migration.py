@@ -60,7 +60,8 @@ def snapshot(path: Path) -> dict[str, list[tuple]]:
     conn = sqlite3.connect(str(path))
     try:
         names = [r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name <> 'build' ORDER BY name")]
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' "
+            "AND name NOT IN ('build', 'ai_setting') ORDER BY name")]   # tabel pasca-v4 (v5 build, v6 ai_setting) tidak dihitung: yang dibuktikan utuh adalah data v1-v4
         return {n: [tuple(r) for r in conn.execute(f"SELECT * FROM {n} ORDER BY rowid")] for n in names}
     finally:
         conn.close()
@@ -83,8 +84,8 @@ def user_version(path: Path) -> int:
         conn.close()
 
 
-def test_schema_version_is_5():
-    assert rvdb.SCHEMA_VERSION == 5 == len(rvdb._MIGRATIONS)
+def test_schema_version_is_6():
+    assert rvdb.SCHEMA_VERSION == 6 == len(rvdb._MIGRATIONS)
 
 
 def test_v4_database_with_real_data_migrates_intact(tmp_path):
@@ -97,7 +98,7 @@ def test_v4_database_with_real_data_migrates_intact(tmp_path):
 
     rvdb.migrate(path)
 
-    assert user_version(path) == 5
+    assert user_version(path) == 6
     assert snapshot(path) == before, "data v1-v4 harus utuh persis setelah migrasi"
     conn = rvdb.connect(path)
     try:
@@ -123,7 +124,7 @@ def test_migration_is_idempotent(tmp_path):
     snap, mast = snapshot(path), master(path)
     for _ in range(2):
         rvdb.migrate(path)
-        assert user_version(path) == 5
+        assert user_version(path) == 6
         assert snapshot(path) == snap and master(path) == mast
 
 
@@ -133,7 +134,7 @@ def test_fresh_database_equals_stepwise_migrated_schema(tmp_path):
     make_v4(stepwise)
     rvdb.migrate(stepwise)
     assert master(fresh) == master(stepwise)
-    assert user_version(fresh) == 5
+    assert user_version(fresh) == 6
 
 
 def test_build_table_structure(tmp_path):
