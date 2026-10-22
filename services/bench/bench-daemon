@@ -50,6 +50,12 @@ LIMITS = executor.Limits(
     file_bytes=_int_env("BENCH_FILE_MAX_MB", 1024, 1, 100_000) * 1024 * 1024,
     nproc=_int_env("BENCH_NPROC", 2048, 8, 1_000_000),
 )
+# Kelas perintah KHUSUS: tool AI `analyze_native_library`. Request-nya ditandai web dengan kind="ghidra" dan perintahnya
+# WAJIB entrypoint tetap bench-ghidra (AI tidak bisa menyetel kind: ia hanya sampai sebagai argumen tool di web, dan
+# perintah disusun web). Analisis satu library butuh jauh lebih lama dari shell biasa, jadi pagat timeout-nya sendiri —
+# BUKAN menaikkan pagat shell: BENCH_CMD_MAX_TIMEOUT tetap kecil untuk perintah bebas AI.
+GHIDRA_ENTRY = "/usr/local/bin/bench-ghidra"
+GHIDRA_MAX_TIMEOUT = _int_env("BENCH_GHIDRA_MAX_TIMEOUT", 300, 1, 3600)
 def _net_config() -> executor.NetConfig | None:
     """Jaringan shell AI = proxy `egress` (BENCH_NET_PROXY=host:port). AKTIF hanya bila diminta DAN Landlock ABI >= 4 (hanya itu yang bisa mengunci TCP ke port proxy
     saja). ABI lebih rendah: jaringan DIMATIKAN dengan peringatan, bukan dibuka tanpa pengunci."""
@@ -78,7 +84,7 @@ def say(msg: str) -> None:
 NET = _net_config()                 # setelah `say`: peringatan konfigurasi dicetak saat start
 
 
-def validate_run(job: dict[str, Any]) -> tuple[int, str, int, str | None]:
+def validate_run(job: dict[str, Any]) -> tuple[int, str, int, str | None, str | None]:
     """Periksa request. Melempar ValueError dengan pesan aman. Tidak ada path dari web yang dipakai."""
     aid = job.get("analysis_id")
     if not isinstance(aid, int) or isinstance(aid, bool) or not (1 <= aid < 2**31):
@@ -92,7 +98,16 @@ def validate_run(job: dict[str, Any]) -> tuple[int, str, int, str | None]:
     sha = job.get("sha256")
     if sha is not None and (not isinstance(sha, str) or not policy.SHA256_RE.match(sha)):
         raise ValueError("sha256 tidak valid")
-    return aid, command, min(timeout, LIMITS.max_timeout), sha
+    kind = job.get("kind")
+    if kind is not None and kind != "ghidra":
+        raise ValueError("kind tidak dikenal")
+    if kind == "ghidra":
+        # Gagal tertutup: kind ghidra HANYA untuk entrypoint tetap; perintah lain yang menyandang kind ini ditolak,
+        # jadi pagat longgar ini tidak bisa dipakai memperpanjang perintah shell bebas.
+        if not command.startswith(GHIDRA_ENTRY + " "):
+            raise ValueError("perintah ghidra harus lewat bench-ghidra")
+        return aid, command, min(timeout, GHIDRA_MAX_TIMEOUT), sha, kind
+    return aid, command, min(timeout, LIMITS.max_timeout), sha, kind
 
 
 def validate_op(job: dict[str, Any]) -> tuple[int, bool, int]:
@@ -134,13 +149,13 @@ def run_job(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
     if op != SP.OP_RUN:
         return {"status": SP.STATUS_REFUSED, "message": "operasi tidak dikenal"}
     try:
-        aid, command, timeout, sha = validate_run(job)
+        aid, command, timeout, sha, kind = validate_run(job)
     except ValueError as exc:
         return {"status": SP.STATUS_REFUSED, "message": f"permintaan ditolak: {exc}"}
-    say(f"[{job_id}] mulai analisis={aid} timeout={timeout}s perintah={len(command)} karakter")
+    say(f"[{job_id}] mulai analisis={aid} timeout={timeout}s perintah={len(command)} karakter" + (f" kind={kind}" if kind else ""))
     return executor.run_confined(DIRS, LIMITS, analysis_id=aid, command=command, timeout=timeout, sha256=sha, job_id=job_id,
                                  cancel=lambda: SPOOL.cancel_requested(job_id), heartbeat=lambda: SPOOL.write_heartbeat("busy", job_id),
-                                 net=NET)
+                                 net=NET, max_timeout=GHIDRA_MAX_TIMEOUT if kind == "ghidra" else None)
 
 
 def housekeeping() -> None:
@@ -221,7 +236,7 @@ def main() -> int:
     selfcheck()
     abort_orphans()
     say("jaringan: " + (f"AKTIF lewat proxy {NET.host}:{NET.port} (TCP lain dikunci Landlock)" if NET else "mati"))
-    say(f"bench siap: data={DATA_DIR} timeout<={LIMITS.max_timeout}s keluaran<={LIMITS.output_bytes // 1024}KB ruang kerja<={LIMITS.workspace_bytes // (1024 * 1024)}MB")
+    say(f"bench siap: data={DATA_DIR} timeout<={LIMITS.max_timeout}s ghidra<={GHIDRA_MAX_TIMEOUT}s keluaran<={LIMITS.output_bytes // 1024}KB ruang kerja<={LIMITS.workspace_bytes // (1024 * 1024)}MB")
     last_hb = last_house = 0.0
     last_work = time.monotonic()
     while not STOP.is_set():
