@@ -110,7 +110,7 @@ class Client:
              on_delta: Callable[[str], None] | None = None, cancel: threading.Event | None = None,
              on_tool: Callable[[int, str, str], None] | None = None) -> ChatResult:
         if not self.cfg.enabled:
-            raise AIError("config", "AI belum dikonfigurasi (AI_BASE_URL / AI_API_KEY / AI_MODEL).")
+            raise AIError("config", "AI belum dikonfigurasi (atur base URL, kunci API, dan model di halaman Pengaturan AI).")
         model = model or self.cfg.model
         attempt = 0
         while True:
@@ -226,11 +226,11 @@ class Client:
         except ValueError:
             pass
         if status in (401, 403) and not any(w in low for w in ("credit", "kredit", "balance", "quota", "insufficient")):
-            return AIError("auth", "API key ditolak oleh provider (periksa AI_API_KEY)." + (f" [{detail}]" if detail else ""), status)
+            return AIError("auth", "Kunci API ditolak oleh provider (periksa di halaman Pengaturan AI)." + (f" [{detail}]" if detail else ""), status)
         if status == 402 or any(w in low for w in ("insufficient", "credit", "kredit", "balance", "quota")):
             return AIError("credits", "Kredit provider habis atau tidak cukup." + (f" [{detail}]" if detail else ""), status)
         if status == 404 or "model" in low and any(w in low for w in ("not found", "does not exist", "unknown", "tidak ditemukan")):
-            return AIError("model", "Model tidak ditemukan di provider (periksa slug AI_MODEL)." + (f" [{detail}]" if detail else ""), status)
+            return AIError("model", "Model tidak ditemukan di provider (periksa slug model di halaman Pengaturan AI)." + (f" [{detail}]" if detail else ""), status)
         if status == 429:
             return AIError("rate_limit", "Provider membatasi laju permintaan." + (f" [{detail}]" if detail else ""),
                            status, retryable=True, retry_after=retry_after)
