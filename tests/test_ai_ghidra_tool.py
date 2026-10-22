@@ -1,4 +1,4 @@
-"""Tool AI `analyze_native_library`: Ghidra on-demand di bench untuk library PILIHAN AI.
+"""Tool AI `analyze_native_library` + `read_native_function`: Ghidra on-demand di bench untuk library PILIHAN AI.
 
 Yang dibuktikan di sini: skema & gerbang (shell), validasi argumen, dispatch ke bench dengan
 kind="ghidra" + argv tetap + timeout AI_GHIDRA_TIMEOUT, pembentukan ringkasan (termasuk kegagalan
@@ -71,10 +71,15 @@ def test_schema_gated_by_shell_like_the_other_bench_tools():
     on = {t["function"]["name"] for t in T.schemas(vision=True, shell=True)}
     off = {t["function"]["name"] for t in T.schemas(vision=True, shell=False)}
     assert "analyze_native_library" in on and "analyze_native_library" not in off
-    assert T.GHIDRA_ONLY == frozenset({"analyze_native_library"})
+    assert "read_native_function" in on and "read_native_function" not in off
+    assert T.GHIDRA_ONLY == frozenset({"analyze_native_library", "read_native_function"})
     spec = next(t["function"] for t in T.schemas(shell=True) if t["function"]["name"] == "analyze_native_library")
     assert spec["parameters"]["required"] == ["library"] and set(spec["parameters"]["properties"]) == {"library"}
     assert spec["parameters"]["additionalProperties"] is False
+    spec2 = next(t["function"] for t in T.schemas(shell=True) if t["function"]["name"] == "read_native_function")
+    assert spec2["parameters"]["required"] == ["library", "function"]
+    assert set(spec2["parameters"]["properties"]) == {"library", "function"}
+    assert spec2["parameters"]["additionalProperties"] is False
 
 
 def test_gate_is_fail_closed_when_shell_is_off(rig):
@@ -263,3 +268,102 @@ def test_bench_ghidra_env_mengamankan_home_dan_tmpdir(tmp_path, monkeypatch):
     monkeypatch.setattr(g, "JVM_CANDIDATES", (str(tmp_path / "tidak-ada"), str(jvm)))
     env4 = g._ghidra_env({"HOME": "/s"}, "/fallback")
     assert env4["JAVA_HOME"] == str(jvm)
+
+
+# ================================================================================ read_native_function: dispatch
+READ_SUMMARY = {"ok": True, "library": "libloader.so", "function": "vec_formula", "address": "00102000",
+                "code": "void vec_formula(float *a) {\n  a[0] = a[0] * 2.0f;\n}", "truncated": False,
+                "line_start": 12, "line_end": 14, "total_lines": 3, "artifact": "hasil_ai/ghidra/libloader.c"}
+
+
+def test_read_native_function_dispatch_dan_kode_utuh(rig):
+    aid = rig.analysis_with()
+    rig.bench.behave = behave_run(ok_result(READ_SUMMARY))
+    ok, res = call(ctx_for(rig, aid), "read_native_function", library="lib/libloader.so", function="vec_formula")
+    assert ok and res["berhasil"] is True
+    (job,) = rig.bench.jobs
+    assert job["kind"] == "ghidra"
+    assert job["command"] == "/usr/local/bin/bench-ghidra fungsi lib/libloader.so vec_formula"
+    assert res["kode_c"] == READ_SUMMARY["code"] and res["fungsi"] == "vec_formula" and res["alamat"] == "00102000"
+    assert res["terpotong"] is False and "ASLI" in res["catatan"]
+
+
+def test_read_native_function_gate_dan_validasi(rig):
+    aid = rig.analysis_with()
+    ok, msg = call(ctx_for(rig, aid, enabled=False), "read_native_function", library="lib/libloader.so", function="vec_formula")
+    assert not ok and "tidak diaktifkan" in msg
+    ok, _ = call(ctx_for(rig, aid), "read_native_function", library="../libx.so", function="vec_formula")
+    assert not ok
+    ok, _ = call(ctx_for(rig, aid), "read_native_function", library="lib/libloader.so", function="")
+    assert not ok
+    assert rig.bench.jobs == []
+
+
+def test_read_native_function_kegagalan_skrip_jadi_data(rig):
+    aid = rig.analysis_with()
+    rig.bench.behave = behave_run(ok_result({"ok": False, "error": "artefak dekompilasi libloader.c belum ada"}))
+    ok, res = call(ctx_for(rig, aid), "read_native_function", library="lib/libloader.so", function="vec_formula")
+    assert ok and res["berhasil"] is False and "belum ada" in res["alasan"]
+
+
+# ================================================================================ bench-ghidra mode fungsi: potong per fungsi
+C_ARTIFACT = ("/* Dekompilasi Ghidra untuk libx.so */\n"
+              "/* ==== 00101000 JNI_OnLoad [jni] ==== */\n"
+              "jint JNI_OnLoad(void) { return 1; }\n"
+              "\n"
+              "/* ==== 00102000 vec_formula [vektor-fp] ==== */\n"
+              "void vec_formula(float *a) {\n  a[0] = a[0] * 2.0f;\n}\n"
+              "\n"
+              "/* ==== 00103000 vec_helper ==== */\n"
+              "void vec_helper(void) { }\n"
+              "/* total didekompilasi: 3 */\n")
+
+
+def _ws_dengan_artefak(tmp_path, monkeypatch, isi=C_ARTIFACT):
+    g = _load_bench_ghidra()
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "libx.so").write_bytes(_elf(183))
+    out = tmp_path / "hasil_ai" / "ghidra"
+    out.mkdir(parents=True)
+    if isi is not None:
+        (out / "libx.c").write_text(isi, encoding="utf-8")
+    monkeypatch.setenv("WS", str(tmp_path))
+    return g
+
+
+def _fungsi_json(g, capsys, *argv):
+    assert g.read_function(*argv) == 0
+    return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+
+def test_fungsi_exact_dan_kode_utuh(tmp_path, monkeypatch, capsys):
+    g = _ws_dengan_artefak(tmp_path, monkeypatch)
+    r = _fungsi_json(g, capsys, "lib/libx.so", "vec_formula")
+    assert r["ok"] is True and r["function"] == "vec_formula" and r["address"] == "00102000"
+    assert "a[0] = a[0] * 2.0f;" in r["code"] and r["truncated"] is False
+    assert r["artifact"] == "hasil_ai/ghidra/libx.c" and r["line_start"] < r["line_end"]
+
+
+def test_fungsi_substring_unik_dan_ambigu(tmp_path, monkeypatch, capsys):
+    g = _ws_dengan_artefak(tmp_path, monkeypatch)
+    r = _fungsi_json(g, capsys, "lib/libx.so", "JNI_On")
+    assert r["ok"] is True and r["function"] == "JNI_OnLoad"
+    r = _fungsi_json(g, capsys, "lib/libx.so", "vec")
+    assert r["ok"] is False and "ambigu" in r["error"] and "vec_formula" in r["error"]
+
+
+def test_fungsi_tidak_ada_dan_artefak_belum_ada(tmp_path, monkeypatch, capsys):
+    g = _ws_dengan_artefak(tmp_path, monkeypatch)
+    r = _fungsi_json(g, capsys, "lib/libx.so", "tidak_ada")
+    assert r["ok"] is False and "tidak ada di dekompilasi" in r["error"] and "JNI_OnLoad" in r["error"]
+    (tmp_path / "lib" / "liby.so").write_bytes(_elf(183))
+    r = _fungsi_json(g, capsys, "lib/liby.so", "vec_formula")
+    assert r["ok"] is False and "belum ada" in r["error"]
+
+
+def test_fungsi_terpotong_pada_batas_baris(tmp_path, monkeypatch, capsys):
+    g = _ws_dengan_artefak(tmp_path, monkeypatch)
+    monkeypatch.setattr(g, "MAX_CODE_CHARS", 30)
+    r = _fungsi_json(g, capsys, "lib/libx.so", "vec_formula")
+    assert r["ok"] is True and r["truncated"] is True
+    assert len(r["code"]) <= 30 and r["total_lines"] == 3
