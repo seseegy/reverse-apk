@@ -42,8 +42,8 @@ from .common import Findings
 
 PER_LIB_S = 240           # timeout tetap per library (4 menit); total tahap = ini x jumlah library
 MAX_LIBS = 8
-MAX_LIB_BYTES = 64 * 1024 * 1024
-MAX_DECOMPILE = 200       # fungsi didekompilasi per library (prioritas di skrip ekspor)
+MAX_LIB_BYTES = 200 * 1024 * 1024   # paritas pagar bench-ghidra (dinaikkan 22 Okt atas permintaan pemilik: 64 MB -> 200 MB)
+MAX_DECOMPILE = 1000      # fungsi didekompilasi per library (prioritas di skrip ekspor; dulu 200)
 MIN_PER_LIB_S = 30        # sisa budget di bawah ini -> library berikutnya tidak dicoba
 GRACE_S = 30              # kelonggaran di atas timeout analisis untuk start/pembacaan hasil JVM
 
