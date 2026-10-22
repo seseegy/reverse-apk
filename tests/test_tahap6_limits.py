@@ -612,7 +612,8 @@ def test_the_size_chain_is_ordered_so_a_one_gigabyte_apk_is_not_rejected_by_acci
 
 
 def test_memory_limits_were_not_raised_for_one_gigabyte_and_the_bundle_copy_cap_respects_the_worker_memory():
-    """Tahap 6 TIDAK menaikkan mem_limit (VPS 8 GB total). Salinan memfd upload paket dihitung ke memori kontainer worker: batasnya harus tetap jauh di bawah mem_limit."""
+    """Tahap 6 TIDAK menaikkan mem_limit (VPS 8 GB total). Salinan memfd upload paket dihitung ke memori kontainer worker: batasnya harus tetap jauh di bawah mem_limit.
+    Pengecualian 22 Okt 2026 atas perintah pemilik: bench 1024 -> 1536 khusus agar Ghidra di bench sanggup library 200 MB (pagar library dinaikkan di PR yang sama); jumlah seluruh mem_limit tetap dijaga <= 7 GB oleh asersi di bawah."""
     from rvcore import bundle
     body = COMPOSE.split("\nservices:\n", 1)[1].split("\nnetworks:\n", 1)[0]
     parts = re.split(r"(?m)^  ([\w-]+):[ \t]*$", body)
@@ -621,7 +622,7 @@ def test_memory_limits_were_not_raised_for_one_gigabyte_and_the_bundle_copy_cap_
         m = re.search(r"(?m)^    mem_limit: (\d+)([mg])$", parts[i + 1])
         if m:
             limits[parts[i]] = int(m.group(1)) * (1024 if m.group(2) == "g" else 1)
-    assert {k: limits[k] for k in ("web", "worker", "runner", "bench", "signer")} == {"web": 512, "worker": 512, "runner": 3072, "bench": 1024, "signer": 512}
+    assert {k: limits[k] for k in ("web", "worker", "runner", "bench", "signer")} == {"web": 512, "worker": 512, "runner": 3072, "bench": 1536, "signer": 512}
     assert sum(limits.values()) <= 7 * 1024, f"jumlah mem_limit {sum(limits.values())} MiB terlalu dekat dengan VPS 8 GB"
     assert bundle.UPLOAD_COPY_MAX_WORKER_MB * 2 <= limits["worker"]
     assert bundle.UPLOAD_COPY_MAX_RUNNER_MB <= limits["runner"] // 4
