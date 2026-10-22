@@ -242,3 +242,24 @@ def test_build_summary_shape_and_caps():
     assert s["ok"] is True and s["functions_total"] == 3 and s["jni_functions"] == ["JNI_OnLoad"]
     assert s["imports_flagged"] == ["ptrace", "dlopen"] and s["urls"] == ["https://a.invalid/x"]
     assert s["crypto_constants"] == ["aes_sbox"] and s["artifacts"]["c"] == "hasil_ai/ghidra/libx.c"
+
+
+def test_bench_ghidra_env_mengamankan_home_dan_tmpdir(tmp_path, monkeypatch):
+    # Umpan balik produksi: java.io.tmpdir bawaan (/tmp) tertutup Landlock — env Ghidra
+    # WAJIB mengarahkan user.home + tmpdir ke $HOME terkurung (scratch), dan JAVA_HOME
+    # hanya diisi dari kandidat yang berkas javanya benar ada (tidak menimpa yang ter-set).
+    g = _load_bench_ghidra()
+    env = g._ghidra_env({"HOME": "/scratch-x", "PATH": "/usr/bin"}, "/fallback")
+    assert "-Duser.home=/scratch-x" in env["JAVA_TOOL_OPTIONS"]
+    assert "-Djava.io.tmpdir=/scratch-x" in env["JAVA_TOOL_OPTIONS"]
+    env2 = g._ghidra_env({"PATH": "/usr/bin"}, "/fallback")
+    assert "-Duser.home=/fallback" in env2["JAVA_TOOL_OPTIONS"]
+    assert "-Djava.io.tmpdir=/fallback" in env2["JAVA_TOOL_OPTIONS"]
+    env3 = g._ghidra_env({"HOME": "/s", "JAVA_HOME": "/jvm/lain"}, "/fallback")
+    assert env3["JAVA_HOME"] == "/jvm/lain"
+    jvm = tmp_path / "jvm"
+    (jvm / "bin").mkdir(parents=True)
+    (jvm / "bin" / "java").touch()
+    monkeypatch.setattr(g, "JVM_CANDIDATES", (str(tmp_path / "tidak-ada"), str(jvm)))
+    env4 = g._ghidra_env({"HOME": "/s"}, "/fallback")
+    assert env4["JAVA_HOME"] == str(jvm)
