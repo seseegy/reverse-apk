@@ -48,10 +48,19 @@
         res.d.models.forEach(function (m) {
           var o = document.createElement("option");
           o.value = m.id;
-          if (m.context_window) o.label = "konteks " + Number(m.context_window).toLocaleString("id-ID") + " token";
+          var parts = [];
+          if (m.context_window) parts.push("konteks " + Number(m.context_window).toLocaleString("id-ID") + " token");
+          if (m.vision === true) parts.push("vision");
+          if (parts.length) o.label = parts.join(" · ");
           list.appendChild(o);
         });
-        status.textContent = res.d.count + " model ditemukan di router. Klik bidang model utama lalu pilih dari daftarnya, atau ketik slug persisnya.";
+        var cur = document.getElementById("f-model").value.trim();
+        var hit = res.d.models.find(function (m) { return m.id === cur; });
+        var extra = "";
+        if (hit && typeof hit.vision === "boolean") {
+          extra = " Model yang sedang terisi " + (hit.vision ? "mendukung" : "tidak mendukung") + " vision menurut router.";
+        }
+        status.textContent = res.d.count + " model ditemukan di router. Klik bidang model utama lalu pilih dari daftarnya, atau ketik slug persisnya." + extra;
       })
       .catch(function (err) {
         status.textContent = err.message || "Gagal menarik daftar model.";
