@@ -1060,6 +1060,8 @@ def analyze_native_library(ctx: ToolContext, args: dict) -> dict:
     if not summary.get("ok"):
         _ghidra_audit(ctx, {"status": "gagal", "library": name, "ms": res["duration_ms"] or ms})
         out = {"library": name, "berhasil": False, "alasan": red(str(summary.get("error") or "Ghidra gagal"))}
+        if summary.get("sebab"):
+            out["sebab"] = _clip_tail(red(str(summary["sebab"])), 1300)
         if summary.get("tail"):
             out["ekor_log"] = _clip_tail(red(str(summary["tail"])), 400)
         return out
@@ -1086,6 +1088,10 @@ def analyze_native_library(ctx: ToolContext, args: dict) -> dict:
                     "jangan menyimpulkan dari ringkasan ini saja. Berkas besar juga bisa dibaca berkeping lewat shell_run "
                     "(grep nama fungsi, lalu sed -n pada rentang barisnya). Analisis ulang library yang sama menimpa artefaknya."),
     }
+    if summary.get("mode"):
+        out["mode"] = str(summary["mode"])
+        if summary.get("catatan_mode"):
+            out["catatan"] = str(summary["catatan_mode"]) + " " + out["catatan"]
     ctx.shell_out_chars += len(json.dumps(out, ensure_ascii=False))
     _ghidra_audit(ctx, {"status": "ok", "library": name, "ms": res["duration_ms"] or ms,
                         "functions": summary.get("functions_total") or 0})
