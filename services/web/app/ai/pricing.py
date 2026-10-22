@@ -34,8 +34,24 @@ class PriceTable:
         self._vision = vision
 
     def supports_vision(self, model: str) -> bool:
-        """Model ini bisa menerima gambar? Hanya dari penanda "vision": true di ai_models.json; model tak dikenal = tidak."""
+        """Model ini bisa menerima gambar? Dari penanda "vision": true di ai_models.json, ditimpa
+        metadata router bila ada (lihat with_vision); model tak dikenal = tidak."""
         return model in self._vision
+
+    def with_vision(self, overrides: dict[str, bool]) -> "PriceTable":
+        """Salinan tabel dengan keputusan vision ditimpa `overrides` (slug -> boleh gambar).
+
+        Sumber override adalah metadata router sendiri (cache katalog di ai/settings.py): router
+        yang tahu modelnya mendukung vision atau tidak, bukan tebakan berkas statis. Slug yang
+        tidak ada di overrides mempertahankan keputusan berkas."""
+        vision = set(self._vision)
+        for slug, ok in overrides.items():
+            if ok:
+                vision.add(slug)
+            else:
+                vision.discard(slug)
+        return PriceTable(self._models, self._default, self.labels, self.chat_models,
+                          self.floor, frozenset(vision))
 
     @classmethod
     def load(cls, path: str | Path) -> "PriceTable":
