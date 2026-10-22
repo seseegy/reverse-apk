@@ -223,6 +223,43 @@ def test_bahasa_menyimpang_tercatat(tmp_path, stub_home, monkeypatch):
     assert item["language_mismatch"] == "diharapkan AARCH64:LE:64:v8A"
 
 
+def test_budget_bawaan_240_per_library(tmp_path, stub_home):
+    # Tanpa budget eksplisit: tiap library dapat jatah tetap PER_LIB_S (240 dtk).
+    apk = make_apk(tmp_path, [("lib/arm64-v8a/liba.so", 64), ("lib/arm64-v8a/libb.so", 64)])
+    work, out = tmp_path / "work", tmp_path / "out"
+    work.mkdir(); out.mkdir()
+    result = ghidra.analyze_ghidra(apk, work, out, Findings(), lambda msg: None)
+    assert ghidra.PER_LIB_S == 240
+    assert result["per_lib_s"] == 240
+    assert result["budget_s"] == 480
+    assert [i["status"] for i in result["libs"]] == ["ok", "ok"]
+
+
+# ---------------------------------------------------------------- pin image & rantai timeout
+
+def test_rantai_timeout_konsisten():
+    # Invarian .env.example: TIMEOUT_APKTOOL + TIMEOUT_JADX + TIMEOUT_ANALYZE < JOB_TIMEOUT,
+    # dan TIMEOUT_ANALYZE harus memuat seluruh jatah Ghidra (MAX_LIBS x PER_LIB_S).
+    import re
+    pipeline = (ROOT / "services" / "worker" / "pipeline.py").read_text(encoding="utf-8")
+    worker = (ROOT / "services" / "worker" / "worker.py").read_text(encoding="utf-8")
+    webconf = (ROOT / "services" / "web" / "app" / "config.py").read_text(encoding="utf-8")
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+    def grab(text, pattern):
+        m = re.search(pattern, text)
+        assert m, pattern
+        return int(m.group(1))
+
+    t_analyze = grab(pipeline, r'TIMEOUT_ANALYZE", (\d+)')
+    assert t_analyze == grab(compose, r'TIMEOUT_ANALYZE:-(\d+)')
+    job_timeouts = {grab(worker, r'JOB_TIMEOUT", "(\d+)"'), grab(webconf, r'JOB_TIMEOUT", (\d+)')}
+    job_timeouts |= set(map(int, re.findall(r'JOB_TIMEOUT: \$\{JOB_TIMEOUT:-(\d+)\}', compose)))
+    assert job_timeouts == {6300}
+    assert t_analyze >= ghidra.PER_LIB_S * ghidra.MAX_LIBS
+    assert 600 + 2400 + t_analyze < 6300
+
+
 # ---------------------------------------------------------------- pin image
 
 def test_dockerfile_pin_ghidra_dan_versi():

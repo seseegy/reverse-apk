@@ -107,5 +107,5 @@ def load_settings() -> Settings:
         zip_max_total_uncompressed=_int("ZIP_MAX_UNCOMPRESSED_MB", 3072) * MIB,
         zip_max_entry_uncompressed=_int("ZIP_MAX_ENTRY_MB", 1024) * MIB,
         zip_max_ratio=_int("ZIP_MAX_RATIO", 100),
-        job_timeout=_int("JOB_TIMEOUT", 4500),
+        job_timeout=_int("JOB_TIMEOUT", 6300),
     )
