@@ -19,7 +19,9 @@ LaunchSupport Ghidra menolak jalan bila direktori itu tidak bisa ditulis (ia men
 java_home.save di <user.home>/.config/ghidra/). Di dalam kurungan Landlock, home passwd
 (/tmp/home) tidak terjangkau; yang bisa ditulis hanya $WS dan scratch per-job (= $HOME terkurung).
 Karena itu skrip ini menyetel -Duser.home=$HOME lewat JAVA_TOOL_OPTIONS untuk JVM Ghidra:
-properti sistem itu menimpa nilai bawaan dari passwd.
+properti sistem itu menimpa nilai bawaan dari passwd. Hal yang sama berlaku untuk
+java.io.tmpdir (bawaan /tmp, tertutup Landlock): diarahkan ke $HOME juga — tanpa itu Ghidra
+bisa gagal di tengah analisis besar saat butuh berkas sementara (umpan balik AI di produksi).
 """
 
 from __future__ import annotations
@@ -46,6 +48,30 @@ _FLAGGED_IMPORTS = ("ptrace", "dlopen", "system", "popen", "mprotect")
 # e_machine ELF -> (nama arsitektur, bahasa prosesor Ghidra). Hanya little-endian (semua .so Android LE).
 ELF_MACHINES = {183: ("aarch64", "AARCH64:LE:64:v8A"), 40: ("arm", "ARM:LE:32:v7"),
                 62: ("x86-64", "x86:LE:64:default"), 3: ("x86", "x86:LE:32:default")}
+
+
+JVM_CANDIDATES = ("/usr/lib/jvm/java-21-openjdk-amd64", "/usr/lib/jvm/java-21-openjdk-arm64",
+                  "/usr/lib/jvm/default-java")
+
+
+def _ghidra_env(base, fallback_home: str) -> dict:
+    """Env untuk JVM Ghidra di dalam kurungan Landlock.
+
+    user.home DAN java.io.tmpdir diarahkan ke $HOME terkurung (scratch per-job, bisa
+    ditulis); bawaan keduanya (passwd / /tmp) tertutup Landlock. JAVA_HOME diisi dari
+    kandidat standar HANYA bila belum ter-set dan berkas javanya benar ada — penemuan
+    JDK bawaan LaunchSupport tidak pernah ditimpa tebakan.
+    """
+    env = dict(base)
+    home = env.get("HOME") or fallback_home
+    opts = f"-Duser.home={home} -Djava.io.tmpdir={home}"
+    env["JAVA_TOOL_OPTIONS"] = (env.get("JAVA_TOOL_OPTIONS", "") + " " + opts).strip()
+    if not env.get("JAVA_HOME"):
+        for cand in JVM_CANDIDATES:
+            if Path(cand, "bin", "java").is_file():
+                env["JAVA_HOME"] = cand
+                break
+    return env
 
 
 def detect_language(header: bytes) -> tuple[str, str]:
@@ -132,10 +158,8 @@ def run(arg: str) -> int:
     except OSError:
         return _emit({"ok": False, "error": "folder hasil tidak bisa dibuat di ruang kerja"})
 
-    # Atasi jebakan user.home (lihat docstring): arahkan ke $HOME terkurung (scratch per-job, bisa ditulis).
-    env = dict(os.environ)
-    home = env.get("HOME") or str(proj_dir)
-    env["JAVA_TOOL_OPTIONS"] = (env.get("JAVA_TOOL_OPTIONS", "") + f" -Duser.home={home}").strip()
+    # Atasi jebakan user.home + tmpdir (lihat docstring): arahkan ke $HOME terkurung (scratch per-job).
+    env = _ghidra_env(os.environ, str(proj_dir))
     try:                                                          # paritas pelajaran runner: buat home passwd bila bisa
         Path(pwd.getpwuid(os.getuid()).pw_dir).mkdir(parents=True, exist_ok=True)
     except (OSError, KeyError):
