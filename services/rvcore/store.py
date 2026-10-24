@@ -1225,7 +1225,7 @@ def delete_build(conn: sqlite3.Connection, build_id: int) -> bool:
 
 # ---------------------------------------------------------------- pengaturan AI (halaman Pengaturan AI)
 
-AI_SETTING_KEYS = ("base_url", "api_key", "model", "model_pro", "fallback_model")
+AI_SETTING_KEYS = ("base_url", "api_key", "model", "model_pro", "fallback_model", "models_cache")
 
 
 def get_ai_settings(conn: sqlite3.Connection) -> dict[str, str]:

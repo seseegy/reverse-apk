@@ -37,9 +37,16 @@ def _load_page() -> dict[str, Any]:
     with closing(db()) as conn:
         cfg = ai_settings.effective_config(conn)
         values = ai_settings.read_settings(conn)
+        cache = {m["id"]: m for m in ai_settings.read_models_cache(conn)}
+
+    def vis(slug: str):
+        m = cache.get(slug or "")
+        return m.get("vision") if m and isinstance(m.get("vision"), bool) else None
+
     return {"values": values, "key_masked": ai_settings.mask_key(values["api_key"]),
             "key_set": bool(values["api_key"]), "enabled": cfg.enabled,
-            "missing": ai_settings.missing_labels(cfg)}
+            "missing": ai_settings.missing_labels(cfg),
+            "model_vision": vis(values["model"]), "pro_vision": vis(values["model_pro"])}
 
 
 def _save(values: dict[str, str]) -> dict[str, str]:
@@ -51,6 +58,18 @@ def _stored_key_and_base() -> tuple[str, str]:
     with closing(db()) as conn:
         s = ai_settings.read_settings(conn)
     return s["base_url"], s["api_key"]
+
+
+def _fetch_and_cache(base: str, key: str) -> list[dict]:
+    """Tarik katalog dari router lalu simpan sebagai cache metadata (vision dsb.) di DB.
+    Kegagalan menyimpan cache tidak menggagalkan hasil tarikan."""
+    models = ai_settings.fetch_models(base, key)
+    try:
+        with closing(db()) as conn:
+            ai_settings.save_models_cache(conn, models)
+    except Exception:  # noqa: BLE001 - cache adalah pelengkap
+        pass
+    return models
 
 
 @router.get("/pengaturan/ai", include_in_schema=False)
@@ -118,7 +137,7 @@ async def ai_settings_models(request: Request,
     base = base_url.strip() or stored_base
     key = api_key.strip() or stored_key
     try:
-        models = await run_in_threadpool(ai_settings.fetch_models, base, key)
+        models = await run_in_threadpool(_fetch_and_cache, base, key)
     except (ConfigError, ai_settings.SettingsError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except Exception:  # noqa: BLE001 - jangan bocorkan rincian internal ke browser

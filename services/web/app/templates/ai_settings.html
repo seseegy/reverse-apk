@@ -77,6 +77,9 @@
           </button>
         </div>
         <p class="hint muted" id="models-status" aria-live="polite">Klik <em>Muat daftar model</em> untuk menarik daftar model yang benar-benar tersedia di router Anda, lalu pilih dari daftar di bidang ini — atau ketik slug persisnya.</p>
+        {% if model_vision is not none %}
+        <p class="hint">Menurut metadata router: model ini <strong>{{ 'mendukung' if model_vision else 'tidak mendukung' }} vision</strong> (gambar bisa {{ 'dikirim' if model_vision else 'ditolak' }} di chat).</p>
+        {% endif %}
         <datalist id="ai-model-list"></datalist>
       </div>
 
@@ -86,6 +89,9 @@
           <label for="f-model-pro">Model kuat (bisa dipilih per pesan di chat)</label>
           <input type="text" id="f-model-pro" name="model_pro" value="{{ values.model_pro }}" class="mono" list="ai-model-list"
                  placeholder="Kosongkan bila tidak dipakai" autocomplete="off" spellcheck="false">
+          {% if pro_vision is not none %}
+          <p class="hint">Menurut metadata router: model ini <strong>{{ 'mendukung' if pro_vision else 'tidak mendukung' }} vision</strong>.</p>
+          {% endif %}
         </div>
         <div class="field">
           <label for="f-fallback-model">Model cadangan (dipakai bila model utama tidak tersedia)</label>

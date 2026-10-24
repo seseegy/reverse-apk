@@ -527,13 +527,18 @@ async def analysis_static(request: Request, analysis_id: AnalysisId,
 
 def _ai():
     """(cfg, prices, error). Koneksi AI dibaca dari Pengaturan AI (DB) dan dibaca ulang tiap
-    permintaan, jadi perubahan di halaman itu langsung berlaku tanpa restart."""
+    permintaan, jadi perubahan di halaman itu langsung berlaku tanpa restart. Keputusan vision
+    ditimpa metadata router (cache katalog) bila router menyatakannya — ai_models.json cadangan."""
     try:
         with closing(db()) as conn:
             cfg = ai_settings.effective_config(conn)
+            prices = PriceTable.load(cfg.models_file)
+            overrides = ai_settings.vision_overrides(conn)
+            if overrides:
+                prices = prices.with_vision(overrides)
     except ConfigError as exc:
         return None, None, str(exc)
-    return cfg, PriceTable.load(cfg.models_file), None
+    return cfg, prices, None
 
 
 def _allowed_models(cfg, prices) -> list[dict[str, str]]:

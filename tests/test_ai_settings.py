@@ -113,8 +113,14 @@ class _RouterHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'{"error":"unauthorized"}')
             return
-        body = json.dumps({"data": [{"id": "model-a", "context_window": 200000, "max_output_tokens": 8192},
-                                     {"id": "model-b"}, {"tanpa_id": True}]}).encode()
+        body = json.dumps({"data": [
+            {"id": "model-a", "context_window": 200000, "max_output_tokens": 8192,
+             "capabilities": ["chat", "vision"]},
+            {"id": "model-b", "capabilities": ["chat"]},
+            {"id": "model-c", "capabilities": {"vision": True}},
+            {"id": "model-d", "architecture": {"input_modalities": ["text", "image"]}},
+            {"id": "model-e"},
+            {"tanpa_id": True}]}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -135,8 +141,13 @@ def fake_router():
 
 def test_fetch_models_mempertahankan_metadata(fake_router):
     models = ai_settings.fetch_models(fake_router, "kunci-uji")
-    assert models == [{"id": "model-a", "context_window": 200000, "max_output_tokens": 8192},
-                      {"id": "model-b"}]
+    assert models == [
+        {"id": "model-a", "context_window": 200000, "max_output_tokens": 8192, "vision": True},
+        {"id": "model-b", "vision": False},          # capabilities ada tanpa vision = pernyataan "tidak"
+        {"id": "model-c", "vision": True},           # bentuk dict
+        {"id": "model-d", "vision": True},           # bentuk architecture.input_modalities
+        {"id": "model-e"},                           # router diam = tidak ada kunci vision (tidak tahu)
+    ]
 
 
 def test_fetch_models_kunci_ditolak_dan_base_kosong(fake_router):
@@ -195,10 +206,41 @@ def test_endpoint_models_dari_router(client, seeded, fake_router):
         "csrf": seeded.csrf, "base_url": fake_router, "api_key": "kunci-uji"})
     assert r.status_code == 200
     d = r.json()
-    assert d["count"] == 2 and d["models"][0]["id"] == "model-a"
+    assert d["count"] == 5 and d["models"][0]["id"] == "model-a" and d["models"][0]["vision"] is True
+    with closing(context.db()) as conn:      # tarikan sukses menyimpan cache katalog di DB
+        cache = ai_settings.read_models_cache(conn)
+    assert {m["id"] for m in cache} == {"model-a", "model-b", "model-c", "model-d", "model-e"}
     r = client.post("/pengaturan/ai/models", data={
         "csrf": "salah", "base_url": fake_router, "api_key": "kunci-uji"})
     assert r.status_code == 403
     r = client.post("/pengaturan/ai/models", data={
         "csrf": seeded.csrf, "base_url": fake_router, "api_key": "kunci-salah"})
     assert r.status_code == 400 and "ditolak" in r.json()["error"]
+
+
+# ================================================================================ vision dari metadata router
+def test_cache_vision_dan_override_mengalahkan_tebakan_json():
+    import json as _json
+    from pathlib import Path as _Path
+    catalog = _json.loads((_Path(__file__).resolve().parent.parent / "config" / "ai_models.json").read_text())
+    json_vision_slug = next(s for s, spec in catalog["models"].items() if spec.get("vision"))
+    with closing(context.db()) as conn:
+        with tx(conn):
+            store.save_ai_settings(conn, {"base_url": "http://127.0.0.1:9/v1", "api_key": "kunci-x",
+                                          "model": "model-tanpa-json", "model_pro": "", "fallback_model": ""})
+        ai_settings.save_models_cache(conn, [{"id": "model-tanpa-json", "vision": True},
+                                             {"id": json_vision_slug, "vision": False}])
+    with closing(context.db()) as conn:
+        assert ai_settings.vision_overrides(conn) == {"model-tanpa-json": True, json_vision_slug: False}
+    _cfg, prices, err = _ai()
+    assert err is None
+    assert prices.supports_vision("model-tanpa-json") is True    # router bilang bisa, JSON diam -> bisa
+    assert prices.supports_vision(json_vision_slug) is False     # router bilang tidak, JSON bilang bisa -> router menang
+
+
+def test_tanpa_cache_keputusan_vision_dari_json_saja():
+    with closing(context.db()) as conn, tx(conn):
+        store.save_ai_settings(conn, {"base_url": "http://127.0.0.1:9/v1", "api_key": "kunci-x",
+                                      "model": "model-tanpa-json", "model_pro": "", "fallback_model": ""})
+    _cfg, prices, err = _ai()
+    assert err is None and prices.supports_vision("model-tanpa-json") is False   # perilaku lama utuh
