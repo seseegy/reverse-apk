@@ -222,7 +222,6 @@ def test_endpoint_models_dari_router(client, seeded, fake_router):
 def test_cache_vision_dan_override_mengalahkan_tebakan_json():
     import json as _json
     from pathlib import Path as _Path
-    from app.ai.pricing import PriceTable
     catalog = _json.loads((_Path(__file__).resolve().parent.parent / "config" / "ai_models.json").read_text())
     json_vision_slug = next(s for s, spec in catalog["models"].items() if spec.get("vision"))
     with closing(context.db()) as conn:
