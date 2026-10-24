@@ -14,6 +14,7 @@ import importlib.machinery
 import importlib.util
 import json
 import sys
+import types
 from dataclasses import replace
 from pathlib import Path
 
@@ -375,3 +376,93 @@ def test_fungsi_terpotong_pada_batas_baris(tmp_path, monkeypatch, capsys):
     r = _fungsi_json(g, capsys, "lib/libx.so", "vec_formula")
     assert r["ok"] is True and r["truncated"] is True
     assert len(r["code"]) <= 30 and r["total_lines"] == 3
+
+
+# ================================================================================ sebab kegagalan + retry impor-saja
+FAIL_LOG = ("INFO  Menggunakan proyek sementara (HeadlessAnalyzer)\n"
+            "ERROR Abort: java.lang.OutOfMemoryError: Java heap space (HeadlessAnalyzer)\n"
+            "java.lang.OutOfMemoryError: Java heap space\n"
+            "\tat ghidra.program.model.listing.CodeUnitInsertionQueue.add(CodeUnitInsertionQueue.java:12)\n"
+            "\tat app.util.headless.AnalyzeHeadless.launch(AnalyzeHeadless.java:198)\n"
+            "ERROR REPORT: Import failed for file: file:///data/bench/35/lib/libgame.so (HeadlessAnalyzer)\n")
+
+
+def test_sebab_ekstrak_baris_penyebab_bukan_tumpukan():
+    g = _load_bench_ghidra()
+    sebab = g._sebab(FAIL_LOG)
+    assert "OutOfMemoryError" in sebab and "Import failed" in sebab
+    assert "AnalyzeHeadless.launch" not in sebab          # bingkai tumpukan dibuang
+    assert g._sebab("INFO semua bersih\nINFO selesai\n") == ""
+    assert len(g._tail(FAIL_LOG)) <= 1000
+
+
+def _rig_run(tmp_path, monkeypatch, fake_run):
+    """Siapkan bench-ghidra untuk run() penuh: WS + library ELF + Ghidra palsu."""
+    import types as _t
+    g = _load_bench_ghidra()
+    home = tmp_path / "ghidra"
+    (home / "support").mkdir(parents=True)
+    (home / "support" / "analyzeHeadless").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(g, "GHIDRA_HOME", home)
+    monkeypatch.setattr(g, "subprocess", _t.SimpleNamespace(run=fake_run, PIPE=-1, STDOUT=-2))
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "libx.so").write_bytes(_elf(183))
+    monkeypatch.setenv("WS", str(tmp_path))
+    return g
+
+
+def _emitted(capsys):
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip().startswith("{")]
+    return json.loads(lines[-1])
+
+
+def test_run_gagal_total_memuat_sebab_dan_mencoba_retry(tmp_path, monkeypatch, capsys):
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return types.SimpleNamespace(stdout=FAIL_LOG)
+
+    g = _rig_run(tmp_path, monkeypatch, fake_run)
+    assert g.run("lib/libx.so") == 0
+    out = _emitted(capsys)
+    assert out["ok"] is False and "OutOfMemoryError" in out["sebab"]
+    assert len(out["tail"]) <= 1000
+    assert len(calls) == 2 and "-noanalysis" in calls[1]      # kegagalan cepat → retry impor-saja dicoba
+
+
+def test_run_retry_impor_saja_berhasil_ditandai(tmp_path, monkeypatch, capsys):
+    def fake_run(cmd, **kw):
+        if "-noanalysis" not in cmd:
+            return types.SimpleNamespace(stdout=FAIL_LOG)
+        i = cmd.index("GhidraExport.java")
+        Path(cmd[i + 1]).write_text(json.dumps({"language": "AARCH64:LE:64:v8A", "image_base": "00100000",
+                                                "functions": [], "imports": ["printf"], "strings": [],
+                                                "crypto_constants": []}), encoding="utf-8")
+        Path(cmd[i + 2]).write_text("\n/* ==== 00101000 simbol_saja ==== */\nvoid simbol_saja() {}\n", encoding="utf-8")
+        return types.SimpleNamespace(stdout="INFO impor selesai\n")
+
+    g = _rig_run(tmp_path, monkeypatch, fake_run)
+    assert g.run("lib/libx.so") == 0
+    out = _emitted(capsys)
+    assert out["ok"] is True and out["mode"] == "impor-saja"
+    assert "TANPA auto-analisis" in out["catatan_mode"] and "OutOfMemoryError" in out["catatan_mode"]
+    assert out["imports_total"] == 1
+
+
+def test_failure_summary_meneruskan_sebab_ke_ai(rig):
+    aid = rig.analysis_with()
+    rig.bench.behave = behave_run(ok_result({"ok": False, "error": "Ghidra gagal menganalisis library ini",
+                                             "sebab": "java.lang.OutOfMemoryError: Java heap space",
+                                             "tail": "ekor"}))
+    ok, res = call(ctx_for(rig, aid), "analyze_native_library", library="lib/libgame.so")
+    assert ok and res["berhasil"] is False and "OutOfMemoryError" in res["sebab"]
+
+
+def test_success_summary_mode_impor_saja_sampai_ke_ai(rig):
+    aid = rig.analysis_with()
+    rig.bench.behave = behave_run(ok_result(dict(SUMMARY, mode="impor-saja",
+                                                 catatan_mode="Analisis penuh gagal (OOM), hasil parsial.")))
+    ok, res = call(ctx_for(rig, aid), "analyze_native_library", library="lib/libloader.so")
+    assert ok and res["berhasil"] is True and res["mode"] == "impor-saja"
+    assert res["catatan"].startswith("Analisis penuh gagal")

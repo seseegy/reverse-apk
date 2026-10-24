@@ -47,6 +47,7 @@ OUT_SUBDIR = Path("hasil_ai") / "ghidra"
 MAX_LIB_BYTES = 200 * 1024 * 1024         # sama dengan pagar analyzer runner (dinaikkan 22 Okt atas permintaan pemilik: 64 MB -> 200 MB)
 MAX_DECOMPILE = 1000                      # fungsi didekompilasi per library (prioritas di GhidraExport.java; dulu 200)
 ANALYSIS_TIMEOUT_PER_FILE = 240           # detik; pagat luar ditegakkan bench (BENCH_GHIDRA_MAX_TIMEOUT)
+RETRY_MAX_ELAPSED_S = 100                 # retry impor-saja hanya bila kegagalan pertama ≤ ini (detik)
 NAME_RE = re.compile(r"^[A-Za-z0-9._\-/]+$")
 _URL_RE = re.compile(r"https?://[^\s\"'<>]{4,200}")
 _FLAGGED_IMPORTS = ("ptrace", "dlopen", "system", "popen", "mprotect")
@@ -133,6 +134,29 @@ def build_summary(data: dict, lib_name: str, stem: str, decompiled: int, duratio
         "artifacts": {"json": f"{OUT_SUBDIR.as_posix()}/{stem}.json", "c": f"{OUT_SUBDIR.as_posix()}/{stem}.c"},
         "duration_s": round(duration_s, 1),
     }
+
+
+# Penanda baris diagnostik di log Ghidra: baris inilah yang menyebut SEBAB kegagalan
+# (kelas pengecualian + pesan loader), sedangkan ekor log biasa cuma memuat tumpukan panggil.
+_SEBAB_MARKERS = ("outofmemoryerror", "import failed", "caused by", "loadexception",
+                  "loaderexception", "unable to load", "unsupported", "java.lang.")
+
+
+def _sebab(output: str) -> str:
+    """Ekstrak baris-baris penyebab dari log Ghidra (maks 6 baris terakhir, ±1200 char)."""
+    picked: list[str] = []
+    for ln in output.splitlines():
+        s = ln.strip()
+        if not s or s.startswith("at "):
+            continue                                  # lewati bingkai tumpukan (stack frame)
+        if any(m in s.lower() for m in _SEBAB_MARKERS) and s not in picked:
+            picked.append(s)
+    return " | ".join(picked[-6:])[:1200]
+
+
+def _tail(output: str) -> str:
+    """Ekor log diratakan satu baris (±1000 char) — konteks tambahan di samping sebab."""
+    return " | ".join(ln.strip() for ln in output.splitlines() if ln.strip())[-1000:]
 
 
 def _emit(obj: dict) -> int:
@@ -238,32 +262,68 @@ def run(arg: str) -> int:
            "-processor", language, "-scriptPath", str(SCRIPT_DIR),
            "-postScript", "GhidraExport.java", str(json_out), str(c_out), str(MAX_DECOMPILE),
            "-deleteProject", "-analysisTimeoutPerFile", str(ANALYSIS_TIMEOUT_PER_FILE)]
+
+    def _invoke(extra: list[str]) -> str:
+        proc = subprocess.run(cmd + extra, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, env=env)
+        return proc.stdout or ""
+
+    def _read_export():
+        if not json_out.is_file():
+            return None
+        try:
+            return json.loads(json_out.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
     t0 = time.monotonic()
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
-        output = proc.stdout or ""
+        output = _invoke([])
+        data = _read_export()
+        degraded = False
+        sebab_awal = ""
+        if data is None and time.monotonic() - t0 <= RETRY_MAX_ELAPSED_S:
+            # Percobaan kedua TANPA auto-analisis: impor jauh lebih ringan daripada impor+analisis
+            # (yang lazim kehabisan heap pada library raksasa). Hasilnya parsial — fungsi dari tabel
+            # simbol saja — tapi string/impor tetap terbaca, jauh lebih berguna daripada gagal total.
+            # Hanya dicoba bila kegagalan pertama CEPAT; kegagalan lambat berarti pagat waktu
+            # panggilan (daemon) hampir habis dan percobaan kedua tidak akan sempat selesai.
+            sebab_awal = _sebab(output)
+            for stale in (json_out, c_out):
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+            output = _invoke(["-noanalysis"])
+            data = _read_export()
+            degraded = data is not None
     except OSError as exc:
         return _emit({"ok": False, "error": f"analyzeHeadless tidak bisa dimulai ({type(exc).__name__})"})
     finally:
         shutil.rmtree(proj_dir, ignore_errors=True)
     duration = time.monotonic() - t0
 
-    data = None
-    if json_out.is_file():
-        try:
-            data = json.loads(json_out.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            data = None
     if data is None:
-        tail = " | ".join(ln.strip() for ln in output.splitlines() if ln.strip())[-300:]
-        return _emit({"ok": False, "error": "Ghidra gagal menganalisis library ini", "tail": tail})
+        fail = {"ok": False, "error": "Ghidra gagal menganalisis library ini", "tail": _tail(output)}
+        sebab = _sebab(output)
+        if sebab:
+            fail["sebab"] = sebab
+        return _emit(fail)
     decompiled = 0
     if c_out.is_file():
         try:
             decompiled = c_out.read_text(encoding="utf-8", errors="replace").count("\n/* ==== ")
         except OSError:
             decompiled = 0
-    return _emit(build_summary(data, target.name, stem, decompiled, duration))
+    summary = build_summary(data, target.name, stem, decompiled, duration)
+    if degraded:
+        summary["mode"] = "impor-saja"
+        summary["catatan_mode"] = (
+            "Analisis penuh gagal untuk library ini"
+            + (f" ({sebab_awal[:200]})" if sebab_awal else "")
+            + ", jadi hasil ini dari impor TANPA auto-analisis: fungsi hanya dari tabel simbol, "
+              "xref dan dekompilasi sangat terbatas. String, impor, dan metadata tetap sah.")
+    return _emit(summary)
 
 
 def main(argv: list[str]) -> int:
